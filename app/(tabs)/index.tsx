@@ -1,98 +1,218 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React, { useRef, useState } from "react";
+import {
+  ScrollView,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import { SafeAreaView } from "react-native-safe-area-context";
+import SectionCard from "../../components/SectionCard";
+
+const BACKEND_URL = "http://192.168.40.236:8000";
 
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  const [messages, setMessages] = useState<any[]>([]);
+  const [input, setInput] = useState("");
+  const scrollRef = useRef<ScrollView>(null);
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const parseSections = (text: string) => {
+    if (!text.includes("##")) return null;
+
+    const parts = text.split("## ").filter(Boolean);
+
+    return parts.map((p) => {
+      const lines = p.split("\n");
+      return {
+        title: lines[0].trim(),
+        content: lines.slice(1).join("\n").trim(),
+      };
+    });
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim()) return;
+
+    const userMsg = input;
+    setInput("");
+
+    setMessages((prev) => [...prev, { type: "user", text: userMsg }]);
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: userMsg }),
+      });
+
+      const data = await res.json();
+      const text = data.message || "";
+
+      const sections = parseSections(text);
+
+      if (sections) {
+        setMessages((prev) => [
+          ...prev,
+          ...sections.map((s) => ({
+            type: "section",
+            title: s.title,
+            content: s.content,
+          })),
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { type: "joy", text },
+        ]);
+      }
+    } catch (e) {
+      setMessages((prev) => [
+        ...prev,
+        { type: "error", text: "Connection error" },
+      ]);
+    }
+  };
+
+  return (
+    <SafeAreaView
+      style={{
+        flex: 1,
+        backgroundColor: "#020617",
+      }}
+    >
+      <View
+        style={{
+          flex: 1,
+          paddingHorizontal: 16,
+          paddingBottom: 10,
+        }}
+      >
+        <View style={{ paddingTop: 6, paddingBottom: 14 }}>
+          <Text style={{ fontSize: 20 }}>
+            <Text style={{ color: "#FFFFFF" }}>FeedSoul</Text>
+            <Text style={{ color: "#FFD06A", fontWeight: "600" }}>Joy</Text>
+            <Text style={{ color: "#9CA3AF" }}> · Lifestyle</Text>
+          </Text>
+        </View>
+
+        <ScrollView
+          ref={scrollRef}
+          style={{ flex: 1, marginBottom: 10 }}
+          onContentSizeChange={() =>
+            scrollRef.current?.scrollToEnd({ animated: true })
+          }
+        >
+          {messages.map((m, i) => {
+            if (m.type === "user") {
+              return (
+                <View
+                  key={i}
+                  style={{
+                    alignSelf: "flex-end",
+                    backgroundColor: "#DCF8C6",
+                    padding: 12,
+                    borderRadius: 14,
+                    marginVertical: 6,
+                    maxWidth: "85%",
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: "#111827",
+                      fontSize: 15,
+                      lineHeight: 22,
+                    }}
+                  >
+                    {m.text}
+                  </Text>
+                </View>
+              );
+            }
+
+            if (m.type === "joy") {
+              return (
+                <View
+                  key={i}
+                  style={{
+                    alignSelf: "flex-start",
+                    backgroundColor: "#071427",
+                    padding: 12,
+                    borderRadius: 14,
+                    marginVertical: 6,
+                    maxWidth: "85%",
+                    borderWidth: 1,
+                    borderColor: "rgba(212,168,67,0.08)",
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: "#FFFFFF",
+                      fontSize: 15,
+                      lineHeight: 22,
+                    }}
+                  >
+                    {m.text}
+                  </Text>
+                </View>
+              );
+            }
+
+            if (m.type === "section") {
+              return (
+                <SectionCard
+                  key={i}
+                  title={m.title}
+                  content={m.content}
+                />
+              );
+            }
+
+            if (m.type === "error") {
+              return (
+                <Text key={i} style={{ color: "red" }}>
+                  {m.text}
+                </Text>
+              );
+            }
+
+            return null;
+          })}
+        </ScrollView>
+
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            backgroundColor: "#071427",
+            borderRadius: 14,
+            padding: 6,
+          }}
+        >
+          <TextInput
+            value={input}
+            onChangeText={setInput}
+            placeholder="Ask something..."
+            placeholderTextColor="#9CA3AF"
+            style={{
+              flex: 1,
+              color: "#FFFFFF",
+              padding: 10,
+            }}
+          />
+          <TouchableOpacity
+            onPress={sendMessage}
+            style={{
+              backgroundColor: "#FFD06A",
+              paddingHorizontal: 14,
+              paddingVertical: 10,
+              borderRadius: 10,
+            }}
+          >
+            <Text style={{ color: "#000", fontWeight: "600" }}>Send</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
-  },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
-  },
-});
