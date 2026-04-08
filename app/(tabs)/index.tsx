@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -10,59 +11,152 @@ import {
   TouchableWithoutFeedback,
   View,
 } from "react-native";
-
 import { SafeAreaView } from "react-native-safe-area-context";
 import ProfileStrip from "../../components/ProfileStrip";
 import QuickChips from "../../components/QuickChips";
 import SectionCard from "../../components/SectionCard";
 
-const BACKEND_URL = "http://192.168.40.236:8000";
+const BACKEND_URL = "http://192.168.40.55:8000";
+
+/*
+🎨 ===================== COLOR SYSTEM =====================
+
+👉 CHANGE COLORS HERE ONLY 👇
+
+--- CURRENT (balanced dark) ---
+*/
+
+const COLORS = {
+  background: "#0B0F14",
+  surface: "#121821",
+  surfaceAlt: "#071427",
+
+  textPrimary: "#FFFFFF",
+  textSecondary: "#9CA3AF",
+  textDark: "#111827",
+
+  accent: "#FFD06A",
+  error: "#EF4444",
+
+  userBubble: "#DCF8C6",
+};
+
+/*
+--- OPTION 1: PREMIUM DARK ---
+background: "#080C10"
+surface: "#10161D"
+surfaceAlt: "#0A1018"
+accent: "#EAB308"
+
+--- OPTION 2: PURPLE MODERN ---
+background: "#0B0F14"
+surface: "#1A1630"
+surfaceAlt: "#120F24"
+accent: "#8B5CF6"
+
+--- OPTION 3: GREEN HEALTH (your app theme?) ---
+background: "#0B0F14"
+surface: "#112018"
+surfaceAlt: "#0A1510"
+accent: "#22C55E"
+
+--- OPTION 4: BLUE CLEAN ---
+background: "#0B0F14"
+surface: "#131A24"
+surfaceAlt: "#0C131C"
+accent: "#3B82F6"
+
+--- OPTION 5: SOFT GREY ---
+background: "#111827"
+surface: "#1F2937"
+surfaceAlt: "#111827"
+accent: "#F59E0B"
+*/
+
+type Section = { title: string; content: string };
+
+type QueryBlock = {
+  id: string;
+  query: string;
+  status: "loading" | "complete" | "error";
+  sections?: Section[];
+  rawText?: string;
+};
 
 export default function HomeScreen() {
-  const [messages, setMessages] = useState<any[]>([]);
+  const [blocks, setBlocks] = useState<QueryBlock[]>([]);
   const [input, setInput] = useState("");
 
   const scrollRef = useRef<ScrollView>(null);
+  const lockRef = useRef(false);
+  const blockRefs = useRef<Record<string, View | null>>({});
+  const lastScrollIdRef = useRef<string | null>(null);
 
-  const parseSections = (text: string) => {
-    if (!text || typeof text !== "string") return null;
-    if (!text.includes("##")) return null;
+  const parseSections = (text: string): Section[] | null => {
+    if (!text || !text.includes("##")) return null;
+    return text
+      .split("## ")
+      .filter(Boolean)
+      .map((p) => {
+        const lines = p.split("\n");
+        return {
+          title: String(lines[0] || "").trim(),
+          content: String(lines.slice(1).join("\n") || "").trim(),
+        };
+      });
+  };
 
-    return text.split("## ").filter(Boolean).map((p) => {
-      const lines = p.split("\n");
-      return {
-        title: String(lines[0] || "").trim(),
-        content: String(lines.slice(1).join("\n") || "").trim(),
-      };
+  const scrollToBlock = (id: string) => {
+    requestAnimationFrame(() => {
+      const block = blockRefs.current[id];
+      const scrollView = scrollRef.current;
+      if (!block || !scrollView) return;
+
+      block.measureLayout(
+        scrollView,
+        (x, y) => {
+          scrollView.scrollTo({
+            y: Math.max(0, y - 20),
+            animated: true,
+          });
+        },
+        () => {}
+      );
     });
   };
 
-  const scrollToBottom = () => {
-    setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    }, 100);
-  };
-
   const sendMessage = async (override?: string) => {
-    const userMsg = (override ?? input).trim();
-    if (!userMsg) return;
+    if (lockRef.current) return;
+    lockRef.current = true;
 
-    setInput("");
+    const query = override ? override.trim() : input.trim();
+    if (!query) {
+      lockRef.current = false;
+      return;
+    }
 
-    setMessages((prev) => [
-      ...prev,
-      { type: "user", text: userMsg },
-    ]);
+    Keyboard.dismiss();
+    requestAnimationFrame(() => setInput(""));
+
+    const id = `${Date.now()}-${Math.random()}`;
+    lastScrollIdRef.current = id;
+
+    setBlocks((prev) => [...prev, { id, query, status: "loading" }]);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollToBlock(id);
+      });
+    });
 
     try {
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: userMsg }),
+        body: JSON.stringify({ query }),
       });
 
       const data = await res.json();
-
       const text =
         typeof data.message === "string"
           ? data.message
@@ -70,167 +164,180 @@ export default function HomeScreen() {
 
       const sections = parseSections(text);
 
-      if (sections) {
-        setMessages((prev) => [
-          ...prev,
-          ...sections.map((s) => ({
-            type: "section",
-            title: s.title,
-            content: s.content,
-          })),
-        ]);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          { type: "joy", text },
-        ]);
-      }
+      setBlocks((prev) => {
+        const updated = prev.map((b) =>
+          b.id === id
+            ? {
+                ...b,
+                status: "complete",
+                sections: sections ?? undefined,
+                rawText: sections ? undefined : text,
+              }
+            : b
+        );
 
-      scrollToBottom(); // ✅ only after response
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            scrollToBlock(id);
+          });
+        });
 
-    } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { type: "error", text: "Connection error" },
-      ]);
+        return updated;
+      });
+    } catch {
+      setBlocks((prev) =>
+        prev.map((b) =>
+          b.id === id ? { ...b, status: "error" } : b
+        )
+      );
+    } finally {
+      lockRef.current = false;
     }
   };
 
-  const handleChip = (value: any) => {
-    const safe = typeof value === "string" ? value : String(value);
-    sendMessage(safe);
+  const handleChip = (value: string) => {
+    setInput("");
+    sendMessage(value);
   };
 
+  const isLoading = blocks.some((b) => b.status === "loading");
+
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#0B1220" }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.background }}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={{ flex: 1, backgroundColor: COLORS.background }}>
 
-      {/* HEADER */}
-      <View style={{ paddingHorizontal: 16, paddingTop: 6, paddingBottom: 10 }}>
-        <ProfileStrip />
+          {/* HEADER */}
+          <View style={{ paddingHorizontal: 16, paddingTop: 2, paddingBottom: 6 }}>
+            <ProfileStrip />
 
-        <Text style={{ fontSize: 20 }}>
-          <Text style={{ color: "#FFFFFF" }}>FeedSoul</Text>
-          <Text style={{ color: "#FFD06A", fontWeight: "600" }}>Joy</Text>
-          <Text style={{ color: "#9CA3AF" }}> · Lifestyle</Text>
-        </Text>
+            <Text style={{ fontSize: 20 }}>
+              <Text style={{ color: COLORS.textPrimary }}>FeedSoul</Text>
+              <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Joy</Text>
+              <Text style={{ color: COLORS.textSecondary }}> · Lifestyle</Text>
+            </Text>
 
-        <QuickChips onSelect={handleChip} />
-      </View>
+            <View style={{ marginTop: 4, opacity: isLoading ? 0.5 : 1 }}>
+              <QuickChips onSelect={handleChip} />
+            </View>
+          </View>
 
-      {/* MAIN */}
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={90}
-      >
-        <View style={{ flex: 1 }}>
-
-          {/* CHAT */}
-          <ScrollView
-            ref={scrollRef}
+          {/* MAIN */}
+          <KeyboardAvoidingView
             style={{ flex: 1 }}
-            contentContainerStyle={{
-              flexGrow: 1,            // 🔥 CRITICAL
-              paddingHorizontal: 16,
-              paddingTop: 10,
-              paddingBottom: 120,
-            }}
-            keyboardShouldPersistTaps="always"
-            contentOffset={{ y: 0 }}   // 🔥 start at top
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            keyboardVerticalOffset={80}
           >
-            {messages.map((m, i) => {
-              if (m.type === "user") {
-                return (
-                  <View key={i} style={{
-                    alignSelf: "flex-end",
-                    backgroundColor: "#DCF8C6",
-                    padding: 12,
-                    borderRadius: 14,
-                    marginVertical: 6,
-                    maxWidth: "80%",
-                  }}>
-                    <Text style={{ color: "#111827" }}>{m.text}</Text>
+            <View style={{ flex: 1 }}>
+              <ScrollView
+                ref={scrollRef}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{
+                  backgroundColor: COLORS.background,
+                  paddingHorizontal: 16,
+                  paddingTop: 6,
+                  paddingBottom: 100,
+                }}
+                onContentSizeChange={() => {
+                  if (lastScrollIdRef.current) {
+                    scrollToBlock(lastScrollIdRef.current);
+                  }
+                }}
+              >
+                {blocks.map((block) => (
+                  <View
+                    key={block.id}
+                    ref={(ref) => {
+                      if (ref) blockRefs.current[block.id] = ref;
+                      else delete blockRefs.current[block.id];
+                    }}
+                  >
+                    {/* USER */}
+                    <View
+                      style={{
+                        alignSelf: "flex-end",
+                        backgroundColor: COLORS.userBubble,
+                        paddingVertical: 6,
+                        paddingHorizontal: 10,
+                        borderRadius: 14,
+                        marginVertical: 3,
+                        maxWidth: "80%",
+                      }}
+                    >
+                      <Text style={{ color: COLORS.textDark }}>{block.query}</Text>
+                    </View>
+
+                    {/* LOADING */}
+                    {block.status === "loading" && (
+                      <View style={{ padding: 10 }}>
+                        <ActivityIndicator color={COLORS.accent} />
+                      </View>
+                    )}
+
+                    {/* ERROR */}
+                    {block.status === "error" && (
+                      <Text style={{ color: COLORS.error }}>Connection error</Text>
+                    )}
+
+                    {/* SECTIONS */}
+                    {block.status === "complete" &&
+                      block.sections?.map((s, i) => (
+                        <SectionCard key={i} title={s.title} content={s.content} />
+                      ))}
+
+                    {/* RAW */}
+                    {block.status === "complete" && block.rawText && (
+                      <View
+                        style={{
+                          backgroundColor: COLORS.surfaceAlt,
+                          padding: 12,
+                          borderRadius: 14,
+                          marginVertical: 6,
+                        }}
+                      >
+                        <Text style={{ color: COLORS.textPrimary }}>{block.rawText}</Text>
+                      </View>
+                    )}
                   </View>
-                );
-              }
+                ))}
+              </ScrollView>
 
-              if (m.type === "joy") {
-                return (
-                  <View key={i} style={{
-                    alignSelf: "flex-start",
-                    backgroundColor: "#071427",
-                    padding: 12,
-                    borderRadius: 14,
-                    marginVertical: 6,
-                    maxWidth: "85%",
-                  }}>
-                    <Text style={{ color: "#FFFFFF" }}>{m.text}</Text>
-                  </View>
-                );
-              }
-
-              if (m.type === "section") {
-                return (
-                  <SectionCard key={i} title={m.title} content={m.content} />
-                );
-              }
-
-              return null;
-            })}
-          </ScrollView>
-
-          {/* INPUT */}
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-            <View style={{
-              position: "absolute",
-              left: 0,
-              right: 0,
-              bottom: 0,
-              paddingHorizontal: 10,
-              paddingBottom: Platform.OS === "ios" ? 25 : 10,
-              backgroundColor: "#0B1220",
-            }}>
-              <View style={{
-                flexDirection: "row",
-                alignItems: "center",
-                backgroundColor: "#0F1B2E",
-                borderRadius: 14,
-                padding: 8,
-              }}>
+              {/* INPUT */}
+              <View
+                style={{
+                  flexDirection: "row",
+                  backgroundColor: COLORS.surface,
+                  borderRadius: 14,
+                  padding: 8,
+                  margin: 10,
+                }}
+              >
                 <TextInput
                   value={input}
                   onChangeText={setInput}
+                  editable={!isLoading}
                   placeholder="Ask something..."
-                  placeholderTextColor="#9CA3AF"
-                  style={{
-                    flex: 1,
-                    color: "#FFFFFF",
-                    padding: 10,
-                  }}
+                  placeholderTextColor={COLORS.textSecondary}
+                  style={{ flex: 1, color: COLORS.textPrimary }}
                 />
+
                 <TouchableOpacity
-                  onPress={() => {
-                    Keyboard.dismiss();
-                    sendMessage();
-                  }}
+                  disabled={isLoading}
+                  onPress={() => sendMessage()}
                   style={{
-                    backgroundColor: "#FFD06A",
+                    backgroundColor: COLORS.accent,
                     paddingHorizontal: 14,
                     paddingVertical: 10,
                     borderRadius: 10,
                   }}
                 >
-                  <Text style={{ color: "#000", fontWeight: "600" }}>
-                    Send
-                  </Text>
+                  <Text style={{ color: "#000" }}>Send</Text>
                 </TouchableOpacity>
               </View>
             </View>
-          </TouchableWithoutFeedback>
-
+          </KeyboardAvoidingView>
         </View>
-      </KeyboardAvoidingView>
-
+      </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 }
