@@ -1,13 +1,19 @@
 import React, { useRef, useState } from "react";
 import {
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   ScrollView,
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View,
 } from "react-native";
 
 import { SafeAreaView } from "react-native-safe-area-context";
+import ProfileStrip from "../../components/ProfileStrip";
+import QuickChips from "../../components/QuickChips";
 import SectionCard from "../../components/SectionCard";
 
 const BACKEND_URL = "http://192.168.40.236:8000";
@@ -15,29 +21,38 @@ const BACKEND_URL = "http://192.168.40.236:8000";
 export default function HomeScreen() {
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState("");
+
   const scrollRef = useRef<ScrollView>(null);
 
   const parseSections = (text: string) => {
+    if (!text || typeof text !== "string") return null;
     if (!text.includes("##")) return null;
 
-    const parts = text.split("## ").filter(Boolean);
-
-    return parts.map((p) => {
+    return text.split("## ").filter(Boolean).map((p) => {
       const lines = p.split("\n");
       return {
-        title: lines[0].trim(),
-        content: lines.slice(1).join("\n").trim(),
+        title: String(lines[0] || "").trim(),
+        content: String(lines.slice(1).join("\n") || "").trim(),
       };
     });
   };
 
-  const sendMessage = async () => {
-    if (!input.trim()) return;
+  const scrollToBottom = () => {
+    setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  };
 
-    const userMsg = input;
+  const sendMessage = async (override?: string) => {
+    const userMsg = (override ?? input).trim();
+    if (!userMsg) return;
+
     setInput("");
 
-    setMessages((prev) => [...prev, { type: "user", text: userMsg }]);
+    setMessages((prev) => [
+      ...prev,
+      { type: "user", text: userMsg },
+    ]);
 
     try {
       const res = await fetch(`${BACKEND_URL}/query`, {
@@ -47,7 +62,11 @@ export default function HomeScreen() {
       });
 
       const data = await res.json();
-      const text = data.message || "";
+
+      const text =
+        typeof data.message === "string"
+          ? data.message
+          : JSON.stringify(data.message || "");
 
       const sections = parseSections(text);
 
@@ -66,6 +85,9 @@ export default function HomeScreen() {
           { type: "joy", text },
         ]);
       }
+
+      scrollToBottom(); // ✅ only after response
+
     } catch (e) {
       setMessages((prev) => [
         ...prev,
@@ -74,145 +96,141 @@ export default function HomeScreen() {
     }
   };
 
-  return (
-    <SafeAreaView
-      style={{
-        flex: 1,
-        backgroundColor: "#020617",
-      }}
-    >
-      <View
-        style={{
-          flex: 1,
-          paddingHorizontal: 16,
-          paddingBottom: 10,
-        }}
-      >
-        <View style={{ paddingTop: 6, paddingBottom: 14 }}>
-          <Text style={{ fontSize: 20 }}>
-            <Text style={{ color: "#FFFFFF" }}>FeedSoul</Text>
-            <Text style={{ color: "#FFD06A", fontWeight: "600" }}>Joy</Text>
-            <Text style={{ color: "#9CA3AF" }}> · Lifestyle</Text>
-          </Text>
-        </View>
+  const handleChip = (value: any) => {
+    const safe = typeof value === "string" ? value : String(value);
+    sendMessage(safe);
+  };
 
-        <ScrollView
-          ref={scrollRef}
-          style={{ flex: 1, marginBottom: 10 }}
-          onContentSizeChange={() =>
-            scrollRef.current?.scrollToEnd({ animated: true })
-          }
-        >
-          {messages.map((m, i) => {
-            if (m.type === "user") {
-              return (
-                <View
-                  key={i}
-                  style={{
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#0B1220" }}>
+
+      {/* HEADER */}
+      <View style={{ paddingHorizontal: 16, paddingTop: 6, paddingBottom: 10 }}>
+        <ProfileStrip />
+
+        <Text style={{ fontSize: 20 }}>
+          <Text style={{ color: "#FFFFFF" }}>FeedSoul</Text>
+          <Text style={{ color: "#FFD06A", fontWeight: "600" }}>Joy</Text>
+          <Text style={{ color: "#9CA3AF" }}> · Lifestyle</Text>
+        </Text>
+
+        <QuickChips onSelect={handleChip} />
+      </View>
+
+      {/* MAIN */}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={90}
+      >
+        <View style={{ flex: 1 }}>
+
+          {/* CHAT */}
+          <ScrollView
+            ref={scrollRef}
+            style={{ flex: 1 }}
+            contentContainerStyle={{
+              flexGrow: 1,            // 🔥 CRITICAL
+              paddingHorizontal: 16,
+              paddingTop: 10,
+              paddingBottom: 120,
+            }}
+            keyboardShouldPersistTaps="always"
+            contentOffset={{ y: 0 }}   // 🔥 start at top
+          >
+            {messages.map((m, i) => {
+              if (m.type === "user") {
+                return (
+                  <View key={i} style={{
                     alignSelf: "flex-end",
                     backgroundColor: "#DCF8C6",
                     padding: 12,
                     borderRadius: 14,
                     marginVertical: 6,
-                    maxWidth: "85%",
-                  }}
-                >
-                  <Text
-                    style={{
-                      color: "#111827",
-                      fontSize: 15,
-                      lineHeight: 22,
-                    }}
-                  >
-                    {m.text}
-                  </Text>
-                </View>
-              );
-            }
+                    maxWidth: "80%",
+                  }}>
+                    <Text style={{ color: "#111827" }}>{m.text}</Text>
+                  </View>
+                );
+              }
 
-            if (m.type === "joy") {
-              return (
-                <View
-                  key={i}
-                  style={{
+              if (m.type === "joy") {
+                return (
+                  <View key={i} style={{
                     alignSelf: "flex-start",
                     backgroundColor: "#071427",
                     padding: 12,
                     borderRadius: 14,
                     marginVertical: 6,
                     maxWidth: "85%",
-                    borderWidth: 1,
-                    borderColor: "rgba(212,168,67,0.08)",
+                  }}>
+                    <Text style={{ color: "#FFFFFF" }}>{m.text}</Text>
+                  </View>
+                );
+              }
+
+              if (m.type === "section") {
+                return (
+                  <SectionCard key={i} title={m.title} content={m.content} />
+                );
+              }
+
+              return null;
+            })}
+          </ScrollView>
+
+          {/* INPUT */}
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              paddingHorizontal: 10,
+              paddingBottom: Platform.OS === "ios" ? 25 : 10,
+              backgroundColor: "#0B1220",
+            }}>
+              <View style={{
+                flexDirection: "row",
+                alignItems: "center",
+                backgroundColor: "#0F1B2E",
+                borderRadius: 14,
+                padding: 8,
+              }}>
+                <TextInput
+                  value={input}
+                  onChangeText={setInput}
+                  placeholder="Ask something..."
+                  placeholderTextColor="#9CA3AF"
+                  style={{
+                    flex: 1,
+                    color: "#FFFFFF",
+                    padding: 10,
+                  }}
+                />
+                <TouchableOpacity
+                  onPress={() => {
+                    Keyboard.dismiss();
+                    sendMessage();
+                  }}
+                  style={{
+                    backgroundColor: "#FFD06A",
+                    paddingHorizontal: 14,
+                    paddingVertical: 10,
+                    borderRadius: 10,
                   }}
                 >
-                  <Text
-                    style={{
-                      color: "#FFFFFF",
-                      fontSize: 15,
-                      lineHeight: 22,
-                    }}
-                  >
-                    {m.text}
+                  <Text style={{ color: "#000", fontWeight: "600" }}>
+                    Send
                   </Text>
-                </View>
-              );
-            }
+                </TouchableOpacity>
+              </View>
+            </View>
+          </TouchableWithoutFeedback>
 
-            if (m.type === "section") {
-              return (
-                <SectionCard
-                  key={i}
-                  title={m.title}
-                  content={m.content}
-                />
-              );
-            }
-
-            if (m.type === "error") {
-              return (
-                <Text key={i} style={{ color: "red" }}>
-                  {m.text}
-                </Text>
-              );
-            }
-
-            return null;
-          })}
-        </ScrollView>
-
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            backgroundColor: "#071427",
-            borderRadius: 14,
-            padding: 6,
-          }}
-        >
-          <TextInput
-            value={input}
-            onChangeText={setInput}
-            placeholder="Ask something..."
-            placeholderTextColor="#9CA3AF"
-            style={{
-              flex: 1,
-              color: "#FFFFFF",
-              padding: 10,
-            }}
-          />
-          <TouchableOpacity
-            onPress={sendMessage}
-            style={{
-              backgroundColor: "#FFD06A",
-              paddingHorizontal: 14,
-              paddingVertical: 10,
-              borderRadius: 10,
-            }}
-          >
-            <Text style={{ color: "#000", fontWeight: "600" }}>Send</Text>
-          </TouchableOpacity>
         </View>
-      </View>
+      </KeyboardAvoidingView>
+
     </SafeAreaView>
   );
 }
