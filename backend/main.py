@@ -1,11 +1,15 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
+from openai import OpenAI
+import io
 import re
 import os
 import time
+import asyncio
 from litellm import completion
 from dotenv import load_dotenv
 
 load_dotenv()
+client = OpenAI()
 
 # ---------------- CONFIG ----------------
 LLM_MODE = os.getenv("LLM_MODE", "openai")
@@ -24,6 +28,19 @@ print("SCROLL_TEST:", SCROLL_TEST)  # 🔥 ADDED
 app = FastAPI()
 
 print("🚨 LLM BACKEND RUNNING")
+
+
+# ---------------- USER PROFILE ----------------
+USER_PROFILE = {
+    "name": "Deepak",
+    "age": 63,
+    "condition": "prediabetic",
+    "a1c": 6.0,
+    "ldl": 100,
+    "goal": "reduce glucose spikes",
+    "diet": "vegetarian",
+    "phenotype": "post-meal spiker"
+}
 
 
 # ---------------- SCROLL TEST ----------------
@@ -93,7 +110,7 @@ def normalize(q: str) -> str:
 # ---------------- CONTEXT ----------------
 def detect_context(q: str) -> dict:
     return {
-        "after_meal": any(x in q for x in ["after", "post meal"]),
+        "after_meal": any(x in q for x in ["after meal", "post meal"]),
         "high": any(x in q for x in ["high", "spike", "elevated"]),
         "low": any(x in q for x in ["low", "drop"]),
     }
@@ -109,7 +126,8 @@ def detect_intent(q: str) -> str:
 
         for group_name, keywords in groups.items():
             for kw in keywords:
-                if kw in text:
+                # 2) multi-word keyword matching can still miss punctuation cases
+                if re.search(rf"\b{re.escape(kw)}\b", text):
                     if group_name == "primary":
                         score += 3
                     elif group_name == "medical":
@@ -211,10 +229,18 @@ I can help with lifestyle, glucose, BP, and cholesterol.
 Try asking about food, exercise, or health markers."""
 
 
-# ---------------- PROMPT ----------------
+# ---------------- PROMPT (UPDATED WITH PROFILE) ----------------
 def build_prompt(q: str, ctx: dict) -> str:
     return f"""
 You are a lifestyle health assistant.
+
+User Profile:
+- Age: {USER_PROFILE['age']}
+- Condition: {USER_PROFILE['condition']} (A1C {USER_PROFILE['a1c']})
+- LDL: {USER_PROFILE['ldl']}
+- Goal: {USER_PROFILE['goal']}
+- Diet: {USER_PROFILE['diet']}
+- Phenotype: {USER_PROFILE['phenotype']}
 
 User query: "{q}"
 
@@ -223,15 +249,29 @@ Context:
 - High: {ctx["high"]}
 - Low: {ctx["low"]}
 
+Instructions:
+- Personalize recommendations based on the profile
+- Max 3 actionable steps
+- Be specific (minutes, portions)
+- Adjust intensity:
+    * Prediabetic → moderate
+    * Diabetic → strict
+    * Healthy → flexible
+
 Respond ONLY in this exact format:
 
-## Likely Cause
+## Meal Score
 ...
 
 ## What To Do
-...
+1) ...
+2) ...
+3) ...
 
-## Next Step
+## Try This Week
++ ...
+
+## Expected Outcome
 ...
 """
 
@@ -239,15 +279,11 @@ Respond ONLY in this exact format:
 # ---------------- EXTRACT ----------------
 def extract_text(res):
     try:
-        msg = res.get("choices", [{}])[0].get("message", {})
-        content = msg.get("content", "")
-
-        if isinstance(content, list):
-            return "".join([c.get("text", "") for c in content])
-
-        return content
-
-    except Exception:
+        if isinstance(res, dict):
+            return res["choices"][0]["message"]["content"]
+        return res.choices[0].message.content
+    except Exception as e:
+        print("EXTRACT ERROR:", e)
         return str(res)
 
 
@@ -267,7 +303,7 @@ def llm_response(q: str, ctx: dict) -> str:
 
 # ---------------- FORMAT ----------------
 def enforce_format(text: str) -> str:
-    if "## Likely Cause" in text:
+    if "## Meal Score" in text:
         return text
 
     return f"""## Insight
@@ -279,7 +315,11 @@ Try asking again with more detail.
 
 
 # ---------------- MAIN ----------------
-def build_response(query: str):
+async def build_response(query: str):
+    # 1) empty query guard
+    if not query:
+        return {"text": "Empty query", "score": 0}
+
     q = normalize(query)
     ctx = detect_context(q)
     intent = detect_intent(q)
@@ -291,7 +331,6 @@ def build_response(query: str):
     score = compute_score(intent, q)
     print("SCORE:", score)
 
-    # 🔥 SCROLL MODE (SAFE INJECTION)
     if SCROLL_TEST:
         print("🔥 SCROLL TEST MODE")
         return {"text": scroll_test_response(), "score": score}
@@ -301,10 +340,23 @@ def build_response(query: str):
 
     if USE_LLM:
         try:
-            result = llm_response(q, ctx)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(llm_response, q, ctx),
+                timeout=15
+            )
             return {"text": enforce_format(result), "score": score}
+
+        except asyncio.TimeoutError:
+            print("LLM TIMEOUT")
+            return {"text": "LLM timed out. Try again.", "score": score}
+
         except Exception as e:
             print("LLM ERROR:", e)
+            return {
+                "text": mock_response(intent),
+                "score": score,
+                "error": str(e)
+            }
 
     return {
         "text": """## Insight
@@ -315,8 +367,8 @@ Try asking about lifestyle, BP, glucose, or cholesterol.""",
         "score": score
     }
 
-
 # ---------------- API ----------------
+@app.post("/query")
 @app.post("/query")
 async def handle_query(request: Request):
     start = time.time()
@@ -324,14 +376,73 @@ async def handle_query(request: Request):
     data = await request.json()
     query = (data.get("query") or "").strip()
 
-    result = build_response(query)
+    if len(query.split()) <= 1:
+        return {
+            "status": "success",
+            "message": "Please say a full sentence like 'my sugar is high after meal'",
+            "score": 0,
+            "error": None,
+        }
+
+    if len(query) > 500:
+        return {
+            "status": "success",
+            "message": "Query too long",
+            "score": 0,
+            "error": None,
+        }
+
+    result = await build_response(query)
 
     response = {
         "status": "success",
         "message": result.get("text", ""),
-        "score": result.get("score")
+        "score": result.get("score"),
+        "error": result.get("error"),
     }
 
     print("⏱️", round(time.time() - start, 2), "sec\n")
 
     return response
+
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    try:
+        print("Received file:", file.filename)
+        print("Content-Type:", file.content_type)
+
+        audio_bytes = await file.read()
+        print("Audio size (bytes):", len(audio_bytes))
+
+        if len(audio_bytes) == 0:
+            return {"text": "Empty audio received"}
+
+        if len(audio_bytes) > 10 * 1024 * 1024:
+            return {"text": "Audio too large"}
+
+        audio_file = io.BytesIO(audio_bytes)
+
+        filename = (file.filename or "").lower()
+        ext = "caf" if filename.endswith(".caf") else "m4a"
+        audio_file.name = file.filename or f"audio.{ext}"
+
+        transcript = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=audio_file
+                )
+            ),
+            timeout=15
+        )
+
+        print("TRANSCRIPT:", transcript.text)
+
+        return {"text": transcript.text}
+
+    except Exception as e:
+        print("TRANSCRIBE ERROR:", e)
+        return {
+            "text": "Transcription failed",
+            "error": str(e)
+        }

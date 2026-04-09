@@ -1,3 +1,4 @@
+import { Audio } from "expo-av";
 import React, { useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -8,7 +9,6 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -16,7 +16,7 @@ import ProfileStrip from "../../components/ProfileStrip";
 import QuickChips from "../../components/QuickChips";
 import SectionCard from "../../components/SectionCard";
 
-const BACKEND_URL = "http://192.168.40.55:8000";
+const BACKEND_URL = "http://192.168.40.138:8000";
 
 /*
 🎨 ===================== COLOR SYSTEM =====================
@@ -35,6 +35,7 @@ const COLORS = {
   textSecondary: "#9CA3AF",
   textDark: "#111827",
 
+  aceAlt: "#120F24",
   accent: "#FFD06A",
   error: "#EF4444",
 
@@ -42,35 +43,41 @@ const COLORS = {
 };
 
 /*
+--- OPTION 0: balanced dark ---
+background: "#0B0F14",
+surface: "#121821",
+surfaceAlt: "#071427",
+accent: "#FFD06A",
+
 --- OPTION 1: PREMIUM DARK ---
-background: "#080C10"
-surface: "#10161D"
-surfaceAlt: "#0A1018"
-accent: "#EAB308"
+background: "#080C10",
+surface: "#10161D",
+surfaceAlt: "#0A1018",
+accent: "#EAB308",
 
 --- OPTION 2: PURPLE MODERN ---
-background: "#0B0F14"
-surface: "#1A1630"
-surfaceAlt: "#120F24"
-accent: "#8B5CF6"
+background: "#0B0F14",
+surface: "#1A1630",
+surfaceAlt: "#120F24",
+accent: "#8B5CF6",
 
 --- OPTION 3: GREEN HEALTH (your app theme?) ---
-background: "#0B0F14"
-surface: "#112018"
-surfaceAlt: "#0A1510"
-accent: "#22C55E"
+background: "#0B0F14",
+surface: "#112018",
+surfaceAlt: "#0A1510",
+accent: "#22C55E",
 
 --- OPTION 4: BLUE CLEAN ---
-background: "#0B0F14"
-surface: "#131A24"
-surfaceAlt: "#0C131C"
-accent: "#3B82F6"
+background: "#0B0F14",
+surface: "#131A24",
+surfaceAlt: "#0C131C",
+accent: "#3B82F6",
 
 --- OPTION 5: SOFT GREY ---
-background: "#111827"
-surface: "#1F2937"
-surfaceAlt: "#111827"
-accent: "#F59E0B"
+background: "#111827",
+surface: "#1F2937",
+surfaceAlt: "#111827",
+accent: "#F59E0B",
 */
 
 type Section = { title: string; content: string };
@@ -86,11 +93,13 @@ type QueryBlock = {
 export default function HomeScreen() {
   const [blocks, setBlocks] = useState<QueryBlock[]>([]);
   const [input, setInput] = useState("");
+  const [recording, setRecording] = useState<any>(null);
 
   const scrollRef = useRef<ScrollView>(null);
   const lockRef = useRef(false);
   const blockRefs = useRef<Record<string, View | null>>({});
   const lastScrollIdRef = useRef<string | null>(null);
+  
 
   const parseSections = (text: string): Section[] | null => {
     if (!text || !text.includes("##")) return null;
@@ -124,7 +133,76 @@ export default function HomeScreen() {
       );
     });
   };
+  const stopListening = async (rec: any) => {
+    try {
+      console.log("🛑 Stopping recording...");
+      await rec.stopAndUnloadAsync();
+      setRecording(null);
 
+      const uri = rec.getURI();
+      console.log("Recorded file:", uri);
+
+      const isCAF = uri?.endsWith(".caf");
+
+      const formData = new FormData();
+      formData.append("file", {
+        uri,
+        name: isCAF ? "audio.caf" : "audio.m4a",
+        type: isCAF ? "audio/x-caf" : "audio/m4a",
+      } as any);
+
+      setInput("Transcribing...");
+
+      const response = await fetch(`${BACKEND_URL}/transcribe`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error("Transcription failed");
+      }
+
+      const data = await response.json();
+      const transcribedText = data.text || "Could not transcribe";
+
+      setInput(transcribedText);   // show user what was heard
+      sendMessage(transcribedText);
+
+    } catch (err) {
+      console.error("Stop error:", err);
+      setInput("Voice failed. Try again.");
+    }
+  };
+  const startListening = async () => {
+    try {
+      console.log("🎤 Requesting permission...");
+      const permission = await Audio.requestPermissionsAsync();
+
+      if (!permission.granted) {
+        alert("Microphone permission required");
+        return;
+      }
+
+      console.log("🎤 Starting recording...");
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording: rec } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+
+      setRecording(rec);
+
+      setTimeout(async () => {
+        await stopListening(rec);
+      }, 3000);
+
+    } catch (err) {
+      console.error("Recording error:", err);
+    }
+  };
   const sendMessage = async (override?: string) => {
     if (lockRef.current) return;
     lockRef.current = true;
@@ -204,140 +282,156 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.background }}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={{ flex: 1, backgroundColor: COLORS.background }}>
+      <View style={{ flex: 1, backgroundColor: COLORS.background }}>
 
-          {/* HEADER */}
-          <View style={{ paddingHorizontal: 16, paddingTop: 2, paddingBottom: 6 }}>
-            <ProfileStrip />
+        {/* HEADER */}
+        <View style={{ paddingHorizontal: 16, paddingTop: 2, paddingBottom: 6 }}>
+          <ProfileStrip />
 
-            <Text style={{ fontSize: 20 }}>
-              <Text style={{ color: COLORS.textPrimary }}>FeedSoul</Text>
-              <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Joy</Text>
-              <Text style={{ color: COLORS.textSecondary }}> · Lifestyle</Text>
-            </Text>
+          <Text style={{ fontSize: 20 }}>
+            <Text style={{ color: COLORS.textPrimary }}>FeedSoul</Text>
+            <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Joy</Text>
+            <Text style={{ color: COLORS.textSecondary }}> · Lifestyle</Text>
+          </Text>
 
-            <View style={{ marginTop: 4, opacity: isLoading ? 0.5 : 1 }}>
-              <QuickChips onSelect={handleChip} />
-            </View>
+          <View style={{ marginTop: 4, opacity: isLoading ? 0.5 : 1 }}>
+            <QuickChips onSelect={handleChip} />
           </View>
+        </View>
 
-          {/* MAIN */}
-          <KeyboardAvoidingView
-            style={{ flex: 1 }}
-            behavior={Platform.OS === "ios" ? "padding" : "height"}
-            keyboardVerticalOffset={80}
-          >
-            <View style={{ flex: 1 }}>
-              <ScrollView
-                ref={scrollRef}
-                keyboardShouldPersistTaps="handled"
-                contentContainerStyle={{
-                  backgroundColor: COLORS.background,
-                  paddingHorizontal: 16,
-                  paddingTop: 6,
-                  paddingBottom: 100,
-                }}
-                onContentSizeChange={() => {
-                  if (lastScrollIdRef.current) {
-                    scrollToBlock(lastScrollIdRef.current);
-                  }
-                }}
-              >
-                {blocks.map((block) => (
-                  <View
-                    key={block.id}
-                    ref={(ref) => {
-                      if (ref) blockRefs.current[block.id] = ref;
-                      else delete blockRefs.current[block.id];
-                    }}
-                  >
-                    {/* USER */}
-                    <View
-                      style={{
-                        alignSelf: "flex-end",
-                        backgroundColor: COLORS.userBubble,
-                        paddingVertical: 6,
-                        paddingHorizontal: 10,
-                        borderRadius: 14,
-                        marginVertical: 3,
-                        maxWidth: "80%",
-                      }}
-                    >
-                      <Text style={{ color: COLORS.textDark }}>{block.query}</Text>
-                    </View>
-
-                    {/* LOADING */}
-                    {block.status === "loading" && (
-                      <View style={{ padding: 10 }}>
-                        <ActivityIndicator color={COLORS.accent} />
-                      </View>
-                    )}
-
-                    {/* ERROR */}
-                    {block.status === "error" && (
-                      <Text style={{ color: COLORS.error }}>Connection error</Text>
-                    )}
-
-                    {/* SECTIONS */}
-                    {block.status === "complete" &&
-                      block.sections?.map((s, i) => (
-                        <SectionCard key={i} title={s.title} content={s.content} />
-                      ))}
-
-                    {/* RAW */}
-                    {block.status === "complete" && block.rawText && (
-                      <View
-                        style={{
-                          backgroundColor: COLORS.surfaceAlt,
-                          padding: 12,
-                          borderRadius: 14,
-                          marginVertical: 6,
-                        }}
-                      >
-                        <Text style={{ color: COLORS.textPrimary }}>{block.rawText}</Text>
-                      </View>
-                    )}
-                  </View>
-                ))}
-              </ScrollView>
-
-              {/* INPUT */}
-              <View
-                style={{
-                  flexDirection: "row",
-                  backgroundColor: COLORS.surface,
-                  borderRadius: 14,
-                  padding: 8,
-                  margin: 10,
-                }}
-              >
-                <TextInput
-                  value={input}
-                  onChangeText={setInput}
-                  editable={!isLoading}
-                  placeholder="Ask something..."
-                  placeholderTextColor={COLORS.textSecondary}
-                  style={{ flex: 1, color: COLORS.textPrimary }}
-                />
-
-                <TouchableOpacity
-                  disabled={isLoading}
-                  onPress={() => sendMessage()}
-                  style={{
-                    backgroundColor: COLORS.accent,
-                    paddingHorizontal: 14,
-                    paddingVertical: 10,
-                    borderRadius: 10,
+        {/* MAIN */}
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={80}
+        >
+          <View style={{ flex: 1 }}>
+            <ScrollView
+              ref={scrollRef}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              contentContainerStyle={{
+                backgroundColor: COLORS.background,
+                paddingHorizontal: 16,
+                paddingTop: 6,
+                paddingBottom: 100,
+              }}
+              onContentSizeChange={() => {
+                if (lastScrollIdRef.current) {
+                  scrollToBlock(lastScrollIdRef.current);
+                }
+              }}
+            >
+              {blocks.map((block) => (
+                <View
+                  key={block.id}
+                  ref={(ref) => {
+                    if (ref) blockRefs.current[block.id] = ref;
+                    else delete blockRefs.current[block.id];
                   }}
                 >
-                  <Text style={{ color: "#000" }}>Send</Text>
-                </TouchableOpacity>
-              </View>
+                  {/* USER */}
+                  <View
+                    style={{
+                      alignSelf: "flex-end",
+                      backgroundColor: COLORS.userBubble,
+                      paddingVertical: 6,
+                      paddingHorizontal: 10,
+                      borderRadius: 14,
+                      marginVertical: 3,
+                      maxWidth: "80%",
+                    }}
+                  >
+                    <Text style={{ color: COLORS.textDark }}>{block.query}</Text>
+                  </View>
+
+                  {/* LOADING */}
+                  {block.status === "loading" && (
+                    <View style={{ padding: 10 }}>
+                      <ActivityIndicator color={COLORS.accent} />
+                    </View>
+                  )}
+
+                  {/* ERROR */}
+                  {block.status === "error" && (
+                    <Text style={{ color: COLORS.error }}>Connection error</Text>
+                  )}
+
+                  {/* SECTIONS */}
+                  {block.status === "complete" &&
+                    block.sections?.map((s, i) => (
+                      <SectionCard key={i} title={s.title} content={s.content} />
+                    ))}
+
+                  {/* RAW */}
+                  {block.status === "complete" && block.rawText && (
+                    <View
+                      style={{
+                        backgroundColor: COLORS.surfaceAlt,
+                        padding: 12,
+                        borderRadius: 14,
+                        marginVertical: 6,
+                      }}
+                    >
+                      <Text style={{ color: COLORS.textPrimary }}>{block.rawText}</Text>
+                    </View>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+
+            {/* INPUT */}
+            <View
+              style={{
+                flexDirection: "row",
+                backgroundColor: COLORS.surface,
+                borderRadius: 14,
+                padding: 8,
+                margin: 10,
+                alignItems: "center",
+              }}
+            >
+              <TextInput
+                value={input}
+                onChangeText={setInput}
+                editable={!isLoading}
+                placeholder="Ask something..."
+                placeholderTextColor={COLORS.textSecondary}
+                style={{ flex: 1, color: COLORS.textPrimary }}
+              />
+
+              {/* 🎤 MIC BUTTON */}
+              <TouchableOpacity
+                disabled={isLoading}
+                onPress={startListening}
+                style={{
+                  marginRight: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  backgroundColor: COLORS.surfaceAlt,
+                }}
+              >
+                <Text style={{ color: COLORS.textPrimary }}>🎤</Text>
+              </TouchableOpacity>
+
+              {/* SEND BUTTON */}
+              <TouchableOpacity
+                disabled={isLoading}
+                onPress={() => sendMessage()}
+                style={{
+                  backgroundColor: COLORS.accent,
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                }}
+              >
+                <Text style={{ color: "#000" }}>Send</Text>
+              </TouchableOpacity>
             </View>
-          </KeyboardAvoidingView>
-        </View>
-      </TouchableWithoutFeedback>
+          </View>
+        </KeyboardAvoidingView>
+      </View>
     </SafeAreaView>
   );
 }

@@ -1,6 +1,14 @@
 import React from "react";
 import { Text, View } from "react-native";
 
+const PROFILE = {
+  name: "Deepak",
+  condition: "diabetic",
+  a1c: 8.0,
+  focus: "Glucose",
+  phenotype: "Spiker",
+};
+
 export default function ProfileStrip() {
   return (
     <View
@@ -15,7 +23,11 @@ export default function ProfileStrip() {
       }}
     >
       <Text style={{ color: "#9CA3AF", fontSize: 13 }}>
-        Deepak · BP focus today · Last meal: Lunch
+        {PROFILE.name} ·{" "}
+        <Text style={{ color: "#FFD06A" }}>
+          {PROFILE.condition} (A1C {PROFILE.a1c})
+        </Text>{" "}
+        · Focus: {PROFILE.focus} · {PROFILE.phenotype}
       </Text>
     </View>
   );
