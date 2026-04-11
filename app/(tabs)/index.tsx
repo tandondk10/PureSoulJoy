@@ -614,18 +614,27 @@ export default function HomeScreen() {
 
   // ─── Input handlers ───────────────────────────────────────────────────────
 
-  const handleMicPress = async () => {
-    const state = voiceStateRef.current;
-    if (state === "RECORDING") {
-      // Mic tapped during recording = cancel — spec §2.2, §5.3
-      await cancelRecording();
-    } else if (state === "IDLE" || state === "PLAYING") {
-      await startRecording();
-    } else {
-      // PROCESSING — ignore per spec §4.2
-      console.log(`[handleMicPress] ignored — state is ${state}`);
-    }
-  };
+const handleMicPress = async () => {
+  const state = voiceStateRef.current;
+
+  if (state === "RECORDING") {
+    await stopRecordingAndSend(false);
+    return;
+  }
+
+  if (state === "PLAYING") {
+    await stopAnyPlayback();
+    updateVoiceState("IDLE");
+    return;
+  }
+
+  if (state === "IDLE") {
+    await startRecording();
+    return;
+  }
+
+  // PROCESSING → ignore
+};
 
   const handleSendPress = () => {
     if (voiceStateRef.current === "PROCESSING") return;
@@ -708,22 +717,39 @@ export default function HomeScreen() {
             <ProfileStrip />
           </View>
           
-          <View style={{ marginTop: -14 }}></View>
-          <Text style={{ fontSize: 20, paddingHorizontal: 16}}>
-              <Text style={{ color: COLORS.textPrimary }}>Improve</Text>
-              <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Me</Text>
-              <Text style={{ color: COLORS.textSecondary }}> · Daily</Text>
-            </Text>
+          <View
+          style={{
+            backgroundColor: COLORS.surface, // same as input bar tone
+            paddingHorizontal: 16,
+            paddingVertical: 1,
+            borderRadius: 16,
+            marginHorizontal: 0,
+            marginTop: -8,
+            marginBottom: 1,
+            borderWidth: 1,
+            borderColor: "rgba(255,255,255,0.05)",
+          }}
+        >
+          <Text style={{ fontSize: 20 }}>
+            <Text style={{ color: COLORS.textPrimary }}>Improve</Text>
+            <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Me</Text>
+            <Text style={{ color: COLORS.textSecondary }}> · Daily</Text>
+          </Text>
+
           <Text
-            style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 2, paddingHorizontal: 16 }}
+            style={{
+              color: COLORS.textSecondary,
+              fontSize: 13,
+              marginTop: 2,
+            }}
           >
             Better lifestyle. Healthier future.
           </Text>
+        </View>
 
           
-
           <View style={{ marginTop: 4, opacity: isProcessing ? 0.5 : 1 }}>
-            <QuickChips onSelect={handleChip} />
+            {false && <QuickChips onSelect={handleChip} />}
           </View>
         </View>
 
@@ -838,6 +864,54 @@ export default function HomeScreen() {
               </View>
             ) : null}
 
+            <View
+              style={{
+                paddingHorizontal: 12,
+                paddingBottom: 6,
+              }}
+            >
+              <Text
+                style={{
+                  color: COLORS.textSecondary,
+                  fontSize: 12,
+                  marginBottom: 6,
+                }}
+              >
+                Quick actions
+              </Text>
+
+              <View
+                style={{
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                  justifyContent: "space-between",
+                }}
+              >
+                {[
+                  "🍽 Analyze my meal",
+                  "🥗 Improve my meal",
+                  "🍳 Build a meal",
+                  "⚡ What should I do now",
+                ].map((label) => (
+                  <TouchableOpacity
+                    key={label}
+                    onPress={() => handleActionChip(label)}
+                    style={{
+                      width: "48%",
+                      backgroundColor: COLORS.surfaceAlt,
+                      paddingVertical: 10,
+                      paddingHorizontal: 12,
+                      borderRadius: 14,
+                      marginBottom: 8,
+                    }}
+                  >
+                    <Text style={{ color: COLORS.textPrimary }}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
             {/* Input bar */}
             <View
               style={{
@@ -854,7 +928,7 @@ export default function HomeScreen() {
                 value={input}
                 onChangeText={setInput}
                 editable={!isProcessing}
-                placeholder="Ask something..."
+                placeholder='Speak. End with "Go ImproveMe..."'
                 placeholderTextColor={COLORS.textSecondary}
                 style={{ flex: 1, color: COLORS.textPrimary }}
                 onSubmitEditing={handleSendPress}
@@ -878,6 +952,7 @@ export default function HomeScreen() {
               >
                 <Text style={{ color: COLORS.textPrimary }}>
                   {isRecording ? "⏹" : "🎤"}
+                  {voiceState === "PLAYING" ? "⏹" : "🎤"}
                 </Text>
               </TouchableOpacity>
 
