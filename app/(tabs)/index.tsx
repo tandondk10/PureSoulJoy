@@ -703,19 +703,24 @@ export default function HomeScreen() {
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.background }}>
       <View style={{ flex: 1, backgroundColor: COLORS.background }}>
         <View style={{ paddingHorizontal: 16, paddingTop: 2, paddingBottom: 6 }}>
-          <ProfileStrip />
-
-          <Text style={{ fontSize: 20 }}>
-            <Text style={{ color: COLORS.textPrimary }}>Improve</Text>
-            <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Me</Text>
-            <Text style={{ color: COLORS.textSecondary }}> · Lifestyle</Text>
-          </Text>
-
+          {/* 👇 Move profile here */}
+          <View style={{ marginTop: 2, opacity: 0.9, paddingHorizontal: 0}}>
+            <ProfileStrip />
+          </View>
+          
+          <View style={{ marginTop: -14 }}></View>
+          <Text style={{ fontSize: 20, paddingHorizontal: 16}}>
+              <Text style={{ color: COLORS.textPrimary }}>Improve</Text>
+              <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Me</Text>
+              <Text style={{ color: COLORS.textSecondary }}> · Daily</Text>
+            </Text>
           <Text
-            style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 2 }}
+            style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 2, paddingHorizontal: 16 }}
           >
-            Better lifestyle. Better future.
+            Better lifestyle. Healthier future.
           </Text>
+
+          
 
           <View style={{ marginTop: 4, opacity: isProcessing ? 0.5 : 1 }}>
             <QuickChips onSelect={handleChip} />

@@ -6,6 +6,9 @@ import os
 import time
 import asyncio
 import base64
+import difflib
+
+
 from litellm import completion
 from dotenv import load_dotenv
 
@@ -41,6 +44,15 @@ USER_PROFILE = {
     "goal": "reduce glucose spikes",
     "diet": "vegetarian",
     "phenotype": "post-meal spiker"
+}
+
+COMMON_CORRECTIONS = {
+    "excercise": "exercise",
+    "excersise": "exercise",
+    "glocose": "glucose",
+    "suger": "sugar",
+    "colestrol": "cholesterol",
+    "bp": "blood pressure",  # you already handle this, but safe
 }
 
 
@@ -400,16 +412,40 @@ async def build_response(query: str):
     if not query:
         return {"text": "Empty query", "score": 0}
 
-    q = normalize(query)
+    q = correct_spelling(query)
+    q = normalize(q)
+
     ctx = detect_context(q)
     intent = detect_intent(q)
+
+    score = compute_score(intent, q)
+    print("SCORE:", score)
+
+    if intent == "unknown":
+        q = correct_with_llm(q)
+        intent = detect_intent(q)
 
     print("\n--- REQUEST ---")
     print("QUERY:", q)
     print("INTENT:", intent)
 
-    score = compute_score(intent, q)
-    print("SCORE:", score)
+    if intent == "unknown":
+        return {
+        "text": """## Insight
+I can help with:
+- meals
+- glucose
+- blood pressure
+- cholesterol
+
+## Try This
+Say something like:
+- "rice dal paneer"
+- "my sugar is high after meal"
+- "how to reduce BP"
+""",
+        "score": 0
+        }
 
     if SCROLL_TEST:
         print("🔥 SCROLL TEST MODE")
@@ -447,6 +483,45 @@ Try asking about lifestyle, BP, glucose, or cholesterol.""",
         "score": score
     }
 
+def correct_spelling(text: str) -> str:
+    words = text.split()
+    corrected = []
+
+    for w in words:
+        lw = w.lower()
+
+        # direct correction
+        if lw in COMMON_CORRECTIONS:
+            corrected.append(COMMON_CORRECTIONS[lw])
+            continue
+
+        # fuzzy match (optional but useful)
+        match = difflib.get_close_matches(lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85)
+        if match:
+            corrected.append(COMMON_CORRECTIONS[match[0]])
+        else:
+            corrected.append(w)
+
+    return " ".join(corrected)
+
+def correct_with_llm(text: str) -> str:
+    try:
+        res = completion(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Correct spelling only. Do not change meaning. Return only corrected sentence."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+        )
+        return extract_text(res).strip()
+    except:
+        return text
 
 # ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
 @app.post("/query")
