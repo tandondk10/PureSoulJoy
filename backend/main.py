@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, UploadFile, File
+from fastapi import FastAPI, Request
 from openai import OpenAI
 import io
 import re
@@ -64,6 +64,78 @@ def scroll_test_response() -> str:
 """
 
 
+# ---------------- WHISPER HALLUCINATION LIST ----------------
+# Maintainable — add entries as observed in production
+WHISPER_HALLUCINATIONS = {
+    "",
+    "thank you.",
+    "thank you",
+    "thanks for watching.",
+    "thanks for watching",
+    "you",
+    "you.",
+    ".",
+    "...",
+    "bye.",
+    "bye",
+    "goodbye.",
+    "goodbye",
+}
+
+
+def is_hallucination(text: str) -> bool:
+    return text.strip().lower() in WHISPER_HALLUCINATIONS
+
+
+# ---------------- TRIGGER REMOVAL ----------------
+# Matches "go improveme" or "go improve me" at the END of the transcript only.
+# Case-insensitive. Allows optional trailing punctuation. One pass only.
+TRIGGER_PATTERN = re.compile(
+    r'\s*(go\s+improve\s*me|इम्प्रूव\s*मी)\s*[.!?]?\s*$',
+    re.IGNORECASE
+)
+
+
+def has_trigger(text: str) -> bool:
+    return bool(TRIGGER_PATTERN.search(text))
+
+
+def remove_trigger(text: str) -> str:
+    return TRIGGER_PATTERN.sub('', text).strip()
+
+
+# ---------------- VALIDATION ----------------
+def validate_voice_query(raw_transcript: str) -> tuple:
+    """
+    Validates Whisper transcript. Returns (error_msg | None, cleaned_query).
+    Order: A → B → C → D exactly per spec.
+    """
+    raw = (raw_transcript or "").strip()
+
+    # Case A: null, empty, or Whisper hallucination
+    if not raw or is_hallucination(raw):
+        return "Could not understand. Please try again.", ""
+
+    # Trigger removal (before B/C/D checks)
+    trigger_found = has_trigger(raw)
+    cleaned = remove_trigger(raw)
+
+    # Case B: transcript contained only the trigger phrase
+    if trigger_found and not cleaned:
+        return "Please say your question or meal before Go ImproveMe.", ""
+
+    # Case C: no word with 3 or more characters
+    words = re.findall(r'\w+', cleaned)
+    if len(cleaned.strip()) < 3:
+        return "Please say a complete question or meal.", cleaned
+
+    # Case D: only whitespace or punctuation
+    if not re.sub(r'[^\w]', '', cleaned).strip():
+        return "Could not understand. Please try again.", cleaned
+
+    return None, cleaned
+
+
 # ---------------- KEYWORD MAP ----------------
 KEYWORD_MAP = {
     "glucose": {
@@ -100,11 +172,9 @@ KEYWORD_MAP = {
 def normalize(q: str) -> str:
     q = q.lower().strip()
     q = q.replace("-", " ")
-
     q = re.sub(r"\bbp\b", "blood pressure", q)
     q = re.sub(r"\bbg\b", "blood glucose", q)
     q = re.sub(r"\bblood sugar\b", "glucose", q)
-
     return q
 
 
@@ -124,7 +194,6 @@ def detect_intent(q: str) -> str:
 
     for category, groups in KEYWORD_MAP.items():
         score = 0
-
         for group_name, keywords in groups.items():
             for kw in keywords:
                 if re.search(rf"\b{re.escape(kw)}\b", text):
@@ -134,13 +203,11 @@ def detect_intent(q: str) -> str:
                         score += 2
                     else:
                         score += 1
-
         if score > 0:
             scores[category] = score
 
     if scores:
-        top = max(scores, key=scores.get)
-        return top
+        return max(scores, key=scores.get)
 
     return "unknown"
 
@@ -320,7 +387,6 @@ def generate_tts(text: str):
             voice="alloy",
             input=text
         )
-
         audio_bytes = speech.read()
         return base64.b64encode(audio_bytes).decode("utf-8")
 
@@ -329,7 +395,7 @@ def generate_tts(text: str):
         return None
 
 
-# ---------------- MAIN ----------------
+# ---------------- BUILD RESPONSE ----------------
 async def build_response(query: str):
     if not query:
         return {"text": "Empty query", "score": 0}
@@ -382,87 +448,187 @@ Try asking about lifestyle, BP, glucose, or cholesterol.""",
     }
 
 
-# ---------------- API ----------------
+# ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
 @app.post("/query")
 async def handle_query(request: Request):
+    """
+    Single endpoint for both voice and keyboard input.
+
+    Voice path:   multipart/form-data with audio_file field
+                  Runs Whisper → validate (A→B→C→D) → LLM → TTS → returns audio
+
+    Keyboard path: application/json with {query, voice: false}
+                   Runs LLM only → audio is always null
+    """
     start = time.time()
+    content_type = request.headers.get("content-type", "")
 
-    data = await request.json()
-    query = (data.get("query") or "").strip()
+    # ── VOICE PATH ──────────────────────────────────────────────────────────
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        audio_file = form.get("audio_file")
 
-    if len(query.split()) <= 1:
-        return {
-            "status": "success",
-            "message": "Please say a full sentence like 'my sugar is high after meal'",
-            "score": 0,
-            "audio": None,
-            "error": None,
-        }
+        if audio_file is None:
+            return {
+                "status": "error",
+                "message": "Could not understand. Please try again.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-    if len(query) > 500:
-        return {
-            "status": "success",
-            "message": "Query too long",
-            "score": 0,
-            "audio": None,
-            "error": None,
-        }
-
-    result = await build_response(query)
-
-    text = result.get("text", "")
-    audio = generate_tts(text)
-
-    response = {
-        "status": "success",
-        "message": text,
-        "score": result.get("score"),
-        "audio": audio,
-        "error": result.get("error"),
-    }
-
-    print("⏱️", round(time.time() - start, 2), "sec\n")
-    return response
-
-
-@app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
-    try:
-        print("Received file:", file.filename)
-        print("Content-Type:", file.content_type)
-
-        audio_bytes = await file.read()
-        print("Audio size (bytes):", len(audio_bytes))
+        audio_bytes = await audio_file.read()
+        print(f"\n--- VOICE REQUEST ---")
+        print(f"File: {audio_file.filename}, Size: {len(audio_bytes)} bytes")
 
         if len(audio_bytes) == 0:
-            return {"text": "Empty audio received"}
+            return {
+                "status": "error",
+                "message": "Could not understand. Please try again.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-        if len(audio_bytes) > 10 * 1024 * 1024:
-            return {"text": "Audio too large"}
+        if len(audio_bytes) > 25 * 1024 * 1024:
+            return {
+                "status": "error",
+                "message": "Audio file too large.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-        audio_file = io.BytesIO(audio_bytes)
+        # Whisper transcription
+        audio_io = io.BytesIO(audio_bytes)
+        filename = (audio_file.filename or "").lower()
+        ext = filename.split(".")[-1] if "." in filename else "m4a"
+        audio_io.name = audio_file.filename or f"audio.{ext}"
 
-        filename = (file.filename or "").lower()
-        ext = "caf" if filename.endswith(".caf") else "m4a"
-        audio_file.name = file.filename or f"audio.{ext}"
+        try:
+            transcript_obj = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=audio_io
+                    )
+                ),
+                timeout=10
+            )
+            raw_transcript = (transcript_obj.text or "").strip()
+        except asyncio.TimeoutError:
+            print("WHISPER TIMEOUT")
+            return {
+                "status": "error",
+                "message": "Could not understand. Please try again.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-        transcript = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=audio_file
-                )
-            ),
-            timeout=15
-        )
+        print("WHISPER RAW:", raw_transcript)
 
-        print("TRANSCRIPT:", transcript.text)
+        error_msg, cleaned_query = validate_voice_query(raw_transcript)
 
-        return {"text": transcript.text}
+        if error_msg:
+            print("VALIDATION FAILED:", error_msg)
+            return {
+                "status": "error",
+                "message": error_msg,
+                "cleaned_query": cleaned_query,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-    except Exception as e:
-        print("TRANSCRIBE ERROR:", e)
+        print("CLEANED QUERY:", cleaned_query)
+
+        result = await build_response(cleaned_query)
+        text = result.get("text", "")
+        if not text:
+            text = "Something went wrong. Please try again."
+        score = result.get("score", 0)
+
+        # Backend selects TTS text — frontend never trims or selects
+        tts_text = text
+        try:
+            audio = await asyncio.wait_for(
+                asyncio.to_thread(generate_tts, tts_text),
+                timeout=15
+            )
+        except asyncio.TimeoutError:
+            print("TTS TIMEOUT")
+            audio = None
+
+        print("⏱️", round(time.time() - start, 2), "sec\n")
+
         return {
-            "text": "Transcription failed",
-            "error": str(e)
+            "status": "success",
+            "message": text,
+            "cleaned_query": cleaned_query,
+            "tts_text": tts_text if audio else None,
+            "audio": audio,
+            "score": score,
+        }
+
+    # ── KEYBOARD PATH ────────────────────────────────────────────────────────
+    else:
+        data = await request.json()
+        query = (data.get("query") or "").strip()
+        voice = bool(data.get("voice", False))
+
+        if voice:
+            print("WARNING: /query keyboard path received voice:true — treating as keyboard")
+
+        print(f"\n--- KEYBOARD REQUEST ---")
+        print(f"QUERY: {query}")
+
+        if not query:
+            return {
+                "status": "error",
+                "message": "Please enter a question.",
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        if len(query) > 500:
+            return {
+                "status": "error",
+                "message": "Query too long.",
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        if len(query.split()) <= 1:
+            return {
+                "status": "success",
+                "message": "Please say a full sentence like 'my sugar is high after meal'",
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        result = await build_response(query)
+        text = result.get("text", "")
+        score = result.get("score", 0)
+
+        print("⏱️", round(time.time() - start, 2), "sec\n")
+
+        # audio is always null for keyboard — spec constraint
+        return {
+            "status": "success",
+            "message": text,
+            "cleaned_query": None,
+            "tts_text": None,
+            "audio": None,
+            "score": score,
         }
