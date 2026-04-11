@@ -5,6 +5,7 @@ import re
 import os
 import time
 import asyncio
+import base64
 from litellm import completion
 from dotenv import load_dotenv
 
@@ -15,7 +16,7 @@ client = OpenAI()
 LLM_MODE = os.getenv("LLM_MODE", "openai")
 USE_LLM = os.getenv("USE_LLM", "true").lower() == "true"
 USE_MOCK = os.getenv("USE_MOCK", "false").lower() == "true"
-SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"  # 🔥 ADDED
+SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"
 
 MODEL_OPENAI = os.getenv("MODEL_OPENAI", "gpt-4o-mini")
 MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
@@ -23,7 +24,7 @@ MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
 print("LLM_MODE:", LLM_MODE)
 print("USE_LLM:", USE_LLM)
 print("USE_MOCK:", USE_MOCK)
-print("SCROLL_TEST:", SCROLL_TEST)  # 🔥 ADDED
+print("SCROLL_TEST:", SCROLL_TEST)
 
 app = FastAPI()
 
@@ -126,7 +127,6 @@ def detect_intent(q: str) -> str:
 
         for group_name, keywords in groups.items():
             for kw in keywords:
-                # 2) multi-word keyword matching can still miss punctuation cases
                 if re.search(rf"\b{re.escape(kw)}\b", text):
                     if group_name == "primary":
                         score += 3
@@ -181,7 +181,6 @@ def compute_score(intent: str, q: str) -> int:
 
 # ---------------- MOCK ----------------
 def mock_response(intent: str) -> str:
-
     if intent == "glucose":
         return """## Likely Cause
 Glucose spike likely due to high carbs without fiber.
@@ -229,7 +228,7 @@ I can help with lifestyle, glucose, BP, and cholesterol.
 Try asking about food, exercise, or health markers."""
 
 
-# ---------------- PROMPT (UPDATED WITH PROFILE) ----------------
+# ---------------- PROMPT ----------------
 def build_prompt(q: str, ctx: dict) -> str:
     return f"""
 You are a lifestyle health assistant.
@@ -290,7 +289,6 @@ def extract_text(res):
 # ---------------- LLM ----------------
 def llm_response(q: str, ctx: dict) -> str:
     prompt = build_prompt(q, ctx)
-
     model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
 
     res = completion(
@@ -314,9 +312,25 @@ Try asking again with more detail.
 """
 
 
+# ---------------- TTS ----------------
+def generate_tts(text: str):
+    try:
+        speech = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=text
+        )
+
+        audio_bytes = speech.read()
+        return base64.b64encode(audio_bytes).decode("utf-8")
+
+    except Exception as e:
+        print("TTS ERROR:", e)
+        return None
+
+
 # ---------------- MAIN ----------------
 async def build_response(query: str):
-    # 1) empty query guard
     if not query:
         return {"text": "Empty query", "score": 0}
 
@@ -367,8 +381,8 @@ Try asking about lifestyle, BP, glucose, or cholesterol.""",
         "score": score
     }
 
+
 # ---------------- API ----------------
-@app.post("/query")
 @app.post("/query")
 async def handle_query(request: Request):
     start = time.time()
@@ -381,6 +395,7 @@ async def handle_query(request: Request):
             "status": "success",
             "message": "Please say a full sentence like 'my sugar is high after meal'",
             "score": 0,
+            "audio": None,
             "error": None,
         }
 
@@ -389,21 +404,26 @@ async def handle_query(request: Request):
             "status": "success",
             "message": "Query too long",
             "score": 0,
+            "audio": None,
             "error": None,
         }
 
     result = await build_response(query)
 
+    text = result.get("text", "")
+    audio = generate_tts(text)
+
     response = {
         "status": "success",
-        "message": result.get("text", ""),
+        "message": text,
         "score": result.get("score"),
+        "audio": audio,
         "error": result.get("error"),
     }
 
     print("⏱️", round(time.time() - start, 2), "sec\n")
-
     return response
+
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):

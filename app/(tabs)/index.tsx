@@ -1,4 +1,5 @@
 import { Audio } from "expo-av";
+import * as FileSystem from "expo-file-system/legacy";
 import React, { useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -18,14 +19,6 @@ import SectionCard from "../../components/SectionCard";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
-/*
-🎨 ===================== COLOR SYSTEM =====================
-
-👉 CHANGE COLORS HERE ONLY 👇
-
---- CURRENT (balanced dark) ---
-*/
-
 const COLORS = {
   background: "#0B0F14",
   surface: "#121821",
@@ -41,7 +34,6 @@ const COLORS = {
 
   userBubble: "#DCF8C6",
 };
-
 /*
 --- OPTION 0: balanced dark ---
 background: "#0B0F14",
@@ -99,10 +91,10 @@ export default function HomeScreen() {
   const lockRef = useRef(false);
   const blockRefs = useRef<Record<string, View | null>>({});
   const lastScrollIdRef = useRef<string | null>(null);
-  
 
   const parseSections = (text: string): Section[] | null => {
     if (!text || !text.includes("##")) return null;
+
     return text
       .split("## ")
       .filter(Boolean)
@@ -123,7 +115,7 @@ export default function HomeScreen() {
 
       block.measureLayout(
         scrollView,
-        (x, y) => {
+        (_x, y) => {
           scrollView.scrollTo({
             y: Math.max(0, y - 20),
             animated: true,
@@ -133,16 +125,24 @@ export default function HomeScreen() {
       );
     });
   };
+
   const stopListening = async (rec: any) => {
     try {
+      if (!rec) return;
+
       console.log("🛑 Stopping recording...");
       await rec.stopAndUnloadAsync();
+
       setRecording(null);
 
       const uri = rec.getURI();
       console.log("Recorded file:", uri);
 
-      const isCAF = uri?.endsWith(".caf");
+      if (!uri) {
+        throw new Error("Recording URI missing");
+      }
+
+      const isCAF = uri.endsWith(".caf");
 
       const formData = new FormData();
       formData.append("file", {
@@ -159,22 +159,44 @@ export default function HomeScreen() {
       });
 
       if (!response.ok) {
-        throw new Error("Transcription failed");
+        throw new Error(`Transcription failed: HTTP ${response.status}`);
       }
 
       const data = await response.json();
-      const transcribedText = data.text || "Could not transcribe";
+      const transcribedText = (data.text || "").trim();
 
-      setInput(transcribedText);   // show user what was heard
-      sendMessage(transcribedText);
+      console.log("TRANSCRIBE RESPONSE:", data);
 
+      if (!transcribedText) {
+        setInput("Could not transcribe");
+        return;
+      }
+
+      setInput(transcribedText);
+      await sendMessage(transcribedText);
     } catch (err) {
       console.error("Stop error:", err);
+      setRecording(null);
       setInput("Voice failed. Try again.");
+    } finally {
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+        });
+      } catch {
+        // ignore
+      }
     }
   };
+
   const startListening = async () => {
     try {
+      if (recording || lockRef.current) {
+        console.log("🚫 Busy");
+        return;
+      }
+
       console.log("🎤 Requesting permission...");
       const permission = await Audio.requestPermissionsAsync();
 
@@ -198,11 +220,12 @@ export default function HomeScreen() {
       setTimeout(async () => {
         await stopListening(rec);
       }, 3000);
-
     } catch (err) {
       console.error("Recording error:", err);
+      setRecording(null);
     }
   };
+
   const sendMessage = async (override?: string) => {
     if (lockRef.current) return;
     lockRef.current = true;
@@ -228,17 +251,57 @@ export default function HomeScreen() {
     });
 
     try {
+      console.log("SENDING QUERY:", query);
+
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query,
+          voice: true,
+        }),
       });
 
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
       const data = await res.json();
+      console.log("QUERY RESPONSE:", data);
+
       const text =
         typeof data.message === "string"
           ? data.message
           : JSON.stringify(data.message || "");
+
+      // 🔊 audio playback
+      if (data.audio) {
+        try {
+          const fileUri = FileSystem.cacheDirectory + "tts.mp3";
+
+          await FileSystem.writeAsStringAsync(fileUri, data.audio, {
+            encoding: "base64" as any,
+          });
+
+          const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
+
+          console.log("AUDIO PLAYING");
+          await sound.playAsync();
+
+          sound.setOnPlaybackStatusUpdate((status) => {
+            if ((status as any).didJustFinish) {
+              console.log("AUDIO FINISHED");
+              sound.unloadAsync();
+            }
+          });
+        } catch (err) {
+          console.log("AUDIO PLAY ERROR:", err);
+        }
+      } else {
+        console.log("NO AUDIO RETURNED");
+      }
 
       const sections = parseSections(text);
 
@@ -262,11 +325,11 @@ export default function HomeScreen() {
 
         return updated;
       });
-    } catch {
+    } catch (err) {
+      console.log("QUERY ERROR:", err);
+
       setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id ? { ...b, status: "error" } : b
-        )
+        prev.map((b) => (b.id === id ? { ...b, status: "error" } : b))
       );
     } finally {
       lockRef.current = false;
@@ -283,15 +346,23 @@ export default function HomeScreen() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.background }}>
       <View style={{ flex: 1, backgroundColor: COLORS.background }}>
-
-        {/* HEADER */}
         <View style={{ paddingHorizontal: 16, paddingTop: 2, paddingBottom: 6 }}>
           <ProfileStrip />
 
           <Text style={{ fontSize: 20 }}>
-            <Text style={{ color: COLORS.textPrimary }}>FeedSoul</Text>
-            <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Joy</Text>
+            <Text style={{ color: COLORS.textPrimary }}>Improve</Text>
+            <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Me</Text>
             <Text style={{ color: COLORS.textSecondary }}> · Lifestyle</Text>
+          </Text>
+
+          <Text
+            style={{
+              color: COLORS.textSecondary,
+              fontSize: 13,
+              marginTop: 2,
+            }}
+          >
+            Better lifestyle. Better future.
           </Text>
 
           <View style={{ marginTop: 4, opacity: isLoading ? 0.5 : 1 }}>
@@ -299,7 +370,6 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* MAIN */}
         <KeyboardAvoidingView
           style={{ flex: 1 }}
           behavior={Platform.OS === "ios" ? "padding" : "height"}
@@ -330,7 +400,6 @@ export default function HomeScreen() {
                     else delete blockRefs.current[block.id];
                   }}
                 >
-                  {/* USER */}
                   <View
                     style={{
                       alignSelf: "flex-end",
@@ -345,25 +414,21 @@ export default function HomeScreen() {
                     <Text style={{ color: COLORS.textDark }}>{block.query}</Text>
                   </View>
 
-                  {/* LOADING */}
                   {block.status === "loading" && (
                     <View style={{ padding: 10 }}>
                       <ActivityIndicator color={COLORS.accent} />
                     </View>
                   )}
 
-                  {/* ERROR */}
                   {block.status === "error" && (
                     <Text style={{ color: COLORS.error }}>Connection error</Text>
                   )}
 
-                  {/* SECTIONS */}
                   {block.status === "complete" &&
                     block.sections?.map((s, i) => (
                       <SectionCard key={i} title={s.title} content={s.content} />
                     ))}
 
-                  {/* RAW */}
                   {block.status === "complete" && block.rawText && (
                     <View
                       style={{
@@ -380,7 +445,6 @@ export default function HomeScreen() {
               ))}
             </ScrollView>
 
-            {/* INPUT */}
             <View
               style={{
                 flexDirection: "row",
@@ -400,9 +464,8 @@ export default function HomeScreen() {
                 style={{ flex: 1, color: COLORS.textPrimary }}
               />
 
-              {/* 🎤 MIC BUTTON */}
               <TouchableOpacity
-                disabled={isLoading}
+                disabled={isLoading || !!recording}
                 onPress={startListening}
                 style={{
                   marginRight: 8,
@@ -410,12 +473,12 @@ export default function HomeScreen() {
                   paddingVertical: 10,
                   borderRadius: 10,
                   backgroundColor: COLORS.surfaceAlt,
+                  opacity: isLoading || recording ? 0.5 : 1,
                 }}
               >
                 <Text style={{ color: COLORS.textPrimary }}>🎤</Text>
               </TouchableOpacity>
 
-              {/* SEND BUTTON */}
               <TouchableOpacity
                 disabled={isLoading}
                 onPress={() => sendMessage()}
@@ -424,6 +487,7 @@ export default function HomeScreen() {
                   paddingHorizontal: 14,
                   paddingVertical: 10,
                   borderRadius: 10,
+                  opacity: isLoading ? 0.5 : 1,
                 }}
               >
                 <Text style={{ color: "#000" }}>Send</Text>
