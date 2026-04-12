@@ -14,8 +14,6 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import ProfileStrip from "../../components/ProfileStrip";
-import QuickChips from "../../components/QuickChips";
 import SectionCard from "../../components/SectionCard";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
@@ -121,26 +119,26 @@ export default function HomeScreen() {
         sv as any,
         (_x: number, y: number) =>
           sv.scrollTo({ y: Math.max(0, y - 20), animated: true }),
-        () => {}
+        () => { }
       );
     });
   };
 
   // ─── Audio playback ──────────────────────────────────────────────────────
 
-    const stopAnyPlayback = async () => {
-      const sound = activeSoundRef.current;
-      if (!sound) return;
-      activeSoundRef.current = null;
-      try {
-        await sound.stopAsync();
-        await sound.unloadAsync();
-      } catch {
-        // already stopped or unloaded — ignore
-      }
-    };
+  const stopAnyPlayback = async () => {
+    const sound = activeSoundRef.current;
+    if (!sound) return;
+    activeSoundRef.current = null;
+    try {
+      await sound.stopAsync();
+      await sound.unloadAsync();
+    } catch {
+      // already stopped or unloaded — ignore
+    }
+  };
 
-    const playAudio = async (base64: string) => {
+  const playAudio = async (base64: string) => {
     await stopAnyPlayback();
 
     try {
@@ -169,13 +167,13 @@ export default function HomeScreen() {
         if (activeSoundRef.current === sound) {
           activeSoundRef.current = null;
           sound.setOnPlaybackStatusUpdate(null);
-          sound.unloadAsync().catch(() => {});
+          sound.unloadAsync().catch(() => { });
           updateVoiceState("IDLE");
           setStatusText(null);
         }
       });
 
-      await sound.playAsync(); 
+      await sound.playAsync();
     } catch (err) {
       console.error("[playAudio] load/play error:", err);
 
@@ -186,7 +184,7 @@ export default function HomeScreen() {
         try {
           s.setOnPlaybackStatusUpdate(null);
           await s.unloadAsync();
-        } catch {}
+        } catch { }
       }
 
       updateVoiceState("IDLE");
@@ -280,12 +278,12 @@ export default function HomeScreen() {
         prev.map((b) =>
           b.id === id
             ? {
-                ...b,
-                query: cleanedQuery,
-                status: "complete",
-                sections: sections ?? undefined,
-                rawText: sections ? undefined : text,
-              }
+              ...b,
+              query: cleanedQuery,
+              status: "complete",
+              sections: sections ?? undefined,
+              rawText: sections ? undefined : text,
+            }
             : b
         )
       );
@@ -383,11 +381,11 @@ export default function HomeScreen() {
         prev.map((b) =>
           b.id === id
             ? {
-                ...b,
-                status: "complete",
-                sections: sections ?? undefined,
-                rawText: sections ? undefined : text,
-              }
+              ...b,
+              status: "complete",
+              sections: sections ?? undefined,
+              rawText: sections ? undefined : text,
+            }
             : b
         )
       );
@@ -441,7 +439,7 @@ export default function HomeScreen() {
       // stopAndUnloadAsync — single correct teardown, releases OS mic lock — spec §13.1
       try {
         await rec.stopAndUnloadAsync();
-      } catch {}
+      } catch { }
     }
 
     try {
@@ -449,7 +447,7 @@ export default function HomeScreen() {
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
       });
-    } catch {}
+    } catch { }
 
     if (voiceStateRef.current === "RECORDING") {
       updateVoiceState("IDLE");
@@ -481,7 +479,7 @@ export default function HomeScreen() {
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
       });
-    } catch {}
+    } catch { }
 
     const uri = rec.getURI();
 
@@ -539,7 +537,7 @@ export default function HomeScreen() {
       activeRecordingRef.current = null;
       try {
         await dangling.stopAndUnloadAsync();
-      } catch {}
+      } catch { }
     }
 
     isStoppingRef.current = false;
@@ -614,27 +612,27 @@ export default function HomeScreen() {
 
   // ─── Input handlers ───────────────────────────────────────────────────────
 
-const handleMicPress = async () => {
-  const state = voiceStateRef.current;
+  const handleMicPress = async () => {
+    const state = voiceStateRef.current;
 
-  if (state === "RECORDING") {
-    await stopRecordingAndSend(false);
-    return;
-  }
+    if (state === "RECORDING") {
+      await stopRecordingAndSend(false);
+      return;
+    }
 
-  if (state === "PLAYING") {
-    await stopAnyPlayback();
-    updateVoiceState("IDLE");
-    return;
-  }
+    if (state === "PLAYING") {
+      await stopAnyPlayback();
+      updateVoiceState("IDLE");
+      return;
+    }
 
-  if (state === "IDLE") {
-    await startRecording();
-    return;
-  }
+    if (state === "IDLE") {
+      await startRecording();
+      return;
+    }
 
-  // PROCESSING → ignore
-};
+    // PROCESSING → ignore
+  };
 
   const handleSendPress = () => {
     if (voiceStateRef.current === "PROCESSING") return;
@@ -669,7 +667,7 @@ const handleMicPress = async () => {
         if (rec) {
           try {
             await rec.stopAndUnloadAsync();
-          } catch {}
+          } catch { }
         }
         voiceStateRef.current = "IDLE";
         setVoiceState("IDLE");
@@ -711,46 +709,136 @@ const handleMicPress = async () => {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.background }}>
       <View style={{ flex: 1, backgroundColor: COLORS.background }}>
-        <View style={{ paddingHorizontal: 16, paddingTop: 2, paddingBottom: 6 }}>
-          {/* 👇 Move profile here */}
-          <View style={{ marginTop: 2, opacity: 0.9, paddingHorizontal: 0}}>
-            <ProfileStrip />
-          </View>
-          
-          <View
-          style={{
-            backgroundColor: COLORS.surface, // same as input bar tone
-            paddingHorizontal: 16,
-            paddingVertical: 1,
-            borderRadius: 16,
-            marginHorizontal: 0,
-            marginTop: -8,
-            marginBottom: 1,
-            borderWidth: 1,
-            borderColor: "rgba(255,255,255,0.05)",
-          }}
-        >
-          <Text style={{ fontSize: 20 }}>
-            <Text style={{ color: COLORS.textPrimary }}>Improve</Text>
-            <Text style={{ color: COLORS.accent, fontWeight: "600" }}>Me</Text>
-            <Text style={{ color: COLORS.textSecondary }}> · Daily</Text>
-          </Text>
+        <View style={{ paddingHorizontal: 16, paddingTop: 4, paddingBottom: 6 }}>
 
-          <Text
+          {/* HEADER */}
+          <View
             style={{
-              color: COLORS.textSecondary,
-              fontSize: 13,
-              marginTop: 2,
+              backgroundColor: COLORS.surface,
+              borderRadius: 22,
+              paddingVertical: 12,
+              paddingHorizontal: 16,
+
+              borderWidth: 1,
+              borderColor: "rgba(255,255,255,0.08)",
+
+              // subtle glow
+              shadowColor: COLORS.accent,
+              shadowOpacity: 0.10,
+              shadowRadius: 6,
+              shadowOffset: { width: 0, height: 2 },
+              marginBottom: 0,
             }}
           >
-            Better lifestyle. Healthier future.
-          </Text>
-        </View>
+            <Text
+              style={{
+                fontSize: 26,
+                letterSpacing: 0.5,
+                fontWeight: "500",   // 👈 SAME for both Improve + Me
+              }}
+            >
+              {/* Improve */}
+              <Text
+                style={{
+                  color: COLORS.textPrimary,
+                }}
+              >
+                Better
+              </Text>
 
-          
-          <View style={{ marginTop: 4, opacity: isProcessing ? 0.5 : 1 }}>
-            {false && <QuickChips onSelect={handleChip} />}
+              {/* Me */}
+              <Text
+                style={{
+                  color: COLORS.accent,
+                }}
+              >
+                Me
+              </Text>
+
+              {/* Dot */}
+              <Text
+                style={{
+                  color: COLORS.textSecondary,
+                  opacity: 0.5,
+                }}
+              >
+                {" · Daily"}
+              </Text>
+            </Text>
+
+            {/* TAGLINE */}
+            <Text
+              style={{
+                color: COLORS.textSecondary,
+                fontSize: 13,
+                marginTop: 3,
+                opacity: 0.75,
+              }}
+            >
+              Better meals. Better habits. Better you.
+            </Text>
           </View>
+
+          {/* PROFILE BELOW */}
+          <View
+            style={{
+              backgroundColor: COLORS.surfaceAlt,
+              borderRadius: 20,
+              paddingVertical: 8,
+              paddingHorizontal: 12,
+
+              borderWidth: 1,
+              borderColor: "rgba(255,255,255,0.06)",
+
+              flexDirection: "row",
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            {/* NAME */}
+            <Text
+              style={{
+                color: COLORS.textPrimary,
+                fontSize: 15,
+                fontWeight: "500",
+                marginRight: 8,
+              }}
+            >
+              Deepak
+            </Text>
+
+            {/* CHIPS */}
+            {["A1C 8", "Glucose Focus", "Spiker"].map((item) => (
+              <View
+                key={item}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  marginRight: 8,
+                  marginBottom: 2,
+                }}
+              >
+                <View
+                  style={{
+                    width: 4,
+                    height: 4,
+                    borderRadius: 2,
+                    backgroundColor: COLORS.accent,
+                    marginRight: 4,
+                  }}
+                />
+                <Text
+                  style={{
+                    color: COLORS.textSecondary,
+                    fontSize: 12,
+                  }}
+                >
+                  {item}
+                </Text>
+              </View>
+            ))}
+          </View>
+
         </View>
 
         <KeyboardAvoidingView
@@ -928,7 +1016,7 @@ const handleMicPress = async () => {
                 value={input}
                 onChangeText={setInput}
                 editable={!isProcessing}
-                placeholder='Speak. End with "Go ImproveMe..."'
+                placeholder='Ask or speak… say “Go BetterMe”'
                 placeholderTextColor={COLORS.textSecondary}
                 style={{ flex: 1, color: COLORS.textPrimary }}
                 onSubmitEditing={handleSendPress}
