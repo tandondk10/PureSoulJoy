@@ -1,5 +1,6 @@
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
+import { router } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -644,6 +645,14 @@ export default function HomeScreen() {
   const handleChip = (value: string) => {
     if (voiceStateRef.current === "PROCESSING") return;
     sendKeyboardQuery(value);
+  };
+
+  const handleActionChip = (label: string) => {
+    console.log("Chip pressed:", label);
+
+    if (label.toLowerCase().includes("analyze")) {
+      router.push("/deepak"); // 👈 your Analyze tab
+    }
   };
 
   // ─── App lifecycle ────────────────────────────────────────────────────────
