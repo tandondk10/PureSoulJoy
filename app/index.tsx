@@ -1,6 +1,6 @@
+import { C } from "@/constants/colors";
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
-import { router } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -14,10 +14,13 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+
+import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import SectionCard from "../../components/SectionCard";
+import SectionCard from "../components/SectionCard";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
+
 
 // Voice thresholds — all configurable, no hardcoded values per spec §2.1
 const SILENCE_DB_THRESHOLD = -40; // dBFS — below = silence
@@ -26,18 +29,6 @@ const FINAL_PAUSE_MS = 4000;      // 4s — stop and send
 const MAX_RECORDING_MS = 20000;   // 20s — hard stop failsafe
 const REQUEST_TIMEOUT_MS = 20000; // 20s — backend request timeout
 
-const COLORS = {
-  background: "#0B0F14",
-  surface: "#121821",
-  surfaceAlt: "#071427",
-  textPrimary: "#FFFFFF",
-  textSecondary: "#9CA3AF",
-  textDark: "#111827",
-  accent: "#FFD06A",
-  error: "#EF4444",
-  userBubble: "#DCF8C6",
-  recordingRed: "#7F1D1D",
-};
 
 type VoiceState = "IDLE" | "RECORDING" | "PROCESSING" | "PLAYING";
 
@@ -66,6 +57,7 @@ export default function HomeScreen() {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [blocks, setBlocks] = useState<QueryBlock[]>([]);
   const [input, setInput] = useState("");
+  const router = useRouter();
 
   // Refs — readable inside callbacks, AppState handler, timers
   const voiceStateRef = useRef<VoiceState>("IDLE");
@@ -651,7 +643,7 @@ export default function HomeScreen() {
     console.log("Chip pressed:", label);
 
     if (label.toLowerCase().includes("analyze")) {
-      router.push("/deepak"); // 👈 your Analyze tab
+      router.push("/meal?intent=analyze_meal"); // 👈 your Analyze tab
     }
   };
 
@@ -707,6 +699,7 @@ export default function HomeScreen() {
   const isProcessing = voiceState === "PROCESSING";
   const isRecording = voiceState === "RECORDING";
 
+
   const isErrorStatus =
     statusText !== null &&
     (statusText.includes("timed out") ||
@@ -716,14 +709,24 @@ export default function HomeScreen() {
       statusText.includes("access is required"));
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.background }}>
-      <View style={{ flex: 1, backgroundColor: COLORS.background }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }}>
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: "#0B0F14",
+          padding: 20,
+        }}
+      >
         <View style={{ paddingHorizontal: 16, paddingTop: 4, paddingBottom: 6 }}>
 
           {/* HEADER */}
           <View
             style={{
-              backgroundColor: COLORS.surface,
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "center",
+
+              backgroundColor: C.surface,
               borderRadius: 22,
               paddingVertical: 12,
               paddingHorizontal: 16,
@@ -731,67 +734,58 @@ export default function HomeScreen() {
               borderWidth: 1,
               borderColor: "rgba(255,255,255,0.08)",
 
-              // subtle glow
-              shadowColor: COLORS.accent,
+              shadowColor: C.accent,
               shadowOpacity: 0.10,
               shadowRadius: 6,
               shadowOffset: { width: 0, height: 2 },
               marginBottom: 0,
             }}
           >
-            <Text
+            {/* LEFT SIDE (existing title) */}
+            <View style={{ flex: 1, backgroundColor: C.bg }}>
+              <Text
+                style={{
+                  fontSize: 26,
+                  letterSpacing: 0.5,
+                  fontWeight: "500",
+                }}
+              >
+                <Text style={{ color: C.text }}>Better</Text>
+                <Text style={{ color: C.accent }}>Me</Text>
+                <Text style={{ color: C.muted, opacity: 0.5 }}>
+                  {" · Daily"}
+                </Text>
+              </Text>
+
+              <Text
+                style={{
+                  color: C.muted,
+                  fontSize: 13,
+                  marginTop: 3,
+                  opacity: 0.75,
+                }}
+              >
+                Better meals. Better habits. Better you.
+              </Text>
+            </View>
+
+            {/* RIGHT SIDE (NEW MENU BUTTON) */}
+            <TouchableOpacity
+              onPress={() => router.push("/menu")}
               style={{
-                fontSize: 26,
-                letterSpacing: 0.5,
-                fontWeight: "500",   // 👈 SAME for both Improve + Me
+                paddingVertical: 6,
+                paddingHorizontal: 12,
+                borderRadius: 10,
+                backgroundColor: C.surfaceAlt,
               }}
             >
-              {/* Improve */}
-              <Text
-                style={{
-                  color: COLORS.textPrimary,
-                }}
-              >
-                Better
-              </Text>
-
-              {/* Me */}
-              <Text
-                style={{
-                  color: COLORS.accent,
-                }}
-              >
-                Me
-              </Text>
-
-              {/* Dot */}
-              <Text
-                style={{
-                  color: COLORS.textSecondary,
-                  opacity: 0.5,
-                }}
-              >
-                {" · Daily"}
-              </Text>
-            </Text>
-
-            {/* TAGLINE */}
-            <Text
-              style={{
-                color: COLORS.textSecondary,
-                fontSize: 13,
-                marginTop: 3,
-                opacity: 0.75,
-              }}
-            >
-              Better meals. Better habits. Better you.
-            </Text>
+            </TouchableOpacity>
           </View>
 
           {/* PROFILE BELOW */}
           <View
             style={{
-              backgroundColor: COLORS.surfaceAlt,
+              backgroundColor: C.surfaceAlt,
               borderRadius: 20,
               paddingVertical: 8,
               paddingHorizontal: 12,
@@ -807,7 +801,7 @@ export default function HomeScreen() {
             {/* NAME */}
             <Text
               style={{
-                color: COLORS.textPrimary,
+                color: C.text,
                 fontSize: 15,
                 fontWeight: "500",
                 marginRight: 8,
@@ -832,13 +826,13 @@ export default function HomeScreen() {
                     width: 4,
                     height: 4,
                     borderRadius: 2,
-                    backgroundColor: COLORS.accent,
+                    backgroundColor: C.accent,
                     marginRight: 4,
                   }}
                 />
                 <Text
                   style={{
-                    color: COLORS.textSecondary,
+                    color: C.muted,
                     fontSize: 12,
                   }}
                 >
@@ -861,7 +855,7 @@ export default function HomeScreen() {
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
               contentContainerStyle={{
-                backgroundColor: COLORS.background,
+                backgroundColor: C.bg,
                 paddingHorizontal: 16,
                 paddingTop: 6,
                 paddingBottom: 100,
@@ -885,7 +879,7 @@ export default function HomeScreen() {
                     <View
                       style={{
                         alignSelf: "flex-end",
-                        backgroundColor: COLORS.userBubble,
+                        backgroundColor: C.userBubble,
                         paddingVertical: 6,
                         paddingHorizontal: 10,
                         borderRadius: 14,
@@ -893,7 +887,7 @@ export default function HomeScreen() {
                         maxWidth: "80%",
                       }}
                     >
-                      <Text style={{ color: COLORS.textDark }}>
+                      <Text style={{ color: C.textDark }}>
                         {block.query}
                       </Text>
                     </View>
@@ -901,14 +895,14 @@ export default function HomeScreen() {
 
                   {block.status === "loading" && (
                     <View style={{ padding: 10 }}>
-                      <ActivityIndicator color={COLORS.accent} />
+                      <ActivityIndicator color={C.accent} />
                     </View>
                   )}
 
                   {block.status === "error" && (
                     <Text
                       style={{
-                        color: COLORS.error,
+                        color: C.error,
                         paddingVertical: 4,
                         paddingHorizontal: 2,
                       }}
@@ -926,13 +920,13 @@ export default function HomeScreen() {
                   {block.status === "complete" && block.rawText && (
                     <View
                       style={{
-                        backgroundColor: COLORS.surfaceAlt,
+                        backgroundColor: C.surfaceAlt,
                         padding: 12,
                         borderRadius: 14,
                         marginVertical: 6,
                       }}
                     >
-                      <Text style={{ color: COLORS.textPrimary }}>
+                      <Text style={{ color: C.text }}>
                         {block.rawText}
                       </Text>
                     </View>
@@ -952,7 +946,7 @@ export default function HomeScreen() {
               >
                 <Text
                   style={{
-                    color: isErrorStatus ? COLORS.error : COLORS.textSecondary,
+                    color: isErrorStatus ? C.error : C.muted,
                     fontSize: 13,
                   }}
                 >
@@ -969,7 +963,7 @@ export default function HomeScreen() {
             >
               <Text
                 style={{
-                  color: COLORS.textSecondary,
+                  color: C.muted,
                   fontSize: 12,
                   marginBottom: 6,
                 }}
@@ -995,14 +989,14 @@ export default function HomeScreen() {
                     onPress={() => handleActionChip(label)}
                     style={{
                       width: "48%",
-                      backgroundColor: COLORS.surfaceAlt,
+                      backgroundColor: C.surfaceAlt,
                       paddingVertical: 10,
                       paddingHorizontal: 12,
                       borderRadius: 14,
                       marginBottom: 8,
                     }}
                   >
-                    <Text style={{ color: COLORS.textPrimary }}>
+                    <Text style={{ color: C.text }}>
                       {label}
                     </Text>
                   </TouchableOpacity>
@@ -1013,7 +1007,7 @@ export default function HomeScreen() {
             <View
               style={{
                 flexDirection: "row",
-                backgroundColor: COLORS.surface,
+                backgroundColor: C.surface,
                 borderRadius: 14,
                 padding: 8,
                 margin: 10,
@@ -1026,8 +1020,8 @@ export default function HomeScreen() {
                 onChangeText={setInput}
                 editable={!isProcessing}
                 placeholder='Ask or speak… say “Go BetterMe”'
-                placeholderTextColor={COLORS.textSecondary}
-                style={{ flex: 1, color: COLORS.textPrimary }}
+                placeholderTextColor={C.muted}
+                style={{ flex: 1, color: C.text }}
                 onSubmitEditing={handleSendPress}
                 returnKeyType="send"
               />
@@ -1042,12 +1036,12 @@ export default function HomeScreen() {
                   paddingVertical: 10,
                   borderRadius: 10,
                   backgroundColor: isRecording
-                    ? COLORS.recordingRed
-                    : COLORS.surfaceAlt,
+                    ? C.recordingRed
+                    : C.surfaceAlt,
                   opacity: isProcessing ? 0.5 : 1,
                 }}
               >
-                <Text style={{ color: COLORS.textPrimary }}>
+                <Text style={{ color: C.text }}>
                   {isRecording ? "⏹" : "🎤"}
                   {voiceState === "PLAYING" ? "⏹" : "🎤"}
                 </Text>
@@ -1058,7 +1052,7 @@ export default function HomeScreen() {
                 disabled={isProcessing}
                 onPress={handleSendPress}
                 style={{
-                  backgroundColor: COLORS.accent,
+                  backgroundColor: C.accent,
                   paddingHorizontal: 14,
                   paddingVertical: 10,
                   borderRadius: 10,
