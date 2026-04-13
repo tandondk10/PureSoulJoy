@@ -248,7 +248,7 @@ function CaptureStage({ onSubmit }: { onSubmit: (text: string) => void }) {
   return (
     <View>
       <Text style={{ color: C.text, fontSize: 22, fontWeight: "600", marginBottom: 6 }}>
-        What did you eat?
+        What can we improve?
       </Text>
       <Text style={{ color: C.muted, fontSize: 14, marginBottom: 20, lineHeight: 20 }}>
         List items with rough amounts — commas are fine

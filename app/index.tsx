@@ -15,6 +15,7 @@ import {
   View,
 } from "react-native";
 
+import AppHeader from "@/components/AppHeader";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SectionCard from "../components/SectionCard";
@@ -645,6 +646,9 @@ export default function HomeScreen() {
     if (label.toLowerCase().includes("analyze")) {
       router.push("/meal?intent=analyze_meal"); // 👈 your Analyze tab
     }
+    if (label.toLowerCase().includes("improve")) {
+      router.push("/meal?intent=improve_meal"); // 👈 your Improve tab
+    }
   };
 
   // ─── App lifecycle ────────────────────────────────────────────────────────
@@ -714,135 +718,9 @@ export default function HomeScreen() {
         style={{
           flex: 1,
           backgroundColor: "#0B0F14",
-          padding: 20,
         }}
       >
-        <View style={{ paddingHorizontal: 16, paddingTop: 4, paddingBottom: 6 }}>
-
-          {/* HEADER */}
-          <View
-            style={{
-              flexDirection: "row",
-              justifyContent: "space-between",
-              alignItems: "center",
-
-              backgroundColor: C.surface,
-              borderRadius: 22,
-              paddingVertical: 12,
-              paddingHorizontal: 16,
-
-              borderWidth: 1,
-              borderColor: "rgba(255,255,255,0.08)",
-
-              shadowColor: C.accent,
-              shadowOpacity: 0.10,
-              shadowRadius: 6,
-              shadowOffset: { width: 0, height: 2 },
-              marginBottom: 0,
-            }}
-          >
-            {/* LEFT SIDE (existing title) */}
-            <View style={{ flex: 1, backgroundColor: C.bg }}>
-              <Text
-                style={{
-                  fontSize: 26,
-                  letterSpacing: 0.5,
-                  fontWeight: "500",
-                }}
-              >
-                <Text style={{ color: C.text }}>Better</Text>
-                <Text style={{ color: C.accent }}>Me</Text>
-                <Text style={{ color: C.muted, opacity: 0.5 }}>
-                  {" · Daily"}
-                </Text>
-              </Text>
-
-              <Text
-                style={{
-                  color: C.muted,
-                  fontSize: 13,
-                  marginTop: 3,
-                  opacity: 0.75,
-                }}
-              >
-                Better meals. Better habits. Better you.
-              </Text>
-            </View>
-
-            {/* RIGHT SIDE (NEW MENU BUTTON) */}
-            <TouchableOpacity
-              onPress={() => router.push("/menu")}
-              style={{
-                paddingVertical: 6,
-                paddingHorizontal: 12,
-                borderRadius: 10,
-                backgroundColor: C.surfaceAlt,
-              }}
-            >
-            </TouchableOpacity>
-          </View>
-
-          {/* PROFILE BELOW */}
-          <View
-            style={{
-              backgroundColor: C.surfaceAlt,
-              borderRadius: 20,
-              paddingVertical: 8,
-              paddingHorizontal: 12,
-
-              borderWidth: 1,
-              borderColor: "rgba(255,255,255,0.06)",
-
-              flexDirection: "row",
-              alignItems: "center",
-              flexWrap: "wrap",
-            }}
-          >
-            {/* NAME */}
-            <Text
-              style={{
-                color: C.text,
-                fontSize: 15,
-                fontWeight: "500",
-                marginRight: 8,
-              }}
-            >
-              Deepak
-            </Text>
-
-            {/* CHIPS */}
-            {["A1C 8", "Glucose Focus", "Spiker"].map((item) => (
-              <View
-                key={item}
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  marginRight: 8,
-                  marginBottom: 2,
-                }}
-              >
-                <View
-                  style={{
-                    width: 4,
-                    height: 4,
-                    borderRadius: 2,
-                    backgroundColor: C.accent,
-                    marginRight: 4,
-                  }}
-                />
-                <Text
-                  style={{
-                    color: C.muted,
-                    fontSize: 12,
-                  }}
-                >
-                  {item}
-                </Text>
-              </View>
-            ))}
-          </View>
-
-        </View>
+        <AppHeader />
 
         <KeyboardAvoidingView
           style={{ flex: 1 }}
@@ -957,7 +835,7 @@ export default function HomeScreen() {
 
             <View
               style={{
-                paddingHorizontal: 12,
+                paddingHorizontal: 16,
                 paddingBottom: 6,
               }}
             >
@@ -981,8 +859,6 @@ export default function HomeScreen() {
                 {[
                   "🍽 Analyze my meal",
                   "🥗 Improve my meal",
-                  "🍳 Build a meal",
-                  "⚡ What should I do now",
                 ].map((label) => (
                   <TouchableOpacity
                     key={label}
