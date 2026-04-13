@@ -644,10 +644,10 @@ export default function HomeScreen() {
     console.log("Chip pressed:", label);
 
     if (label.toLowerCase().includes("analyze")) {
-      router.push("/meal?intent=analyze_meal"); // 👈 your Analyze tab
+      router.push("/meal-main?intent=analyze_meal"); // 👈 your Analyze tab
     }
     if (label.toLowerCase().includes("improve")) {
-      router.push("/meal?intent=improve_meal"); // 👈 your Improve tab
+      router.push("/meal-main?intent=improve_meal"); // 👈 your Improve tab
     }
   };
 

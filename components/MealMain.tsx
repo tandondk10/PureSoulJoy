@@ -1,7 +1,7 @@
 import AppHeader from "@/components/AppHeader";
 import { C } from "@/constants/colors";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   KeyboardAvoidingView,
   Platform,
@@ -13,11 +13,10 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { log } from "../utils/instrumentation";
-import { ImproveMealBody } from "./ImproveMeal";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Stage = "capture" | "result";
+type Stage = "capture" | "confirm" | "result";
 type IntentId = "analyze_meal" | "improve_meal" | "build_meal" | "what_now";
 type MealUnit = "g" | "cup" | "piece";
 
@@ -48,17 +47,12 @@ type MealResult = {
   glucoseImpact: "Low" | "Moderate" | "High";
 };
 
-// ─── Colors ───────────────────────────────────────────────────────────────────
-
-
 const labelMap = {
   build_meal: "Build",
   what_now: "What now",
 };
 
 // ─── Food Database ────────────────────────────────────────────────────────────
-// Per-unit values: 1 cup cooked / 1 piece / per 100g when unit is "g"
-// NOTE: For production, replace with a backend nutrition API call.
 
 type FoodEntry = {
   carbs: number;
@@ -69,7 +63,6 @@ type FoodEntry = {
 };
 
 const FOODS: Record<string, FoodEntry> = {
-  // Grains
   rice: { carbs: 45, protein: 4, fats: 0.5, fiber_total: 0.6, fiber_soluble: 0.2 },
   "white rice": { carbs: 45, protein: 4, fats: 0.5, fiber_total: 0.6, fiber_soluble: 0.2 },
   "brown rice": { carbs: 45, protein: 5, fats: 2, fiber_total: 3.5, fiber_soluble: 0.8 },
@@ -81,7 +74,7 @@ const FOODS: Record<string, FoodEntry> = {
   dosa: { carbs: 30, protein: 4, fats: 3, fiber_total: 1, fiber_soluble: 0.3 },
   idli: { carbs: 20, protein: 3, fats: 0.5, fiber_total: 1, fiber_soluble: 0.2 },
   naan: { carbs: 38, protein: 7, fats: 5, fiber_total: 2, fiber_soluble: 0.5 },
-  // Proteins
+
   chicken: { carbs: 0, protein: 25, fats: 5, fiber_total: 0, fiber_soluble: 0 },
   "chicken breast": { carbs: 0, protein: 30, fats: 3, fiber_total: 0, fiber_soluble: 0 },
   egg: { carbs: 1, protein: 6, fats: 5, fiber_total: 0, fiber_soluble: 0 },
@@ -90,36 +83,45 @@ const FOODS: Record<string, FoodEntry> = {
   salmon: { carbs: 0, protein: 25, fats: 12, fiber_total: 0, fiber_soluble: 0 },
   paneer: { carbs: 3, protein: 14, fats: 10, fiber_total: 0, fiber_soluble: 0 },
   tofu: { carbs: 2, protein: 10, fats: 5, fiber_total: 0.3, fiber_soluble: 0.1 },
-  // Legumes
+
   dal: { carbs: 20, protein: 9, fats: 1, fiber_total: 8, fiber_soluble: 2 },
   lentils: { carbs: 20, protein: 9, fats: 1, fiber_total: 8, fiber_soluble: 2 },
   beans: { carbs: 22, protein: 8, fats: 1, fiber_total: 7, fiber_soluble: 2 },
   "black beans": { carbs: 22, protein: 8, fats: 1, fiber_total: 7, fiber_soluble: 2 },
   chickpeas: { carbs: 27, protein: 9, fats: 3, fiber_total: 8, fiber_soluble: 2 },
-  // Vegetables
+
   salad: { carbs: 3, protein: 1, fats: 0, fiber_total: 2, fiber_soluble: 0.5 },
   spinach: { carbs: 1, protein: 1, fats: 0, fiber_total: 2, fiber_soluble: 0.3 },
   broccoli: { carbs: 6, protein: 3, fats: 0, fiber_total: 5, fiber_soluble: 1 },
   carrot: { carbs: 7, protein: 1, fats: 0, fiber_total: 2, fiber_soluble: 0.7 },
   potato: { carbs: 37, protein: 4, fats: 0, fiber_total: 3, fiber_soluble: 1 },
   "sweet potato": { carbs: 26, protein: 2, fats: 0, fiber_total: 4, fiber_soluble: 1.2 },
-  // Fruits
+
   apple: { carbs: 25, protein: 0, fats: 0, fiber_total: 4, fiber_soluble: 1.5 },
   banana: { carbs: 27, protein: 1, fats: 0, fiber_total: 3, fiber_soluble: 0.6 },
-  // Dairy
+
   milk: { carbs: 12, protein: 8, fats: 5, fiber_total: 0, fiber_soluble: 0 },
   yogurt: { carbs: 10, protein: 10, fats: 3, fiber_total: 0, fiber_soluble: 0 },
-  // Fallback
+
   _default: { carbs: 20, protein: 5, fats: 3, fiber_total: 1, fiber_soluble: 0.3 },
 };
 
 // ─── Logic ────────────────────────────────────────────────────────────────────
 
-const MEAL_KEYWORDS = ["analyze", "meal", "food", "ate", "eat"];
+const ANALYZE_KEYWORDS = ["analyze", "meal", "food", "ate", "eat"];
+const IMPROVE_KEYWORDS = ["improve", "better", "fix", "optimize", "healthier"];
 
 function detectIntent(text: string): IntentId | null {
   const lower = text.toLowerCase();
-  if (MEAL_KEYWORDS.some((k) => lower.includes(k))) return "analyze_meal";
+
+  if (IMPROVE_KEYWORDS.some((k) => lower.includes(k))) {
+    return "improve_meal";
+  }
+
+  if (ANALYZE_KEYWORDS.some((k) => lower.includes(k))) {
+    return "analyze_meal";
+  }
+
   return null;
 }
 
@@ -130,13 +132,19 @@ function extractMealItems(text: string): MealItem[] {
     .filter(Boolean);
 
   return parts.map((part, i) => {
-    // Match: "2 cups rice" | "100g oats" | "1 piece chicken" | "rice"
     const m = part.match(
       /^(\d+\.?\d*)?\s*(cup|cups|g|gram|grams|piece|pieces|slice|slices)?\s*(.+)$/i
     );
+
     if (!m) {
-      return { id: String(i), name: part.toLowerCase(), quantity: 1, unit: "piece" as MealUnit };
+      return {
+        id: String(i),
+        name: part.toLowerCase(),
+        quantity: 1,
+        unit: "piece" as MealUnit,
+      };
     }
+
     const qty = m[1] ? parseFloat(m[1]) : 1;
     const rawUnit = (m[2] || "").toLowerCase();
     const name = m[3].trim().toLowerCase();
@@ -150,12 +158,15 @@ function extractMealItems(text: string): MealItem[] {
 }
 
 function estimateNutrition(items: MealItem[]): NutritionSummary {
-  let carbs = 0, protein = 0, fats = 0, fiber_total = 0, fiber_soluble = 0;
+  let carbs = 0;
+  let protein = 0;
+  let fats = 0;
+  let fiber_total = 0;
+  let fiber_soluble = 0;
 
   for (const item of items) {
     const food = FOODS[item.name] ?? FOODS._default;
     const qty = item.quantity ?? 1;
-    // For grams: base values are per-piece (~100g equivalent), scale accordingly
     const scale = item.unit === "g" ? qty / 100 : qty;
 
     carbs += food.carbs * scale;
@@ -192,7 +203,7 @@ function computeResult(n: NutritionSummary): MealResult {
     classification = "heavy";
     walkMinutes = Math.round(15 + ((netCarbs - 40) / 110) * 15);
     waitHours = Math.round(2 + ((netCarbs - 40) / 110) * 2);
-    // Fiber modifier: high soluble fiber reduces recovery slightly
+
     if (highSolubleFiber) {
       walkMinutes = Math.max(10, walkMinutes - 5);
       waitHours = Math.max(2, waitHours - 1);
@@ -206,9 +217,7 @@ function computeResult(n: NutritionSummary): MealResult {
       ? "Low"
       : classification === "very_heavy"
         ? "High"
-        : highSolubleFiber
-          ? "Moderate"
-          : "Moderate";
+        : "Moderate";
 
   return {
     classification,
@@ -218,6 +227,39 @@ function computeResult(n: NutritionSummary): MealResult {
     highSolubleFiber,
     glucoseImpact,
   };
+}
+
+function computeImprovementSuggestions(nutrition: NutritionSummary): string[] {
+  const netCarbs = Math.max(0, nutrition.carbs - nutrition.fiber_total);
+  const suggestions: string[] = [];
+
+  if (netCarbs > 150) {
+    suggestions.push("Consider splitting this meal or reducing carb load significantly.");
+  } else if (netCarbs > 80) {
+    suggestions.push("Reduce portion of high-carb items like rice, bread, pasta, or potatoes.");
+  }
+
+  if (nutrition.fiber_total < 3) {
+    suggestions.push("Add more fiber through vegetables, salad, legumes, or beans.");
+  }
+
+  if (nutrition.fiber_soluble < 2) {
+    suggestions.push("Add more soluble fiber through oats, lentils, beans, or chickpeas.");
+  }
+
+  if (nutrition.protein < 15) {
+    suggestions.push("Add more protein such as eggs, chicken, paneer, tofu, or yogurt.");
+  }
+
+  if (nutrition.fats > 30) {
+    suggestions.push("Reduce heavy fats from fried items, butter, cream, or excess oil.");
+  }
+
+  if (suggestions.length === 0) {
+    suggestions.push("This meal already looks balanced. Small tweaks can improve it even more.");
+  }
+
+  return suggestions;
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -241,6 +283,7 @@ function ChipBar({
       {chips.map(({ id, label }) => {
         const isSelected = selected === id;
         const hasSel = selected !== null;
+
         return (
           <TouchableOpacity
             key={id}
@@ -268,65 +311,6 @@ function ChipBar({
           </TouchableOpacity>
         );
       })}
-    </View>
-  );
-}
-
-function CaptureStage({ onSubmit }: { onSubmit: (text: string) => void }) {
-  const [text, setText] = useState("");
-  const canSubmit = text.trim().length > 0;
-
-  return (
-    <View>
-      <Text style={{ color: C.text, fontSize: 22, fontWeight: "600", marginBottom: 6, paddingLeft: 2, }}>
-        What did you eat?
-      </Text>
-      <Text style={{ color: C.muted, fontSize: 14, marginBottom: 20, lineHeight: 20, paddingLeft: 2, }}>
-        List items with rough amounts — commas are fine
-      </Text>
-
-      <TextInput
-        value={text}
-        onChangeText={setText}
-        placeholder="e.g. 2 cups rice, chicken curry, salad"
-        placeholderTextColor={C.muted}
-        multiline
-        style={{
-          backgroundColor: C.surface,
-          borderRadius: 14,
-          padding: 16,
-          color: C.text,
-          minHeight: 100,
-          borderWidth: 1,
-          borderColor: C.border,
-          marginBottom: 16,
-          fontSize: 15,
-          lineHeight: 22,
-          textAlignVertical: "top",
-        }}
-      />
-
-      <TouchableOpacity
-        onPress={() => canSubmit && onSubmit(text)}
-        style={{
-          backgroundColor: canSubmit ? C.accent : C.surface,
-          borderRadius: 14,
-          paddingVertical: 15,
-          alignItems: "center",
-          borderWidth: 1,
-          borderColor: canSubmit ? C.accent : C.border,
-        }}
-      >
-        <Text
-          style={{
-            color: canSubmit ? "#000" : C.muted,
-            fontWeight: "600",
-            fontSize: 15,
-          }}
-        >
-          Analyze Meal
-        </Text>
-      </TouchableOpacity>
     </View>
   );
 }
@@ -363,12 +347,14 @@ function ItemRow({
           marginRight: 12,
         }}
       />
+
       <TextInput
         value={item.name}
         onChangeText={(v) => onUpdate(item.id, { name: v })}
         style={{ flex: 1, color: C.text, fontSize: 15 }}
         placeholderTextColor={C.muted}
       />
+
       <TextInput
         value={String(item.quantity ?? 1)}
         onChangeText={(v) => onUpdate(item.id, { quantity: parseFloat(v) || 1 })}
@@ -381,10 +367,15 @@ function ItemRow({
           marginHorizontal: 6,
         }}
       />
+
       <Text style={{ color: C.muted, fontSize: 12, width: 28 }}>
         {item.unit === "g" ? "g" : item.unit === "cup" ? "cup" : "pc"}
       </Text>
-      <TouchableOpacity onPress={() => onDelete(item.id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+
+      <TouchableOpacity
+        onPress={() => onDelete(item.id)}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
         <Text style={{ color: C.error, fontSize: 18, lineHeight: 20 }}>×</Text>
       </TouchableOpacity>
     </View>
@@ -395,10 +386,14 @@ function ConfirmStage({
   items,
   onChange,
   onConfirm,
+  actionLabel,
+  helperText,
 }: {
   items: MealItem[];
   onChange: (items: MealItem[]) => void;
   onConfirm: () => void;
+  actionLabel: string;
+  helperText: string;
 }) {
   const [addText, setAddText] = useState("");
 
@@ -411,7 +406,17 @@ function ConfirmStage({
   const addItem = () => {
     const name = addText.trim();
     if (!name) return;
-    onChange([...items, { id: `${Date.now()}`, name: name.toLowerCase(), quantity: 1, unit: "piece" }]);
+
+    onChange([
+      ...items,
+      {
+        id: `${Date.now()}`,
+        name: name.toLowerCase(),
+        quantity: 1,
+        unit: "piece",
+      },
+    ]);
+
     setAddText("");
   };
 
@@ -420,15 +425,15 @@ function ConfirmStage({
       <Text style={{ color: C.text, fontSize: 20, fontWeight: "600", marginBottom: 4 }}>
         Detected Meal
       </Text>
+
       <Text style={{ color: C.muted, fontSize: 13, marginBottom: 16 }}>
-        Edit items, then analyze
+        {helperText}
       </Text>
 
       {items.map((item) => (
         <ItemRow key={item.id} item={item} onUpdate={updateItem} onDelete={deleteItem} />
       ))}
 
-      {/* Add item */}
       <View
         style={{
           flexDirection: "row",
@@ -456,6 +461,7 @@ function ConfirmStage({
             fontSize: 14,
           }}
         />
+
         <TouchableOpacity
           onPress={addItem}
           style={{
@@ -481,14 +487,12 @@ function ConfirmStage({
         }}
       >
         <Text style={{ color: "#000", fontWeight: "700", fontSize: 15 }}>
-          Analyze This Meal
+          {actionLabel}
         </Text>
       </TouchableOpacity>
     </View>
   );
 }
-
-// ─── Result sub-components ────────────────────────────────────────────────────
 
 function ResultCard({
   title,
@@ -613,6 +617,7 @@ function FiberInsightSection({ nutrition }: { nutrition: NutritionSummary }) {
       <FiberRow label="Total fiber" value={fiber_total} unit="g" />
       <FiberRow label="Soluble" value={fiber_soluble} unit="g" />
       <FiberRow label="Insoluble" value={fiber_insoluble} unit="g" />
+
       <View
         style={{
           marginTop: 10,
@@ -641,6 +646,7 @@ function ActionSection({ result }: { result: MealResult }) {
   } else if (classification === "heavy") {
     primaryLine = `Wait ~${waitHours} hour${waitHours !== 1 ? "s" : ""} before next carb-heavy meal`;
     secondaryLine = `${walkMinutes}–${walkMinutes + 5} min walk helps`;
+
     if (highSolubleFiber) {
       modifier = "Fiber shield active → impact reduced";
     }
@@ -662,11 +668,13 @@ function ActionSection({ result }: { result: MealResult }) {
       >
         {primaryLine}
       </Text>
+
       {secondaryLine && (
         <Text style={{ color: C.muted, fontSize: 14, lineHeight: 20, marginBottom: modifier ? 10 : 0 }}>
           {secondaryLine}
         </Text>
       )}
+
       {modifier && (
         <View
           style={{
@@ -687,6 +695,7 @@ function ActionSection({ result }: { result: MealResult }) {
 function LearningSection({ result }: { result: MealResult }) {
   const { classification, highSolubleFiber } = result;
   const isGoodOutcome = classification === "light" || highSolubleFiber;
+
   if (!isGoodOutcome) return null;
 
   const label =
@@ -703,24 +712,51 @@ function LearningSection({ result }: { result: MealResult }) {
   );
 }
 
+function ImprovementSection({ suggestions }: { suggestions: string[] }) {
+  return (
+    <ResultCard title="How to Improve This Meal" accent>
+      {suggestions.map((suggestion, i) => (
+        <View
+          key={i}
+          style={{
+            flexDirection: "row",
+            alignItems: "flex-start",
+            marginBottom: i < suggestions.length - 1 ? 10 : 0,
+          }}
+        >
+          <Text style={{ color: C.accent, fontSize: 14, marginRight: 8, marginTop: 1 }}>•</Text>
+          <Text style={{ color: C.text, fontSize: 14, lineHeight: 20, flex: 1 }}>
+            {suggestion}
+          </Text>
+        </View>
+      ))}
+    </ResultCard>
+  );
+}
+
 function ResultStage({
   nutrition,
   result,
+  improvements,
   onReset,
+  resetLabel,
 }: {
   nutrition: NutritionSummary;
   result: MealResult;
+  improvements: string[] | null;
   onReset: () => void;
+  resetLabel: string;
 }) {
   return (
     <View>
-      <MealImpactSection
-        classification={result.classification}
-        glucoseImpact={result.glucoseImpact}
-      />
+      <MealImpactSection classification={result.classification} glucoseImpact={result.glucoseImpact} />
       <FiberInsightSection nutrition={nutrition} />
       <ActionSection result={result} />
       <LearningSection result={result} />
+
+      {improvements && improvements.length > 0 && (
+        <ImprovementSection suggestions={improvements} />
+      )}
 
       <TouchableOpacity
         onPress={onReset}
@@ -734,7 +770,7 @@ function ResultStage({
           alignItems: "center",
         }}
       >
-        <Text style={{ color: C.muted, fontSize: 14 }}>Analyze another meal</Text>
+        <Text style={{ color: C.muted, fontSize: 14 }}>{resetLabel}</Text>
       </TouchableOpacity>
     </View>
   );
@@ -742,85 +778,92 @@ function ResultStage({
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function AnalyzeMeal() {
+export default function MealMain() {
   const scrollRef = useRef<ScrollView>(null);
-  const router = useRouter(); //
+  const router = useRouter();
   const params = useLocalSearchParams();
-
-  const [stage, setStage] = useState<Stage>("capture");
-  
 
   const initialIntent =
     typeof params?.intent === "string"
       ? (params.intent as IntentId)
-      : "analyze_meal"; // default
+      : "analyze_meal";
 
-  const [selectedIntent, setSelectedIntent] = useState<IntentId | null>(
-    initialIntent
-  );
-
+  const [stage, setStage] = useState<Stage>("capture");
+  const [selectedIntent, setSelectedIntent] = useState<IntentId | null>(initialIntent);
   const [mealItems, setMealItems] = useState<MealItem[]>([]);
   const [nutritionSummary, setNutritionSummary] = useState<NutritionSummary | null>(null);
   const [mealResult, setMealResult] = useState<MealResult | null>(null);
+  const [improvements, setImprovements] = useState<string[]>([]);
   const [bottomInput, setBottomInput] = useState("");
   const [micStatus, setMicStatus] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (typeof params?.intent === "string") {
-      setSelectedIntent(params.intent as IntentId);
-      setStage("capture"); // reset UI when intent changes
-    }
-  }, [params?.intent]);
-
-  // ── Handlers ─────────────────────────────────────────────────────────────
-
-  const handleChipSelect = (id: IntentId) => {
-    setSelectedIntent(id);
+  const resetAll = (intent: IntentId) => {
+    setSelectedIntent(intent);
     setStage("capture");
     setMealItems([]);
     setNutritionSummary(null);
     setMealResult(null);
+    setImprovements([]);
+    setBottomInput("");
   };
 
-  // Bottom input bar: detect intent and route
+  useEffect(() => {
+    if (typeof params?.intent === "string") {
+      resetAll(params.intent as IntentId);
+    }
+  }, [params?.intent]);
+
+  const handleChipSelect = (id: IntentId) => {
+    resetAll(id);
+  };
+
+  const runMealProcessing = (items: MealItem[], intent: IntentId) => {
+    const nutrition = estimateNutrition(items);
+    const result = computeResult(nutrition);
+
+    setMealItems(items);
+    setNutritionSummary(nutrition);
+    setMealResult(result);
+
+    if (intent === "improve_meal") {
+      setImprovements(computeImprovementSuggestions(nutrition));
+    } else {
+      setImprovements([]);
+    }
+
+    setStage("result");
+
+    setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  };
+
   const handleBottomSend = () => {
-    setMicStatus(null); // 🔥 CLEAR OLD MESSAGE
+    setMicStatus(null);
 
     const text = bottomInput.trim();
     if (!text) return;
 
-    const intent = detectIntent(text);
+    const resolvedIntent = detectIntent(text) ?? selectedIntent ?? "analyze_meal";
 
-    if (intent === "analyze_meal") {
-      const items = extractMealItems(text);
-
-      if (items.length === 0) {
-        setMicStatus("Couldn't understand meal. Try again.");
-        return;
-      }
-
-      setSelectedIntent("analyze_meal"); // ✅ ADD THIS
-      runMealAnalysis(items, false);
-      setBottomInput("");
-    } else if (intent === "improve_meal") {
-      const items = extractMealItems(text);
-
-      if (items.length > 0) {
-        setSelectedIntent("improve_meal");
-        runMealAnalysis(items, true); // ✅ SAME FLOW
-      } else {
-        setSelectedIntent("improve_meal");
-        setStage("capture");
-        setMicStatus("Enter a meal to improve"); // 🔥 ADD THIS
-      }
-      setBottomInput("");
-    } else if (intent) {
-      setSelectedIntent(intent);
-      setBottomInput("");
+    if (resolvedIntent === "build_meal" || resolvedIntent === "what_now") {
+      resetAll(resolvedIntent);
+      return;
     }
-  }; // ✅ 👈 CLOSE FUNCTION HERE
 
-  // Capture stage: user typed in the capture input area
+    const items = extractMealItems(text);
+
+    if (items.length === 0) {
+      setMicStatus("Couldn't understand meal. Try again.");
+      return;
+    }
+
+    setSelectedIntent(resolvedIntent);
+    setMealItems(items);
+    setBottomInput("");
+    setStage("confirm");
+  };
+
   const handleCaptureSubmit = (text: string) => {
     const items = extractMealItems(text);
 
@@ -830,87 +873,58 @@ export default function AnalyzeMeal() {
     }
 
     const intent = selectedIntent ?? "analyze_meal";
-    setSelectedIntent(intent);
-
-    setBottomInput(""); // ✅ ADD HERE
-
-    runMealAnalysis(items, intent === "improve_meal");
-  };
-
-  const runMealAnalysis = (items: MealItem[], withImprove = false) => {
-    const nutrition = estimateNutrition(items);
-    const result = computeResult(nutrition);
-
-    if (withImprove) {
-      result.improvements = generateImprovements(items, nutrition);
-    }
-
     setMealItems(items);
-    setNutritionSummary(nutrition);
-    setMealResult(result);
-    setStage("result");
-
-    // 👇 add this
-    setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    }, 100);
+    setSelectedIntent(intent);
+    setStage("confirm");
   };
 
-
-  // Reset everything
-  const handleReset = () => {
-    const text = bottomInput.trim();
-    const nextIntent = selectedIntent ?? "analyze_meal";
-
-    if (text.length > 0) {
-      const items = extractMealItems(text);
-
-      if (items.length === 0) {
-        setMicStatus("Couldn't understand meal. Try again.");
-        return;
-      }
-
-      setSelectedIntent(nextIntent);
-      runMealAnalysis(items, nextIntent === "improve_meal"); // ✅ direct flow
-      setBottomInput("");
+  const handleConfirm = () => {
+    if (!selectedIntent || selectedIntent === "build_meal" || selectedIntent === "what_now") {
       return;
     }
 
-    setStage("capture");
-    setSelectedIntent(nextIntent);
-    setMealItems([]);
-    setNutritionSummary(null);
-    setMealResult(null);
-    setBottomInput("");
+    runMealProcessing(mealItems, selectedIntent);
   };
 
-  // Mic: V1 placeholder — transcription comes from parent voice system in future
+  const handleReset = () => {
+    resetAll(selectedIntent ?? "analyze_meal");
+  };
+
   const handleMicPress = () => {
     setMicStatus("Voice input not yet connected");
     setTimeout(() => setMicStatus(null), 2000);
   };
 
-  // ── Bottom bar contextual placeholder ────────────────────────────────────
+  const isImprove = selectedIntent === "improve_meal";
 
-  const bottomPlaceholder =
-    selectedIntent === "analyze_meal"
+  const captureTitle = isImprove ? "What can we improve?" : "What did you eat?";
+
+  const captureSubtitle = isImprove
+    ? "List the meal and we’ll suggest a better version."
+    : "List items with rough amounts — commas are fine.";
+
+  const captureActionLabel = isImprove ? "Improve Meal" : "Analyze Meal";
+
+  const confirmActionLabel = isImprove ? "Improve This Meal" : "Analyze This Meal";
+
+  const confirmHelperText = isImprove
+    ? "Edit items, then improve"
+    : "Edit items, then analyze";
+
+  const bottomPlaceholder = isImprove
+    ? "Tell me your meal and I’ll improve it..."
+    : selectedIntent === "analyze_meal"
       ? "Tell me what you ate..."
-      : selectedIntent === "improve_meal"
-        ? "What should we improve?"
-        : "Ask anything..."
+      : "Ask anything...";
 
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  log("debug", "Render AnalyzeMeal", {
+  log("debug", "Render MealMain", {
     stage,
     selectedIntent,
+    itemCount: mealItems.length,
   });
 
   return (
     <SafeAreaView edges={["top", "bottom"]} style={{ flex: 1, backgroundColor: C.bg }}>
-      {/* Header */}
-
       <AppHeader />
 
       <KeyboardAvoidingView
@@ -919,7 +933,6 @@ export default function AnalyzeMeal() {
         keyboardVerticalOffset={0}
       >
         <View style={{ flex: 1, backgroundColor: C.bg }}>
-          {/* Scrollable content */}
           <ScrollView
             ref={scrollRef}
             keyboardShouldPersistTaps="handled"
@@ -933,28 +946,39 @@ export default function AnalyzeMeal() {
             <View style={{ marginTop: 6, marginBottom: 4 }}>
               <ChipBar selected={selectedIntent} onSelect={handleChipSelect} />
 
-              {stage === "capture" && selectedIntent === "analyze_meal" && (
-                <CaptureStage onSubmit={handleCaptureSubmit} />
-              )}
+              {stage === "capture" &&
+                <Text style={{ color: C.muted, textAlign: "center", marginTop: 20 }}>
+                  Tell me what you ate…
+                </Text>}
 
-              {stage === "capture" && selectedIntent === "improve_meal" && (
-                <ImproveMealBody
-                  items={mealItems}
-                  onChange={setMealItems}
-                  onConfirm={() => runMealAnalysis(mealItems, true)}
-                />
-              )}
+              {stage === "confirm" &&
+                (selectedIntent === "analyze_meal" || selectedIntent === "improve_meal") && (
+                  <ConfirmStage
+                    items={mealItems}
+                    onChange={setMealItems}
+                    onConfirm={handleConfirm}
+                    actionLabel={confirmActionLabel}
+                    helperText={confirmHelperText}
+                  />
+                )}
 
               {stage === "capture" &&
                 selectedIntent !== null &&
                 selectedIntent !== "analyze_meal" &&
                 selectedIntent !== "improve_meal" && (
                   <View style={{ marginTop: 8 }}>
-                    <Text style={{ color: C.muted, fontSize: 15, textAlign: "center", marginTop: 40 }}>
+                    <Text
+                      style={{
+                        color: C.muted,
+                        fontSize: 15,
+                        textAlign: "center",
+                        marginTop: 40,
+                      }}
+                    >
                       <Text style={{ color: C.accent }}>
                         {labelMap[selectedIntent as keyof typeof labelMap] || "What now"}
-                      </Text>
-                      {" "}coming soon
+                      </Text>{" "}
+                      coming soon
                     </Text>
                   </View>
                 )}
@@ -963,20 +987,20 @@ export default function AnalyzeMeal() {
                 <ResultStage
                   nutrition={nutritionSummary}
                   result={mealResult}
+                  improvements={isImprove ? improvements : null}
                   onReset={handleReset}
+                  resetLabel={isImprove ? "Improve another meal" : "Analyze another meal"}
                 />
               )}
             </View>
           </ScrollView>
 
-          {/* Mic status toast */}
           {micStatus && (
             <View style={{ alignItems: "center", paddingVertical: 4 }}>
               <Text style={{ color: C.muted, fontSize: 13 }}>{micStatus}</Text>
             </View>
           )}
 
-          {/* Fixed input bar */}
           <View
             style={{
               flexDirection: "row",
@@ -989,8 +1013,6 @@ export default function AnalyzeMeal() {
               borderColor: C.border,
             }}
           >
-
-            {/* 🏠 HOME BUTTON — ADD HERE */}
             <TouchableOpacity
               onPress={() => router.replace("/")}
               style={{
@@ -1004,7 +1026,6 @@ export default function AnalyzeMeal() {
               <Text style={{ fontSize: 16 }}>🏠</Text>
             </TouchableOpacity>
 
-            {/* INPUT */}
             <TextInput
               value={bottomInput}
               onChangeText={(text) => {
@@ -1018,13 +1039,12 @@ export default function AnalyzeMeal() {
                 color: C.text,
                 paddingVertical: 6,
                 paddingHorizontal: 4,
-                fontSize: 14
+                fontSize: 14,
               }}
               onSubmitEditing={handleBottomSend}
               returnKeyType="send"
             />
 
-            {/* Mic button */}
             <TouchableOpacity
               onPress={handleMicPress}
               style={{
@@ -1038,7 +1058,6 @@ export default function AnalyzeMeal() {
               <Text style={{ fontSize: 16 }}>🎤</Text>
             </TouchableOpacity>
 
-            {/* Send button (ONLY when not in result stage) */}
             {stage !== "result" && (
               <TouchableOpacity
                 onPress={handleBottomSend}
@@ -1055,12 +1074,11 @@ export default function AnalyzeMeal() {
               </TouchableOpacity>
             )}
 
-            {/* Reset button (ONLY in result stage) */}
             {stage === "result" && (
               <TouchableOpacity
                 onPress={handleReset}
                 style={{
-                  backgroundColor: C.accent,   // 🔥 make primary
+                  backgroundColor: C.accent,
                   paddingHorizontal: 16,
                   paddingVertical: 10,
                   borderRadius: 10,
@@ -1074,7 +1092,6 @@ export default function AnalyzeMeal() {
           </View>
         </View>
       </KeyboardAvoidingView>
-      
     </SafeAreaView>
   );
 }
