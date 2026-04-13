@@ -782,6 +782,8 @@ export default function MealMain() {
   const scrollRef = useRef<ScrollView>(null);
   const router = useRouter();
   const params = useLocalSearchParams();
+  const UX_MODE: "screen" | "chat" =
+    params?.mode === "chat" ? "chat" : "screen";
 
   const initialIntent =
     typeof params?.intent === "string"
@@ -953,13 +955,88 @@ export default function MealMain() {
 
               {stage === "confirm" &&
                 (selectedIntent === "analyze_meal" || selectedIntent === "improve_meal") && (
-                  <ConfirmStage
-                    items={mealItems}
-                    onChange={setMealItems}
-                    onConfirm={handleConfirm}
-                    actionLabel={confirmActionLabel}
-                    helperText={confirmHelperText}
-                  />
+                  <>
+                    {UX_MODE === "screen" && (
+                      <ConfirmStage
+                        items={mealItems}
+                        onChange={setMealItems}
+                        onConfirm={handleConfirm}
+                        actionLabel={confirmActionLabel}
+                        helperText={confirmHelperText}
+                      />
+                    )}
+
+                    {UX_MODE === "chat" && (
+                      <View
+                        style={{
+                          backgroundColor: C.surface,
+                          borderRadius: 14,
+                          padding: 16,
+                          borderWidth: 1,
+                          borderColor: C.border,
+                        }}
+                      >
+                        {/* AI message */}
+                        <Text style={{ color: C.text, fontSize: 15, marginBottom: 10 }}>
+                          I detected your meal:
+                        </Text>
+
+                        {/* Items */}
+                        {mealItems.map((item) => (
+                          <Text
+                            key={item.id}
+                            style={{ color: C.muted, fontSize: 14, marginBottom: 4 }}
+                          >
+                            • {item.name} ({item.quantity}{" "}
+                            {item.unit === "g"
+                              ? "g"
+                              : item.unit === "cup"
+                                ? "cup"
+                                : "pc"})
+                          </Text>
+                        ))}
+
+                        {/* Actions */}
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            marginTop: 14,
+                            gap: 10,
+                          }}
+                        >
+                          <TouchableOpacity
+                            onPress={() => setStage("capture")}
+                            style={{
+                              backgroundColor: C.surfaceAlt,
+                              paddingHorizontal: 14,
+                              paddingVertical: 8,
+                              borderRadius: 10,
+                              borderWidth: 1,
+                              borderColor: C.border,
+                            }}
+                          >
+                            <Text style={{ color: C.muted }}>Edit</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            onPress={handleConfirm}
+                            style={{
+                              backgroundColor: C.accent,
+                              paddingHorizontal: 16,
+                              paddingVertical: 8,
+                              borderRadius: 10,
+                            }}
+                          >
+                            <Text style={{ color: "#000", fontWeight: "600" }}>
+                              {selectedIntent === "improve_meal"
+                                ? "Improve"
+                                : "Analyze"}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    )}
+                  </>
                 )}
 
               {stage === "capture" &&

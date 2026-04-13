@@ -20,6 +20,7 @@ import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SectionCard from "../components/SectionCard";
 
+
 const BACKEND_URL = "http://192.168.40.138:8000";
 
 
@@ -29,6 +30,9 @@ const SOFT_PAUSE_MS = 2000;       // 2s — show "Still listening..."
 const FINAL_PAUSE_MS = 4000;      // 4s — stop and send
 const MAX_RECORDING_MS = 20000;   // 20s — hard stop failsafe
 const REQUEST_TIMEOUT_MS = 20000; // 20s — backend request timeout
+const UX_RUNMODE = process.env.EXPO_PUBLIC_UX_RUNMODE || "screen";
+
+console.log("UX_RUNMODE:", UX_RUNMODE);
 
 
 type VoiceState = "IDLE" | "RECORDING" | "PROCESSING" | "PLAYING";
@@ -644,10 +648,10 @@ export default function HomeScreen() {
     console.log("Chip pressed:", label);
 
     if (label.toLowerCase().includes("analyze")) {
-      router.push("/meal-main?intent=analyze_meal"); // 👈 your Analyze tab
+      router.push(`/meal-main?mode=${UX_RUNMODE}&intent=analyze_meal`); // 👈 your Analyze tab
     }
     if (label.toLowerCase().includes("improve")) {
-      router.push("/meal-main?intent=improve_meal"); // 👈 your Improve tab
+      router.push(`/meal-main?mode=${UX_RUNMODE}&intent=improve_meal`); // 👈 your Improve tab
     }
   };
 
