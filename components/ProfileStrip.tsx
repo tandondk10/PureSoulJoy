@@ -1,15 +1,12 @@
+import { useUser } from "@/context/UserContext";
 import React from "react";
 import { Text, View } from "react-native";
 
-const PROFILE = {
-  name: "Deepak",
-  condition: "diabetic",
-  a1c: 8.0,
-  focus: "Glucose",
-  phenotype: "Spiker",
-};
-
 export default function ProfileStrip() {
+  const { user } = useUser();
+
+  if (!user) return null;
+
   return (
     <View
       style={{
@@ -23,11 +20,11 @@ export default function ProfileStrip() {
       }}
     >
       <Text style={{ color: "#9CA3AF", fontSize: 13 }}>
-        {PROFILE.name} ·{" "}
+        {user.name} ·{" "}
         <Text style={{ color: "#FFD06A" }}>
-          {PROFILE.condition} (A1C {PROFILE.a1c})
+          {user.condition} (A1C {user.a1c})
         </Text>{" "}
-        · Focus: {PROFILE.focus} · {PROFILE.phenotype}
+        · Focus: {user.focus} · {user.phenotype}
       </Text>
     </View>
   );

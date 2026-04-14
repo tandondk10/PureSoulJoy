@@ -1,14 +1,18 @@
 import { C } from "@/constants/colors";
+import { profiles } from "@/data/profiles";
+//import { loadUser, saveUser } from "@/utils/storage";
+import { loadUser } from "@/utils/storage";
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  AppState,
+  AppState, // ✅ ADD THIS LINE
   Keyboard,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
@@ -16,10 +20,10 @@ import {
 } from "react-native";
 
 import AppHeader from "@/components/AppHeader";
+import { useUser } from "@/context/UserContext";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SectionCard from "../components/SectionCard";
-
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
@@ -62,7 +66,12 @@ export default function HomeScreen() {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [blocks, setBlocks] = useState<QueryBlock[]>([]);
   const [input, setInput] = useState("");
+
   const router = useRouter();
+  const { setUser } = useUser();
+  const [checkingUser, setCheckingUser] = useState(true);
+
+  // other refs and state...
 
   // Refs — readable inside callbacks, AppState handler, timers
   const voiceStateRef = useRef<VoiceState>("IDLE");
@@ -657,20 +666,34 @@ export default function HomeScreen() {
 
   // ─── App lifecycle ────────────────────────────────────────────────────────
 
+
+  useEffect(() => {
+    const initUser = async () => {
+      //await saveUser("");   // 🔥 TEMP ONLY
+      const id = await loadUser();
+      console.log("LOADED USER:", id);
+
+      if (!id || !profiles[id]) {
+        setUser(null);
+        router.replace("/login");
+      } else {
+        setUser(profiles[id]);
+      }
+
+      setCheckingUser(false);
+    };
+
+    initUser();
+  }, []);
+
   useEffect(() => {
     const sub = AppState.addEventListener("change", async (nextAppState) => {
       if (nextAppState !== "background" && nextAppState !== "inactive") return;
 
       const state = voiceStateRef.current;
-      console.log(`[AppState] background — voiceState was ${state}`);
 
       if (state === "RECORDING") {
-        // Stop and discard silently — no error message — spec §10.1
         isStoppingRef.current = true;
-        if (maxDurationTimerRef.current) {
-          clearTimeout(maxDurationTimerRef.current);
-          maxDurationTimerRef.current = null;
-        }
         const rec = activeRecordingRef.current;
         activeRecordingRef.current = null;
         if (rec) {
@@ -678,25 +701,19 @@ export default function HomeScreen() {
             await rec.stopAndUnloadAsync();
           } catch { }
         }
-        voiceStateRef.current = "IDLE";
         setVoiceState("IDLE");
         setStatusText(null);
       } else if (state === "PROCESSING") {
-        // Cancel request and discard response — spec §10.2
         abortControllerRef.current?.abort();
         abortControllerRef.current = null;
         discardResponseRef.current = true;
-        voiceStateRef.current = "IDLE";
         setVoiceState("IDLE");
         setStatusText(null);
       } else if (state === "PLAYING") {
-        // Stop and unload audio — spec §10.3
         await stopAnyPlayback();
-        voiceStateRef.current = "IDLE";
         setVoiceState("IDLE");
         setStatusText(null);
       }
-      // spec §10.4: no auto-resume on foreground return — system is IDLE in all cases
     });
 
     return () => sub.remove();
@@ -715,6 +732,9 @@ export default function HomeScreen() {
       statusText.includes("Could not") ||
       statusText.includes("Please say") ||
       statusText.includes("access is required"));
+
+
+  if (checkingUser) return null;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }}>
@@ -946,5 +966,48 @@ export default function HomeScreen() {
         </KeyboardAvoidingView>
       </View>
     </SafeAreaView>
-  );
+  )
 }
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: C.background,
+    padding: 16,
+  },
+  form: {
+    marginTop: 30,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    borderRadius: 12,
+    padding: 14,
+    color: C.text,
+    marginBottom: 12,
+    backgroundColor: C.surface,
+  },
+  loginBtn: {
+    backgroundColor: C.accent,
+    padding: 14,
+    borderRadius: 12,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  loginText: {
+    color: "#000",
+    fontWeight: "600",
+    fontSize: 16,
+  },
+  demoBtn: {
+    marginTop: 20,
+    alignItems: "center",
+  },
+  demoText: {
+    color: C.muted,
+    fontSize: 14,
+  },
+  error: {
+    color: "red",
+    marginBottom: 10,
+  },
+});

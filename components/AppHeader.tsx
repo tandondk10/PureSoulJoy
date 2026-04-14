@@ -1,8 +1,15 @@
 import { C } from "@/constants/colors";
+import { useUser } from "@/context/UserContext";
 import React from "react";
 import { Text, View } from "react-native";
 
-export default function AppHeader() {
+export default function AppHeader({
+  showProfile = true,
+}: {
+  showProfile?: boolean;
+}) {
+  const { user } = useUser();
+
   return (
     <View style={{ paddingTop: 4, paddingBottom: 8 }}>
       <View
@@ -40,61 +47,68 @@ export default function AppHeader() {
         </Text>
 
         {/* 🔹 PROFILE SECTION */}
-        <View
-          style={{
-            marginTop: 8,   // 👈 tight but visible separation
-            paddingTop: 8,
-            borderTopWidth: 1,
-            borderTopColor: "rgba(255,255,255,0.06)",
-
-            flexDirection: "row",
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          {/* NAME */}
-          <Text
+        {showProfile && user && (
+          <View
             style={{
-              color: C.text,
-              fontSize: 15,
-              fontWeight: "500",
-              marginRight: 8,
+              marginTop: 8,
+              paddingTop: 8,
+              borderTopWidth: 1,
+              borderTopColor: "rgba(255,255,255,0.06)",
+              flexDirection: "row",
+              alignItems: "center",
+              flexWrap: "wrap",
             }}
           >
-            Deepak
-          </Text>
-
-          {/* CHIPS */}
-          {["A1C 8", "Glucose Focus", "Spiker"].map((item) => (
-            <View
-              key={item}
+            {/* NAME */}
+            <Text
               style={{
-                flexDirection: "row",
-                alignItems: "center",
+                color: C.text,
+                fontSize: 15,
+                fontWeight: "500",
                 marginRight: 8,
-                marginBottom: 2,
               }}
             >
-              <View
-                style={{
-                  width: 4,
-                  height: 4,
-                  borderRadius: 2,
-                  backgroundColor: C.accent,
-                  marginRight: 4,
-                }}
-              />
-              <Text
-                style={{
-                  color: C.muted,
-                  fontSize: 12,
-                }}
-              >
-                {item}
-              </Text>
-            </View>
-          ))}
-        </View>
+              {user.name}
+            </Text>
+
+            {/* CHIPS */}
+            {[
+              user.a1c ? `A1C ${user.a1c}` : null,
+              user.focus ? `${user.focus} Focus` : null,
+              user.phenotype,
+            ]
+              .filter(Boolean)
+              .map((item) => (
+                <View
+                  key={item}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    marginRight: 8,
+                    marginBottom: 2,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 4,
+                      height: 4,
+                      borderRadius: 2,
+                      backgroundColor: C.accent,
+                      marginRight: 4,
+                    }}
+                  />
+                  <Text
+                    style={{
+                      color: C.muted,
+                      fontSize: 12,
+                    }}
+                  >
+                    {item}
+                  </Text>
+                </View>
+              ))}
+          </View>
+        )}
       </View>
     </View>
   );
