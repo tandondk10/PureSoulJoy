@@ -37,7 +37,7 @@ print("🚨 LLM BACKEND RUNNING")
 
 # ---------------- USER PROFILE ----------------
 USER_PROFILE = {
-    "name": "Deepak",
+    "name": "   ",
     "age": 63,
     "condition": "prediabetic",
     "a1c": 6.0,
@@ -309,17 +309,19 @@ Try asking about food, exercise, or health markers."""
 
 
 # ---------------- PROMPT ----------------
-def build_prompt(q: str, ctx: dict) -> str:
+def build_prompt(q: str, ctx: dict, user_profile=None) -> str:
+    profile = user_profile or USER_PROFILE   # 👈 ADD HERE
+
     return f"""
 You are a lifestyle health assistant.
 
 User Profile:
-- Age: {USER_PROFILE['age']}
-- Condition: {USER_PROFILE['condition']} (A1C {USER_PROFILE['a1c']})
-- LDL: {USER_PROFILE['ldl']}
-- Goal: {USER_PROFILE['goal']}
-- Diet: {USER_PROFILE['diet']}
-- Phenotype: {USER_PROFILE['phenotype']}
+- Age: {profile.get('age')}
+- Condition: {profile.get(profile.get("condition", 'unknown'))} (A1C {profile.get('a1c', 'NA')})
+- LDL: {profile.get('ldl', 'NA')}
+- Goal: {profile.get('goal', 'improve health')}
+- Diet: {profile.get('diet', 'NA')}
+- Phenotype: {profile.get('phenotype', 'general')}
 
 User query: "{q}"
 
@@ -409,7 +411,7 @@ def generate_tts(text: str):
 
 
 # ---------------- BUILD RESPONSE ----------------
-async def build_response(query: str):
+async def build_response(query: str, user_profile=None):
     if not query:
         return {"text": "Empty query", "score": 0}
 
@@ -543,6 +545,15 @@ async def handle_query(request: Request):
     if "multipart/form-data" in content_type:
         form = await request.form()
         audio_file = form.get("audio_file")
+        # ✅ NEW
+        user_profile_raw = form.get("user_profile")
+
+        try:
+            user_profile = json.loads(user_profile_raw) if user_profile_raw else None
+        except:
+            user_profile = None
+
+        print("USER PROFILE:", user_profile)
 
         if audio_file is None:
             return {
@@ -623,7 +634,7 @@ async def handle_query(request: Request):
 
         print("CLEANED QUERY:", cleaned_query)
 
-        result = await build_response(cleaned_query)
+        result = await build_response(cleaned_query, user_profile)
         text = result.get("text", "")
         if not text:
             text = "Something went wrong. Please try again."

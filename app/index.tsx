@@ -68,7 +68,7 @@ export default function HomeScreen() {
   const [input, setInput] = useState("");
 
   const router = useRouter();
-  const { setUser } = useUser();
+  const { user, setUser } = useUser();
   const [checkingUser, setCheckingUser] = useState(true);
 
   // other refs and state...
@@ -238,6 +238,8 @@ export default function HomeScreen() {
         type: isCAF ? "audio/x-caf" : "audio/m4a",
       } as any);
 
+      formData.append("user_profile", JSON.stringify(user));
+
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
         body: formData,
@@ -366,7 +368,11 @@ export default function HomeScreen() {
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, voice: false }),
+        body: JSON.stringify({
+          query,
+          voice: false,
+          user_profile: user   // 🔥 KEY CHANGE
+        }),
         signal: controller.signal,
       });
 

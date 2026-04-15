@@ -13,5 +13,51 @@ export const profiles = {
     goals: {
       glucose_control: true
     }
+  },
+   mamta: {
+    id: "mamta",
+    loginId: "mamta",
+    password: "tandon",
+
+    name: "Mamta",
+    condition: "prediabetic",
+    a1c: 6.2,
+    focus: "Glucose",
+    phenotype: "Frequent high spiker",
+
+    goals: {
+      glucose_control: true
+    }
+  }
+  ,
+   menaka: {
+    id: "menaka",
+    loginId: "menaka",
+    password: "tandon",
+
+    name: "Menaka",
+    condition: "prediabetic",
+    a1c: 5.9,
+    focus: "Glucose",
+    phenotype: "Moderate spiker",
+
+    goals: {
+      glucose_control: true
+    }
+  },
+  damini: {
+    id: "damini",
+    loginId: "damini",
+    password: "tandon",
+
+    name: "Damini",
+    condition: "prediabetic",
+    a1c: 6.4,
+    focus: "Glucose",
+    phenotype: "Severe spiker + slow recovery",
+
+    goals: {
+      glucose_control: true
+    }
   }
 };
