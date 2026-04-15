@@ -3,7 +3,6 @@ import { profiles } from "@/data/profiles";
 //import { loadUser, saveUser } from "@/utils/storage";
 import { loadUser } from "@/utils/storage";
 import { Audio } from "expo-av";
-import * as FileSystem from "expo-file-system/legacy";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -24,6 +23,7 @@ import { useUser } from "@/context/UserContext";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SectionCard from "../components/SectionCard";
+import { createTraceId, logTrace } from "../utils/trace";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
@@ -33,7 +33,7 @@ const SILENCE_DB_THRESHOLD = -40; // dBFS — below = silence
 const SOFT_PAUSE_MS = 2000;       // 2s — show "Still listening..."
 const FINAL_PAUSE_MS = 4000;      // 4s — stop and send
 const MAX_RECORDING_MS = 20000;   // 20s — hard stop failsafe
-const REQUEST_TIMEOUT_MS = 20000; // 20s — backend request timeout
+const REQUEST_TIMEOUT_MS = 40000; // from 20s tp 40s — backend request timeout
 const UX_RUNMODE = process.env.EXPO_PUBLIC_UX_RUNMODE || "screen";
 
 console.log("UX_RUNMODE:", UX_RUNMODE);
@@ -47,6 +47,7 @@ type QueryBlock = {
   id: string;
   query: string;
   status: "loading" | "complete" | "error";
+  source: "voice" | "text";
   sections?: Section[];
   rawText?: string;
   errorMessage?: string;
@@ -80,12 +81,15 @@ export default function HomeScreen() {
   const isStoppingRef = useRef(false);
   const lastSpeechTimeRef = useRef(Date.now());
   const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const discardResponseRef = useRef(false);
 
   const scrollRef = useRef<ScrollView>(null);
   const blockRefs = useRef<Record<string, View | null>>({});
   const lastScrollIdRef = useRef<string | null>(null);
+  const lastSubmitRef = useRef(0); // ✅ debounce guard
+
 
   // ─── State machine ───────────────────────────────────────────────────────
 
@@ -130,7 +134,38 @@ export default function HomeScreen() {
       );
     });
   };
+  // ✅ ADD THIS RIGHT BELOW
+  const smoothScroll = (id: string) => {
+    if (lastScrollIdRef.current === id) return; // 🔒 prevent duplicate scrolls
+    lastScrollIdRef.current = id;
 
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollToBlock(id);
+      });
+    });
+  };
+
+  const clearThinkingTimer = () => {
+    if (thinkingTimerRef.current) {
+      clearTimeout(thinkingTimerRef.current);
+      thinkingTimerRef.current = null;
+    }
+  };
+
+  const startThinkingTimer = (message = "Almost there...", delay = 1500) => {
+    clearThinkingTimer();
+    thinkingTimerRef.current = setTimeout(() => {
+      if (voiceStateRef.current === "PROCESSING" && !discardResponseRef.current) {
+        setStatusText((current) => {
+          if (!current || current === "Thinking..." || current === "Processing...") {
+            return message;
+          }
+          return current; // 🔒 do not override error or final messages
+        });
+      }
+    }, delay);
+  };
   // ─── Audio playback ──────────────────────────────────────────────────────
 
   const stopAnyPlayback = async () => {
@@ -202,35 +237,55 @@ export default function HomeScreen() {
   // ─── Voice query ─────────────────────────────────────────────────────────
 
   const sendVoiceQuery = async (uri: string, isMaxDuration: boolean) => {
-    updateVoiceState("PROCESSING");
+    const traceId = createTraceId();
+    logTrace(traceId, "VOICE_START");
+
+    if (voiceStateRef.current !== "PROCESSING") {
+      updateVoiceState("PROCESSING");
+    }
+
     discardResponseRef.current = false;
 
-    const id = `${Date.now()}-${Math.random()}`;
-    lastScrollIdRef.current = id;
+    const id = traceId;
+    lastScrollIdRef.current = null;
 
-    // Create block with empty query — updated to cleaned_query on response per spec §8.3
-    setBlocks((prev) => [...prev, { id, query: "", status: "loading" }]);
-    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBlock(id)));
+    logTrace(traceId, "UI_UPDATE_START");
 
-    // Non-blocking warning if max duration was reached — spec §2.2
+    // ✅ Prevent duplicate insert
+    setBlocks((prev) => {
+      if (prev.find((b) => b.id === id)) return prev;
+      return [...prev, { id, query: "Voice input...", status: "loading", source: "voice" }];
+    });
+
+    smoothScroll(id);
+
+    logTrace(traceId, "UI_UPDATE_DONE");
+
     const initialStatus = isMaxDuration
       ? "Recording limit reached. Transcribing..."
       : "Transcribing...";
+
     setStatusText(initialStatus);
 
-    // Switch to "Processing..." after Whisper is likely done — spec §8.2
     const processingTimer = setTimeout(() => {
-      if (voiceStateRef.current === "PROCESSING") {
-        setStatusText("Processing...");
+      if (voiceStateRef.current === "PROCESSING" && !discardResponseRef.current) {
+        setStatusText((cur) =>
+          cur === "Transcribing..." ? "Processing..." : cur
+        );
       }
     }, 5000);
 
+    startThinkingTimer("Almost there...", 1500);
+
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    // comment this
+    //const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
       const isCAF = uri.endsWith(".caf");
+
       const formData = new FormData();
       formData.append("audio_file", {
         uri,
@@ -238,7 +293,11 @@ export default function HomeScreen() {
         type: isCAF ? "audio/x-caf" : "audio/m4a",
       } as any);
 
-      formData.append("user_profile", JSON.stringify(user));
+      formData.append("traceId", traceId);
+      formData.append("user_profile", JSON.stringify(user ?? {}));
+
+      logTrace(traceId, "API_CALL_START");
+      const startTime = Date.now();
 
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
@@ -246,43 +305,70 @@ export default function HomeScreen() {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
+      const latency = Date.now() - startTime;
+      logTrace(traceId, "API_LATENCY_MS", latency);
+
       clearTimeout(processingTimer);
+      clearThinkingTimer();
       abortControllerRef.current = null;
 
-      // Discard if app was backgrounded during PROCESSING — spec §10.2
       if (discardResponseRef.current) {
         discardResponseRef.current = false;
-        console.log("[sendVoiceQuery] response discarded — app was backgrounded");
         return;
       }
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        logTrace(traceId, "API_HTTP_ERROR", res.status);
+        throw new Error(`HTTP ${res.status}`);
+      }
 
       const data = await res.json();
-      const cleanedQuery =
-        typeof data.cleaned_query === "string" ? data.cleaned_query : "";
-      const text = typeof data.message === "string" ? data.message : "";
+      logTrace(traceId, "API_RESPONSE", data);
+      logTrace(traceId, "RESPONSE_PARSED");
 
-      // Always update query bubble with cleaned_query — unconditionally per spec §8.3
+      const cleanedQuery =
+        typeof data.cleaned_query === "string" &&
+          data.cleaned_query.trim().length > 0
+          ? data.cleaned_query
+          : "Voice input";
+
+      const text =
+        typeof data.message === "string" && data.message.trim().length > 0
+          ? data.message
+          : "No response received.";
+
+      // ❗ Handle business error FIRST
       if (data.status === "error") {
+        logTrace(traceId, "API_BUSINESS_ERROR", data);
+
         setBlocks((prev) =>
           prev.map((b) =>
             b.id === id
-              ? { ...b, query: cleanedQuery, status: "error", errorMessage: text }
+              ? {
+                ...b,
+                query: cleanedQuery,
+                status: "error",
+                errorMessage: text,
+              }
               : b
           )
         );
+
         setStatusText(text);
         updateVoiceState("IDLE");
-        setTimeout(
-          () => setStatusText((cur) => (cur === text ? null : cur)),
-          4000
-        );
+
+        setTimeout(() => {
+          setStatusText((cur) => (cur === text ? null : cur));
+        }, 4000);
+
         return;
       }
 
+      logTrace(traceId, "API_STATUS_SUCCESS");
+
+      // ✅ SINGLE ATOMIC UPDATE (NO DUPLICATION)
       const sections = parseSections(text);
+
       setBlocks((prev) =>
         prev.map((b) =>
           b.id === id
@@ -296,20 +382,24 @@ export default function HomeScreen() {
             : b
         )
       );
-      requestAnimationFrame(() => requestAnimationFrame(() => scrollToBlock(id)));
 
-      console.log("AUDIO LENGTH:", data.audio?.length);
+      smoothScroll(id);
 
-      // Play audio if returned and valid — spec §6.1
+      // 🔊 Audio handling
       if (data.audio) {
-        await playAudio(data.audio);
+        logTrace(traceId, "AUDIO_RECEIVED");
+        playAudio(data.audio); // no await
+        logTrace(traceId, "AUDIO_PLAY_START");
       } else {
         updateVoiceState("IDLE");
         setStatusText(null);
       }
     } catch (err: any) {
-      clearTimeout(timeoutId);
+      logTrace(traceId, "ERROR", err?.message);
+
+
       clearTimeout(processingTimer);
+      clearThinkingTimer();
       abortControllerRef.current = null;
 
       if (discardResponseRef.current) {
@@ -324,45 +414,78 @@ export default function HomeScreen() {
 
       setBlocks((prev) =>
         prev.map((b) =>
-          b.id === id ? { ...b, status: "error", errorMessage: message } : b
+          b.id === id
+            ? {
+              ...b,
+              query: b.query || "Voice input...", // 🔒 preserve or fallback
+              status: "error",
+              errorMessage: message,
+            }
+            : b
         )
       );
+
       setStatusText(message);
       updateVoiceState("IDLE");
-      setTimeout(
-        () => setStatusText((cur) => (cur === message ? null : cur)),
-        4000
-      );
+
+      setTimeout(() => {
+        setStatusText((cur) => (cur === message ? null : cur));
+      }, 4000);
     }
   };
 
   // ─── Keyboard query ───────────────────────────────────────────────────────
 
-  const sendKeyboardQuery = async (query: string) => {
-    // Global Interruption Rule — spec §4.4
+  const sendKeyboardQuery = async (query: string, traceId: string) => {
+    // 🔒 Debounce (FIRST)
+    const now = Date.now();
+    if (now - lastSubmitRef.current < 300) return;
+    lastSubmitRef.current = now;
+
+    clearThinkingTimer();
     await stopAnyPlayback();
 
+    // 🛑 Stop recording if active
     if (voiceStateRef.current === "RECORDING") {
       await cancelRecording();
     }
 
-    if (voiceStateRef.current === "PROCESSING") return;
+    // 🛑 Abort previous request if processing
+    if (voiceStateRef.current === "PROCESSING") {
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      discardResponseRef.current = true;
+
+      updateVoiceState("IDLE"); // required reset
+    }
 
     Keyboard.dismiss();
-    updateVoiceState("PROCESSING");
-    setStatusText("Processing...");
-    discardResponseRef.current = false;
 
-    const id = `${Date.now()}-${Math.random()}`;
-    lastScrollIdRef.current = id;
+    // ▶️ Move to processing
+    updateVoiceState("PROCESSING");
+
+    setStatusText("Thinking...");
+    discardResponseRef.current = false;
+    startThinkingTimer("Almost there...", 1500);
+
+    // ✅ Use traceId as stable id
+    const id = traceId;
+
+    lastScrollIdRef.current = null;
 
     setInput("");
-    setBlocks((prev) => [...prev, { id, query, status: "loading" }]);
-    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBlock(id)));
+    logTrace(traceId, "UI_UPDATE_START");
+    setBlocks((prev) => [...prev, { id, query, status: "loading", source: "text" }]);
+    smoothScroll(id);
+    logTrace(traceId, "UI_UPDATE_DONE");
 
+    // 🌐 API setup
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    logTrace(traceId, "API_CALL_START");
+    const startTime = Date.now();
 
     try {
       const res = await fetch(`${BACKEND_URL}/query`, {
@@ -371,30 +494,55 @@ export default function HomeScreen() {
         body: JSON.stringify({
           query,
           voice: false,
-          user_profile: user   // 🔥 KEY CHANGE
+          user_profile: user ?? {},
+          traceId,
         }),
         signal: controller.signal,
       });
 
+      const latency = Date.now() - startTime;
+      logTrace(traceId, "API_LATENCY_MS", latency);
+
       clearTimeout(timeoutId);
+      clearThinkingTimer();
       abortControllerRef.current = null;
 
+      // 🚫 Ignore if cancelled
       if (discardResponseRef.current) {
         discardResponseRef.current = false;
         return;
       }
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        logTrace(traceId, "API_HTTP_ERROR", res.status);
+        throw new Error(`HTTP ${res.status}`);
+      }
 
       const data = await res.json();
-      const text = typeof data.message === "string" ? data.message : "";
+      logTrace(traceId, "RESPONSE_PARSED", data);
+      logTrace(traceId, "API_STATUS_SUCCESS");
+
+      const cleanedQuery =
+        typeof data.cleaned_query === "string" &&
+          data.cleaned_query.trim().length > 0
+          ? data.cleaned_query
+          : query;
+
+      const text =
+        typeof data.message === "string" && data.message.trim().length > 0
+          ? data.message
+          : "No response received.";
+
       const sections = parseSections(text);
+
+      logTrace(traceId, "UI_UPDATE_START");
 
       setBlocks((prev) =>
         prev.map((b) =>
           b.id === id
             ? {
               ...b,
+              query: cleanedQuery, // ✅ FIXED
               status: "complete",
               sections: sections ?? undefined,
               rawText: sections ? undefined : text,
@@ -402,13 +550,18 @@ export default function HomeScreen() {
             : b
         )
       );
-      requestAnimationFrame(() => requestAnimationFrame(() => scrollToBlock(id)));
 
-      // NEVER play audio for keyboard input — spec §6.1, §11 constraint 5
+      smoothScroll(id);
+      logTrace(traceId, "UI_UPDATE_DONE");
+
       updateVoiceState("IDLE");
       setStatusText(null);
+
     } catch (err: any) {
+      logTrace(traceId, "ERROR", err?.message);
+
       clearTimeout(timeoutId);
+      clearThinkingTimer();
       abortControllerRef.current = null;
 
       if (discardResponseRef.current) {
@@ -423,15 +576,23 @@ export default function HomeScreen() {
 
       setBlocks((prev) =>
         prev.map((b) =>
-          b.id === id ? { ...b, status: "error", errorMessage: message } : b
+          b.id === id
+            ? {
+              ...b,
+              query: b.query || query, // ✅ preserve
+              status: "error",
+              errorMessage: message,
+            }
+            : b
         )
       );
+
       setStatusText(message);
       updateVoiceState("IDLE");
-      setTimeout(
-        () => setStatusText((cur) => (cur === message ? null : cur)),
-        4000
-      );
+
+      setTimeout(() => {
+        setStatusText((cur) => (cur === message ? null : cur));
+      }, 4000);
     }
   };
 
@@ -445,11 +606,12 @@ export default function HomeScreen() {
       maxDurationTimerRef.current = null;
     }
 
+    clearThinkingTimer();
+
     const rec = activeRecordingRef.current;
     activeRecordingRef.current = null;
 
     if (rec) {
-      // stopAndUnloadAsync — single correct teardown, releases OS mic lock — spec §13.1
       try {
         await rec.stopAndUnloadAsync();
       } catch { }
@@ -469,156 +631,132 @@ export default function HomeScreen() {
   };
 
   const stopRecordingAndSend = async (isMaxDuration: boolean) => {
-    if (maxDurationTimerRef.current) {
-      clearTimeout(maxDurationTimerRef.current);
-      maxDurationTimerRef.current = null;
-    }
-
-    const rec = activeRecordingRef.current;
-    activeRecordingRef.current = null;
-
-    if (!rec) return;
-
-    // stopAndUnloadAsync — single correct teardown — spec §13.1, §11 constraint 7
     try {
-      await rec.stopAndUnloadAsync();
-    } catch (err) {
-      console.error("[stopRecordingAndSend] stopAndUnloadAsync error:", err);
-    }
+      console.log("⏱ AUTO STOP triggered");
 
-    // Reset audio mode before playback path — spec §13.2
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
-    } catch { }
-
-    const uri = rec.getURI();
-
-    if (!uri) {
-      const msg = "Could not understand. Please try again.";
-      setStatusText(msg);
-      voiceStateRef.current = "IDLE";
-      setVoiceState("IDLE");
-      setTimeout(() => setStatusText((cur) => (cur === msg ? null : cur)), 4000);
-      return;
-    }
-
-    // Pre-submit check: file must be non-empty — spec §3.3 (only frontend check)
-    try {
-      const info = await FileSystem.getInfoAsync(uri, { size: true });
-      if (!info.exists || (info as any).size === 0) {
-        const msg = "Could not understand. Please try again.";
-        setStatusText(msg);
-        voiceStateRef.current = "IDLE";
-        setVoiceState("IDLE");
-        setTimeout(() => setStatusText((cur) => (cur === msg ? null : cur)), 4000);
+      const rec = activeRecordingRef.current;
+      if (!rec) {
+        console.log("❌ No active recording");
         return;
       }
-    } catch {
-      // Cannot check file info — proceed and let backend handle
-    }
 
-    await sendVoiceQuery(uri, isMaxDuration);
+      activeRecordingRef.current = null;
+
+      await rec.stopAndUnloadAsync();
+
+      const uri = rec.getURI();
+      console.log("📁 Audio URI:", uri);
+
+      updateVoiceState("PROCESSING");
+
+      await sendVoiceQuery(uri!, isMaxDuration);
+
+    } catch (e) {
+      console.log("❌ Auto stop error:", e);
+      updateVoiceState("IDLE");
+    }
   };
 
-  const startRecording = async () => {
-    const state = voiceStateRef.current;
+  // Parallel recording guard — spec §13.1
+  useEffect(() => {
+    const cleanup = async () => {
+      const dangling = activeRecordingRef.current;
 
-    // Precondition: must be IDLE or PLAYING — spec §5.1
-    if (state !== "IDLE" && state !== "PLAYING") {
-      console.warn(`[startRecording] mic tap ignored — state is ${state}`);
-      return;
-    }
+      if (dangling) {
+        activeRecordingRef.current = null;
+        try {
+          await dangling.stopAndUnloadAsync();
+        } catch (e) {
+          console.log("cleanup error", e);
+        }
+      }
+    };
 
-    // Global Interruption Rule — stop any active playback first — spec §4.4
-    await stopAnyPlayback();
+    cleanup();
+  }, []);
 
-    // Mic permission — spec §13.1
-    const permission = await Audio.requestPermissionsAsync();
-    if (!permission.granted) {
-      const msg = "Microphone access is required for voice input.";
-      setStatusText(msg);
-      setTimeout(() => setStatusText((cur) => (cur === msg ? null : cur)), 4000);
-      return;
-    }
+  isStoppingRef.current = false;
+  lastSpeechTimeRef.current = Date.now();
 
-    // Parallel recording guard — spec §13.1
-    const dangling = activeRecordingRef.current;
-    if (dangling) {
-      activeRecordingRef.current = null;
-      try {
-        await dangling.stopAndUnloadAsync();
-      } catch { }
-    }
-
-    isStoppingRef.current = false;
-    lastSpeechTimeRef.current = Date.now();
-
+  const initAudio = async () => {
     try {
-      // Required audio mode before recording on iOS — spec §13.1
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+    } catch (e) {
+      console.log(e);
+    }
+  };
+
+  initAudio();
+
+  // isMeteringEnabled: true required for silence detection — spec §13.1
+  const startRecording = async () => {
+    try {
+      console.log("🎤 START pressed");
+
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission.granted) {
+        console.log("❌ Permission denied");
+        return;
+      }
+
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
       });
 
-      // isMeteringEnabled: true required for silence detection — spec §13.1
+      const rec = new Audio.Recording();
+
       const preset: Audio.RecordingOptions = {
         ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
         isMeteringEnabled: true,
       };
 
-      // prepareToRecordAsync + startAsync per spec §13.1 — NOT createAsync
-      const rec = new Audio.Recording();
       await rec.prepareToRecordAsync(preset);
       await rec.startAsync();
 
       activeRecordingRef.current = rec;
 
-      // Input field clears on recording start — spec §8.1
       setInput("");
       updateVoiceState("RECORDING");
       setStatusText("Listening...");
 
-      // Silence detection runs inside status callback — spec §13.1
       rec.setProgressUpdateInterval(200);
+
       rec.setOnRecordingStatusUpdate((status) => {
         if (!status.isRecording || isStoppingRef.current) return;
 
         const db: number = (status as any).metering ?? -160;
 
         if (db > SILENCE_DB_THRESHOLD) {
-          // Speech detected — reset pause timer — spec §2.1
           lastSpeechTimeRef.current = Date.now();
           setStatusText("Listening...");
         } else {
           const silentFor = Date.now() - lastSpeechTimeRef.current;
 
           if (silentFor >= FINAL_PAUSE_MS && !isStoppingRef.current) {
-            // Final silence threshold reached — stop and send — spec §2.2, §5.3
             isStoppingRef.current = true;
             stopRecordingAndSend(false);
           } else if (silentFor >= SOFT_PAUSE_MS) {
-            // Soft pause — keep recording — spec §2.1, §8.2
             setStatusText("Still listening...");
           }
         }
       });
 
-      // Max duration failsafe — spec §2.2, §5.3
       maxDurationTimerRef.current = setTimeout(() => {
         if (!isStoppingRef.current && voiceStateRef.current === "RECORDING") {
           isStoppingRef.current = true;
           stopRecordingAndSend(true);
         }
       }, MAX_RECORDING_MS);
+
     } catch (err) {
       console.error("[startRecording] error:", err);
+      clearThinkingTimer();
       activeRecordingRef.current = null;
-      // Force IDLE on any recording start failure — spec §9.1
-      voiceStateRef.current = "IDLE";
-      setVoiceState("IDLE");
+      updateVoiceState("IDLE");
       setStatusText(null);
     }
   };
@@ -626,12 +764,9 @@ export default function HomeScreen() {
   // ─── Input handlers ───────────────────────────────────────────────────────
 
   const handleMicPress = async () => {
-    const state = voiceStateRef.current;
+    console.log("🎤 MIC PRESSED, state:", voiceStateRef.current);
 
-    if (state === "RECORDING") {
-      await stopRecordingAndSend(false);
-      return;
-    }
+    const state = voiceStateRef.current;
 
     if (state === "PLAYING") {
       await stopAnyPlayback();
@@ -644,19 +779,32 @@ export default function HomeScreen() {
       return;
     }
 
+    if (state === "RECORDING") {
+      await stopRecordingAndSend(false);   // 🔥 FIX
+      return;
+    }
+
     // PROCESSING → ignore
   };
+
+
 
   const handleSendPress = () => {
     if (voiceStateRef.current === "PROCESSING") return;
     const query = input.trim();
     if (!query) return;
-    sendKeyboardQuery(query);
+
+    const traceId = createTraceId();
+    logTrace(traceId, "KEYBOARD_START", query);
+
+    sendKeyboardQuery(query, traceId);
   };
 
   const handleChip = (value: string) => {
     if (voiceStateRef.current === "PROCESSING") return;
-    sendKeyboardQuery(value);
+    const traceId = createTraceId();
+    logTrace(traceId, "KEYBOARD_START", value);
+    sendKeyboardQuery(value, traceId);
   };
 
   const handleActionChip = (label: string) => {
@@ -700,24 +848,37 @@ export default function HomeScreen() {
 
       if (state === "RECORDING") {
         isStoppingRef.current = true;
+
         const rec = activeRecordingRef.current;
         activeRecordingRef.current = null;
+
         if (rec) {
           try {
             await rec.stopAndUnloadAsync();
           } catch { }
         }
-        setVoiceState("IDLE");
+
+        if (maxDurationTimerRef.current) {
+          clearTimeout(maxDurationTimerRef.current);
+          maxDurationTimerRef.current = null;
+        }
+
+        clearThinkingTimer();
+        updateVoiceState("IDLE");
         setStatusText(null);
       } else if (state === "PROCESSING") {
         abortControllerRef.current?.abort();
         abortControllerRef.current = null;
         discardResponseRef.current = true;
-        setVoiceState("IDLE");
+
+        clearThinkingTimer();
+        updateVoiceState("IDLE");
         setStatusText(null);
       } else if (state === "PLAYING") {
         await stopAnyPlayback();
-        setVoiceState("IDLE");
+
+        clearThinkingTimer();
+        updateVoiceState("IDLE");
         setStatusText(null);
       }
     });
@@ -768,11 +929,6 @@ export default function HomeScreen() {
                 paddingTop: 6,
                 paddingBottom: 100,
               }}
-              onContentSizeChange={() => {
-                if (lastScrollIdRef.current) {
-                  scrollToBlock(lastScrollIdRef.current);
-                }
-              }}
             >
               {blocks.map((block) => (
                 <View
@@ -787,7 +943,10 @@ export default function HomeScreen() {
                     <View
                       style={{
                         alignSelf: "flex-end",
-                        backgroundColor: C.userBubble,
+                        backgroundColor:
+                          block.source === "voice"
+                            ? "#CDEBCC"
+                            : C.userBubble,
                         paddingVertical: 6,
                         paddingHorizontal: 10,
                         borderRadius: 14,
@@ -796,6 +955,7 @@ export default function HomeScreen() {
                       }}
                     >
                       <Text style={{ color: C.textDark }}>
+                        {block.source === "voice" ? "🎤 " : ""}
                         {block.query}
                       </Text>
                     </View>
@@ -948,8 +1108,7 @@ export default function HomeScreen() {
                 }}
               >
                 <Text style={{ color: C.text }}>
-                  {isRecording ? "⏹" : "🎤"}
-                  {voiceState === "PLAYING" ? "⏹" : "🎤"}
+                  {voiceState === "RECORDING" || voiceState === "PLAYING" ? "⏹" : "🎤"}
                 </Text>
               </TouchableOpacity>
 
