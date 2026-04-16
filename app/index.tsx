@@ -105,6 +105,19 @@ export default function HomeScreen() {
     setVoiceState(next);
   };
 
+  const handleIntentRouting = (intent: string, data: any) => {
+    console.log("🧠 Routing intent:", intent);
+
+    if (intent === "glucose") {
+      // TEMP: direct routing (we add Chat Lite next)
+      router.push(`/meal-main?intent=glucose`);
+    }
+
+    // future:
+    // cholesterol → meal-main?intent=cholesterol
+    // weight → meal-main?intent=weight
+  };
+
   // ─── Utilities ───────────────────────────────────────────────────────────
 
   const parseSections = (text: string): Section[] | null => {
@@ -249,17 +262,15 @@ export default function HomeScreen() {
     const id = traceId;
     lastScrollIdRef.current = null;
 
-    logTrace(traceId, "UI_UPDATE_START");
-
-    // ✅ Prevent duplicate insert
     setBlocks((prev) => {
       if (prev.find((b) => b.id === id)) return prev;
-      return [...prev, { id, query: "Voice input...", status: "loading", source: "voice" }];
+      return [
+        ...prev,
+        { id, query: "Voice input...", status: "loading", source: "voice" },
+      ];
     });
 
     smoothScroll(id);
-
-    logTrace(traceId, "UI_UPDATE_DONE");
 
     const initialStatus = isMaxDuration
       ? "Recording limit reached. Transcribing..."
@@ -268,7 +279,10 @@ export default function HomeScreen() {
     setStatusText(initialStatus);
 
     const processingTimer = setTimeout(() => {
-      if (voiceStateRef.current === "PROCESSING" && !discardResponseRef.current) {
+      if (
+        voiceStateRef.current === "PROCESSING" &&
+        !discardResponseRef.current
+      ) {
         setStatusText((cur) =>
           cur === "Transcribing..." ? "Processing..." : cur
         );
@@ -280,8 +294,7 @@ export default function HomeScreen() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    // comment this
-    //const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const startTime = Date.now();
 
     try {
       const isCAF = uri.endsWith(".caf");
@@ -295,9 +308,6 @@ export default function HomeScreen() {
 
       formData.append("traceId", traceId);
       formData.append("user_profile", JSON.stringify(user ?? {}));
-
-      logTrace(traceId, "API_CALL_START");
-      const startTime = Date.now();
 
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
@@ -318,55 +328,44 @@ export default function HomeScreen() {
       }
 
       if (!res.ok) {
-        logTrace(traceId, "API_HTTP_ERROR", res.status);
         throw new Error(`HTTP ${res.status}`);
       }
 
       const data = await res.json();
+
+      const intent = data.intent || "general";
+      handleIntentRouting(intent, data);
+
       logTrace(traceId, "API_RESPONSE", data);
-      logTrace(traceId, "RESPONSE_PARSED");
 
       const cleanedQuery =
-        typeof data.cleaned_query === "string" &&
-          data.cleaned_query.trim().length > 0
+        typeof data.cleaned_query === "string" && data.cleaned_query.trim()
           ? data.cleaned_query
           : "Voice input";
 
       const text =
-        typeof data.message === "string" && data.message.trim().length > 0
+        typeof data.message === "string" && data.message.trim()
           ? data.message
           : "No response received.";
 
-      // ❗ Handle business error FIRST
       if (data.status === "error") {
-        logTrace(traceId, "API_BUSINESS_ERROR", data);
-
         setBlocks((prev) =>
           prev.map((b) =>
             b.id === id
               ? {
                 ...b,
-                query: cleanedQuery,
                 status: "error",
-                errorMessage: text,
+                errorMessage: "🎤 Didn’t catch that. Try again.",
               }
               : b
           )
         );
 
-        setStatusText(text);
+        setStatusText("Say your question clearly… I’m listening.");
         updateVoiceState("IDLE");
-
-        setTimeout(() => {
-          setStatusText((cur) => (cur === text ? null : cur));
-        }, 4000);
-
         return;
       }
 
-      logTrace(traceId, "API_STATUS_SUCCESS");
-
-      // ✅ SINGLE ATOMIC UPDATE (NO DUPLICATION)
       const sections = parseSections(text);
 
       setBlocks((prev) =>
@@ -385,18 +384,15 @@ export default function HomeScreen() {
 
       smoothScroll(id);
 
-      // 🔊 Audio handling
       if (data.audio) {
-        logTrace(traceId, "AUDIO_RECEIVED");
-        playAudio(data.audio); // no await
-        logTrace(traceId, "AUDIO_PLAY_START");
+        playAudio(data.audio);
       } else {
         updateVoiceState("IDLE");
         setStatusText(null);
       }
+
     } catch (err: any) {
       logTrace(traceId, "ERROR", err?.message);
-
 
       clearTimeout(processingTimer);
       clearThinkingTimer();
@@ -417,7 +413,6 @@ export default function HomeScreen() {
           b.id === id
             ? {
               ...b,
-              query: b.query || "Voice input...", // 🔒 preserve or fallback
               status: "error",
               errorMessage: message,
             }
@@ -427,10 +422,6 @@ export default function HomeScreen() {
 
       setStatusText(message);
       updateVoiceState("IDLE");
-
-      setTimeout(() => {
-        setStatusText((cur) => (cur === message ? null : cur));
-      }, 4000);
     }
   };
 
