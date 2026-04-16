@@ -7,7 +7,6 @@ import time
 import asyncio
 import base64
 import difflib
-import json   # ✅ ADDED
 
 
 from litellm import completion
@@ -30,7 +29,6 @@ print("USE_LLM:", USE_LLM)
 print("USE_MOCK:", USE_MOCK)
 print("SCROLL_TEST:", SCROLL_TEST)
 
-
 app = FastAPI()
 
 print("🚨 LLM BACKEND RUNNING")
@@ -38,7 +36,7 @@ print("🚨 LLM BACKEND RUNNING")
 
 # ---------------- USER PROFILE ----------------
 USER_PROFILE = {
-    "name": "   ",
+    "name": "Deepak",
     "age": 63,
     "condition": "prediabetic",
     "a1c": 6.0,
@@ -57,8 +55,6 @@ COMMON_CORRECTIONS = {
     "bp": "blood pressure",  # you already handle this, but safe
 }
 
-def log_trace(trace_id: str, step: str, data=None):
-    print(f"[{trace_id}] {step}", data if data else "")
 
 # ---------------- SCROLL TEST ----------------
 def long_block(title: str) -> str:
@@ -312,19 +308,17 @@ Try asking about food, exercise, or health markers."""
 
 
 # ---------------- PROMPT ----------------
-def build_prompt(q: str, ctx: dict, user_profile=None) -> str:
-    profile = user_profile or USER_PROFILE   # 👈 ADD HERE
-
+def build_prompt(q: str, ctx: dict) -> str:
     return f"""
 You are a lifestyle health assistant.
 
 User Profile:
-- Age: {profile.get('age')}
-- Condition: {profile.get(profile.get("condition", 'unknown'))} (A1C {profile.get('a1c', 'NA')})
-- LDL: {profile.get('ldl', 'NA')}
-- Goal: {profile.get('goal', 'improve health')}
-- Diet: {profile.get('diet', 'NA')}
-- Phenotype: {profile.get('phenotype', 'general')}
+- Age: {USER_PROFILE['age']}
+- Condition: {USER_PROFILE['condition']} (A1C {USER_PROFILE['a1c']})
+- LDL: {USER_PROFILE['ldl']}
+- Goal: {USER_PROFILE['goal']}
+- Diet: {USER_PROFILE['diet']}
+- Phenotype: {USER_PROFILE['phenotype']}
 
 User query: "{q}"
 
@@ -414,27 +408,22 @@ def generate_tts(text: str):
 
 
 # ---------------- BUILD RESPONSE ----------------
-async def build_response(query: str, user_profile=None, trace_id="NO_TRACE"):
+async def build_response(query: str):
     if not query:
         return {"text": "Empty query", "score": 0}
 
     q = correct_spelling(query)
     q = normalize(q)
-    log_trace(trace_id, "NORMALIZED_QUERY", q)   # ✅ ADDED
 
     ctx = detect_context(q)
     intent = detect_intent(q)
 
-    log_trace(trace_id, "INTENT", intent)        # ✅ ADDED
-    log_trace(trace_id, "CONTEXT", ctx)          # ✅ ADDED
-
     score = compute_score(intent, q)
-    log_trace(trace_id, "SCORE", score)          # ✅ ADDED
+    print("SCORE:", score)
 
     if intent == "unknown":
         q = correct_with_llm(q)
         intent = detect_intent(q)
-        log_trace(trace_id, "INTENT_AFTER_CORRECTION", intent)  # ✅ ADDED
 
     print("\n--- REQUEST ---")
     print("QUERY:", q)
@@ -467,20 +456,18 @@ Say something like:
 
     if USE_LLM:
         try:
-            log_trace(trace_id, "LLM_CALL_START")
             result = await asyncio.wait_for(
                 asyncio.to_thread(llm_response, q, ctx),
                 timeout=15
             )
-            log_trace(trace_id, "LLM_CALL_DONE")
             return {"text": enforce_format(result), "score": score}
 
         except asyncio.TimeoutError:
-            log_trace(trace_id, "LLM_TIMEOUT")   # ✅ FIXED
+            print("LLM TIMEOUT")
             return {"text": "LLM timed out. Try again.", "score": score}
 
         except Exception as e:
-            log_trace(trace_id, "LLM_ERROR", str(e))   # ✅ FIXED
+            print("LLM ERROR:", e)
             return {
                 "text": mock_response(intent),
                 "score": score,
@@ -535,33 +522,28 @@ def correct_with_llm(text: str) -> str:
         return extract_text(res).strip()
     except:
         return text
-    
-    
 
 # ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
 @app.post("/query")
 async def handle_query(request: Request):
-    start_total = time.time()
+    """
+    Single endpoint for both voice and keyboard input.
+
+    Voice path:   multipart/form-data with audio_file field
+                  Runs Whisper → validate (A→B→C→D) → LLM → TTS → returns audio
+
+    Keyboard path: application/json with {query, voice: false}
+                   Runs LLM only → audio is always null
+    """
+    start = time.time()
     content_type = request.headers.get("content-type", "")
 
     # ── VOICE PATH ──────────────────────────────────────────────────────────
     if "multipart/form-data" in content_type:
         form = await request.form()
-        trace_id = form.get("traceId", "NO_TRACE")
-
-        log_trace(trace_id, "REQUEST_RECEIVED")
-        log_trace(trace_id, "INPUT_TYPE", "voice")
-
         audio_file = form.get("audio_file")
-        user_profile_raw = form.get("user_profile")
-
-        try:
-            user_profile = json.loads(user_profile_raw) if user_profile_raw else None
-        except:
-            user_profile = None
 
         if audio_file is None:
-            log_trace(trace_id, "INPUT_VALIDATION_FAILED")
             return {
                 "status": "error",
                 "message": "Could not understand. Please try again.",
@@ -572,10 +554,10 @@ async def handle_query(request: Request):
             }
 
         audio_bytes = await audio_file.read()
-        log_trace(trace_id, "AUDIO_SIZE", len(audio_bytes))
+        print(f"\n--- VOICE REQUEST ---")
+        print(f"File: {audio_file.filename}, Size: {len(audio_bytes)} bytes")
 
         if len(audio_bytes) == 0:
-            log_trace(trace_id, "EMPTY_AUDIO")
             return {
                 "status": "error",
                 "message": "Could not understand. Please try again.",
@@ -586,7 +568,6 @@ async def handle_query(request: Request):
             }
 
         if len(audio_bytes) > 25 * 1024 * 1024:
-            log_trace(trace_id, "AUDIO_TOO_LARGE")
             return {
                 "status": "error",
                 "message": "Audio file too large.",
@@ -596,9 +577,7 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
-        # ── TRANSCRIPTION ─────────────────────────────
-        log_trace(trace_id, "TRANSCRIPTION_START")
-
+        # Whisper transcription
         audio_io = io.BytesIO(audio_bytes)
         filename = (audio_file.filename or "").lower()
         ext = filename.split(".")[-1] if "." in filename else "m4a"
@@ -615,9 +594,8 @@ async def handle_query(request: Request):
                 timeout=10
             )
             raw_transcript = (transcript_obj.text or "").strip()
-            log_trace(trace_id, "TRANSCRIPTION_DONE", raw_transcript)
         except asyncio.TimeoutError:
-            log_trace(trace_id, "TRANSCRIPTION_TIMEOUT")
+            print("WHISPER TIMEOUT")
             return {
                 "status": "error",
                 "message": "Could not understand. Please try again.",
@@ -627,11 +605,12 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
+        print("WHISPER RAW:", raw_transcript)
+
         error_msg, cleaned_query = validate_voice_query(raw_transcript)
-        log_trace(trace_id, "QUERY_CLEANED", cleaned_query)
 
         if error_msg:
-            log_trace(trace_id, "VALIDATION_FAILED", error_msg)
+            print("VALIDATION FAILED:", error_msg)
             return {
                 "status": "error",
                 "message": error_msg,
@@ -641,68 +620,49 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
-        # ── LLM CALL ─────────────────────────────
-        log_trace(trace_id, "LLM_CALL_START")
-        start_llm = time.time()
+        print("CLEANED QUERY:", cleaned_query)
 
-        result = await build_response(cleaned_query, user_profile, trace_id)
-
-        llm_latency = int((time.time() - start_llm) * 1000)
-        log_trace(trace_id, "LLM_RESPONSE_RECEIVED")
-        log_trace(trace_id, "LLM_LATENCY_MS", llm_latency)
-
-        text = result.get("text", "") or "Something went wrong. Please try again."
+        result = await build_response(cleaned_query)
+        text = result.get("text", "")
+        if not text:
+            text = "Something went wrong. Please try again."
         score = result.get("score", 0)
-        log_trace(trace_id, "FINAL_RESPONSE_PREVIEW", text[:100])
-        
 
-        # ── AUDIO GENERATION ─────────────────────
+        # Backend selects TTS text — frontend never trims or selects
         tts_text = text
-        audio = None
-
-        log_trace(trace_id, "AUDIO_GENERATION_START")
-        start_audio = time.time()   # ✅ ADD THIS LINE
-
         try:
             audio = await asyncio.wait_for(
                 asyncio.to_thread(generate_tts, tts_text),
                 timeout=15
             )
         except asyncio.TimeoutError:
-            log_trace(trace_id, "AUDIO_TIMEOUT")
+            print("TTS TIMEOUT")
+            audio = None
 
-        audio_latency = int((time.time() - start_audio) * 1000)   # now safe
-        log_trace(trace_id, "AUDIO_GENERATION_DONE")
-        log_trace(trace_id, "AUDIO_LATENCY_MS", audio_latency)
-
-        total_ms = int((time.time() - start_total) * 1000)
-        log_trace(trace_id, "TOTAL_BACKEND_MS", total_ms)
-        log_trace(trace_id, "RESPONSE_SENT")
-        
-        print("🚨 DEBUG TTS TEXT LENGTH:", len(tts_text) if tts_text else "None")
-        print("🚨 DEBUG AUDIO VALUE:", "YES" if audio else "NO")
-        print("🚨 DEBUG AUDIO TYPE:", type(audio))
+        print("⏱️", round(time.time() - start, 2), "sec\n")
 
         return {
+            "status": "success",
             "message": text,
-            "audio": audio,          # 🔥 THIS MUST CHANGE
-            "tts_text": tts_text,
             "cleaned_query": cleaned_query,
-            "status": "success"
+            "tts_text": tts_text if audio else None,
+            "audio": audio,
+            "score": score,
         }
 
     # ── KEYBOARD PATH ────────────────────────────────────────────────────────
     else:
         data = await request.json()
-        trace_id = data.get("traceId", "NO_TRACE")
         query = (data.get("query") or "").strip()
-        log_trace(trace_id, "REQUEST_RECEIVED")
-        log_trace(trace_id, "INPUT_TYPE", "text")
-        log_trace(trace_id, "QUERY", query)
-        log_trace(trace_id, "QUERY_CLEANED", query)
+        voice = bool(data.get("voice", False))
+
+        if voice:
+            print("WARNING: /query keyboard path received voice:true — treating as keyboard")
+
+        print(f"\n--- KEYBOARD REQUEST ---")
+        print(f"QUERY: {query}")
 
         if not query:
-            log_trace(trace_id, "EMPTY_QUERY")
             return {
                 "status": "error",
                 "message": "Please enter a question.",
@@ -713,7 +673,6 @@ async def handle_query(request: Request):
             }
 
         if len(query) > 500:
-            log_trace(trace_id, "QUERY_TOO_LONG")
             return {
                 "status": "error",
                 "message": "Query too long.",
@@ -723,36 +682,28 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
-        # ── LLM CALL ─────────────────────────────
-        log_trace(trace_id, "LLM_CALL_START")
-        start_llm = time.time()
+        if len(query.split()) <= 1:
+            return {
+                "status": "success",
+                "message": "Please say a full sentence like 'my sugar is high after meal'",
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-        result = await build_response(query, None, trace_id)
-
-        llm_latency = int((time.time() - start_llm) * 1000)
-        log_trace(trace_id, "LLM_RESPONSE_RECEIVED")
-        log_trace(trace_id, "LLM_LATENCY_MS", llm_latency)
-
+        result = await build_response(query)
         text = result.get("text", "")
         score = result.get("score", 0)
-        tts_text = None
-        audio = None
-        
-        log_trace(trace_id, "FINAL_RESPONSE_PREVIEW", text[:100])
 
-        total_ms = int((time.time() - start_total) * 1000)
-        log_trace(trace_id, "TOTAL_BACKEND_MS", total_ms)
-        log_trace(trace_id, "RESPONSE_SENT")
+        print("⏱️", round(time.time() - start, 2), "sec\n")
 
-        print("🚨 DEBUG TTS TEXT LENGTH:", len(tts_text) if tts_text else "None")
-        print("🚨 DEBUG AUDIO VALUE:", "YES" if audio else "NO")
-        print("🚨 DEBUG AUDIO TYPE:", type(audio))
-
+        # audio is always null for keyboard — spec constraint
         return {
             "status": "success",
             "message": text,
             "cleaned_query": None,
             "tts_text": None,
-            "audio": audio,
+            "audio": None,
             "score": score,
         }
