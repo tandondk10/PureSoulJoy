@@ -28,9 +28,9 @@ export default function AppHeader({
       >
         {/* 🔹 TITLE */}
         <Text style={{ fontSize: 26, fontWeight: "600", lineHeight: 28 }}>
-          <Text style={{ color: C.text }}>Better</Text>
-          <Text style={{ color: C.accent }}>Me</Text>
-          <Text style={{ color: C.muted, opacity: 0.5 }}>{" · Daily"}</Text>
+          <Text style={{ color: C.text }}>Build</Text>
+          <Text style={{ color: C.accent }}>Joy</Text>
+          <Text style={{ color: C.muted, opacity: 0.5 }}>{" · Health"}</Text>
         </Text>
 
         {/* 🔹 TAGLINE */}
@@ -43,7 +43,7 @@ export default function AppHeader({
             lineHeight: 16,
           }}
         >
-          Better meals. Better habits. Better you.
+          Improve daily. Live healthy.
         </Text>
 
         {/* 🔹 PROFILE SECTION */}

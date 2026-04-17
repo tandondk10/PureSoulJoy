@@ -782,6 +782,11 @@ export default function MealMain() {
   const scrollRef = useRef<ScrollView>(null);
   const router = useRouter();
   const params = useLocalSearchParams();
+
+  const score = params.score;
+  const items = JSON.parse(params.items || "[]");
+  console.log("🔥 MEAL SCREEN DATA:", score, items);
+
   const UX_MODE: "screen" | "chat" =
     params?.mode === "chat" ? "chat" : "screen";
 

@@ -6,7 +6,7 @@ import { Audio } from "expo-av";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  AppState, // ✅ ADD THIS LINE
+  AppState,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -15,7 +15,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from "react-native";
 
 import AppHeader from "@/components/AppHeader";
@@ -23,7 +23,6 @@ import { useUser } from "@/context/UserContext";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SectionCard from "../components/SectionCard";
-import { createTraceId, logTrace } from "../utils/trace";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
@@ -51,6 +50,8 @@ type QueryBlock = {
   sections?: Section[];
   rawText?: string;
   errorMessage?: string;
+  mode?: string;
+  score?: number;
 };
 
 // Valid state transitions per spec §4.2
@@ -90,565 +91,7 @@ export default function HomeScreen() {
   const lastScrollIdRef = useRef<string | null>(null);
   const lastSubmitRef = useRef(0); // ✅ debounce guard
 
-
-  // ─── State machine ───────────────────────────────────────────────────────
-
-  const updateVoiceState = (next: VoiceState) => {
-    const current = voiceStateRef.current;
-    const allowed = VALID_TRANSITIONS[current];
-    if (!allowed.includes(next)) {
-      console.warn(`[VoiceState] Invalid transition: ${current} → ${next} — ignored`);
-      return;
-    }
-    console.log(`[VoiceState] ${current} → ${next}`);
-    voiceStateRef.current = next;
-    setVoiceState(next);
-  };
-
-  const handleIntentRouting = (intent: string, data: any) => {
-    console.log("🧠 Routing intent:", intent);
-
-    if (intent === "glucose") {
-      // TEMP: direct routing (we add Chat Lite next)
-      router.push(`/meal-main?intent=glucose`);
-    }
-
-    // future:
-    // cholesterol → meal-main?intent=cholesterol
-    // weight → meal-main?intent=weight
-  };
-
-  // ─── Utilities ───────────────────────────────────────────────────────────
-
-  const parseSections = (text: string): Section[] | null => {
-    if (!text || !text.includes("##")) return null;
-    return text
-      .split("## ")
-      .filter(Boolean)
-      .map((p) => {
-        const lines = p.split("\n");
-        return {
-          title: String(lines[0] || "").trim(),
-          content: String(lines.slice(1).join("\n") || "").trim(),
-        };
-      });
-  };
-
-  const scrollToBlock = (id: string) => {
-    requestAnimationFrame(() => {
-      const block = blockRefs.current[id];
-      const sv = scrollRef.current;
-      if (!block || !sv) return;
-      block.measureLayout(
-        sv as any,
-        (_x: number, y: number) =>
-          sv.scrollTo({ y: Math.max(0, y - 20), animated: true }),
-        () => { }
-      );
-    });
-  };
-  // ✅ ADD THIS RIGHT BELOW
-  const smoothScroll = (id: string) => {
-    if (lastScrollIdRef.current === id) return; // 🔒 prevent duplicate scrolls
-    lastScrollIdRef.current = id;
-
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        scrollToBlock(id);
-      });
-    });
-  };
-
-  const clearThinkingTimer = () => {
-    if (thinkingTimerRef.current) {
-      clearTimeout(thinkingTimerRef.current);
-      thinkingTimerRef.current = null;
-    }
-  };
-
-  const startThinkingTimer = (message = "Almost there...", delay = 1500) => {
-    clearThinkingTimer();
-    thinkingTimerRef.current = setTimeout(() => {
-      if (voiceStateRef.current === "PROCESSING" && !discardResponseRef.current) {
-        setStatusText((current) => {
-          if (!current || current === "Thinking..." || current === "Processing...") {
-            return message;
-          }
-          return current; // 🔒 do not override error or final messages
-        });
-      }
-    }, delay);
-  };
-  // ─── Audio playback ──────────────────────────────────────────────────────
-
-  const stopAnyPlayback = async () => {
-    const sound = activeSoundRef.current;
-    if (!sound) return;
-    activeSoundRef.current = null;
-    try {
-      await sound.stopAsync();
-      await sound.unloadAsync();
-    } catch {
-      // already stopped or unloaded — ignore
-    }
-  };
-
-  const playAudio = async (base64: string) => {
-    await stopAnyPlayback();
-
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
-
-      if (!base64 || typeof base64 !== "string" || base64.length < 50) {
-        console.warn("[playAudio] invalid base64 — text-only fallback");
-        updateVoiceState("IDLE");
-        setStatusText(null);
-        return;
-      }
-
-      const dataUri = `data:audio/mp3;base64,${base64}`;
-      const { sound } = await Audio.Sound.createAsync({ uri: dataUri });
-
-      activeSoundRef.current = sound;
-      updateVoiceState("PLAYING");
-      setStatusText("Playing response...");
-
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (!(status as any).didJustFinish) return;
-
-        if (activeSoundRef.current === sound) {
-          activeSoundRef.current = null;
-          sound.setOnPlaybackStatusUpdate(null);
-          sound.unloadAsync().catch(() => { });
-          updateVoiceState("IDLE");
-          setStatusText(null);
-        }
-      });
-
-      await sound.playAsync();
-    } catch (err) {
-      console.error("[playAudio] load/play error:", err);
-
-      const s = activeSoundRef.current;
-      activeSoundRef.current = null;
-
-      if (s) {
-        try {
-          s.setOnPlaybackStatusUpdate(null);
-          await s.unloadAsync();
-        } catch { }
-      }
-
-      updateVoiceState("IDLE");
-      setStatusText(null);
-    }
-  };
-
-  // ─── Voice query ─────────────────────────────────────────────────────────
-
-  const sendVoiceQuery = async (uri: string, isMaxDuration: boolean) => {
-    const traceId = createTraceId();
-    logTrace(traceId, "VOICE_START");
-
-    if (voiceStateRef.current !== "PROCESSING") {
-      updateVoiceState("PROCESSING");
-    }
-
-    discardResponseRef.current = false;
-
-    const id = traceId;
-    lastScrollIdRef.current = null;
-
-    setBlocks((prev) => {
-      if (prev.find((b) => b.id === id)) return prev;
-      return [
-        ...prev,
-        { id, query: "Voice input...", status: "loading", source: "voice" },
-      ];
-    });
-
-    smoothScroll(id);
-
-    const initialStatus = isMaxDuration
-      ? "Recording limit reached. Transcribing..."
-      : "Transcribing...";
-
-    setStatusText(initialStatus);
-
-    const processingTimer = setTimeout(() => {
-      if (
-        voiceStateRef.current === "PROCESSING" &&
-        !discardResponseRef.current
-      ) {
-        setStatusText((cur) =>
-          cur === "Transcribing..." ? "Processing..." : cur
-        );
-      }
-    }, 5000);
-
-    startThinkingTimer("Almost there...", 1500);
-
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    const startTime = Date.now();
-
-    try {
-      const isCAF = uri.endsWith(".caf");
-
-      const formData = new FormData();
-      formData.append("audio_file", {
-        uri,
-        name: isCAF ? "audio.caf" : "audio.m4a",
-        type: isCAF ? "audio/x-caf" : "audio/m4a",
-      } as any);
-
-      formData.append("traceId", traceId);
-      formData.append("user_profile", JSON.stringify(user ?? {}));
-
-      const res = await fetch(`${BACKEND_URL}/query`, {
-        method: "POST",
-        body: formData,
-        signal: controller.signal,
-      });
-
-      const latency = Date.now() - startTime;
-      logTrace(traceId, "API_LATENCY_MS", latency);
-
-      clearTimeout(processingTimer);
-      clearThinkingTimer();
-      abortControllerRef.current = null;
-
-      if (discardResponseRef.current) {
-        discardResponseRef.current = false;
-        return;
-      }
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-
-      const intent = data.intent || "general";
-      handleIntentRouting(intent, data);
-
-      logTrace(traceId, "API_RESPONSE", data);
-
-      const cleanedQuery =
-        typeof data.cleaned_query === "string" && data.cleaned_query.trim()
-          ? data.cleaned_query
-          : "Voice input";
-
-      const text =
-        typeof data.message === "string" && data.message.trim()
-          ? data.message
-          : "No response received.";
-
-      if (data.status === "error") {
-        setBlocks((prev) =>
-          prev.map((b) =>
-            b.id === id
-              ? {
-                ...b,
-                status: "error",
-                errorMessage: "🎤 Didn’t catch that. Try again.",
-              }
-              : b
-          )
-        );
-
-        setStatusText("Say your question clearly… I’m listening.");
-        updateVoiceState("IDLE");
-        return;
-      }
-
-      const sections = parseSections(text);
-
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
-            ? {
-              ...b,
-              query: cleanedQuery,
-              status: "complete",
-              sections: sections ?? undefined,
-              rawText: sections ? undefined : text,
-            }
-            : b
-        )
-      );
-
-      smoothScroll(id);
-
-      if (data.audio) {
-        playAudio(data.audio);
-      } else {
-        updateVoiceState("IDLE");
-        setStatusText(null);
-      }
-
-    } catch (err: any) {
-      logTrace(traceId, "ERROR", err?.message);
-
-      clearTimeout(processingTimer);
-      clearThinkingTimer();
-      abortControllerRef.current = null;
-
-      if (discardResponseRef.current) {
-        discardResponseRef.current = false;
-        return;
-      }
-
-      const message =
-        err.name === "AbortError"
-          ? "Connection timed out. Please try again."
-          : "Connection issue. Please try again.";
-
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
-            ? {
-              ...b,
-              status: "error",
-              errorMessage: message,
-            }
-            : b
-        )
-      );
-
-      setStatusText(message);
-      updateVoiceState("IDLE");
-    }
-  };
-
-  // ─── Keyboard query ───────────────────────────────────────────────────────
-
-  const sendKeyboardQuery = async (query: string, traceId: string) => {
-    // 🔒 Debounce (FIRST)
-    const now = Date.now();
-    if (now - lastSubmitRef.current < 300) return;
-    lastSubmitRef.current = now;
-
-    clearThinkingTimer();
-    await stopAnyPlayback();
-
-    // 🛑 Stop recording if active
-    if (voiceStateRef.current === "RECORDING") {
-      await cancelRecording();
-    }
-
-    // 🛑 Abort previous request if processing
-    if (voiceStateRef.current === "PROCESSING") {
-      abortControllerRef.current?.abort();
-      abortControllerRef.current = null;
-      discardResponseRef.current = true;
-
-      updateVoiceState("IDLE"); // required reset
-    }
-
-    Keyboard.dismiss();
-
-    // ▶️ Move to processing
-    updateVoiceState("PROCESSING");
-
-    setStatusText("Thinking...");
-    discardResponseRef.current = false;
-    startThinkingTimer("Almost there...", 1500);
-
-    // ✅ Use traceId as stable id
-    const id = traceId;
-
-    lastScrollIdRef.current = null;
-
-    setInput("");
-    logTrace(traceId, "UI_UPDATE_START");
-    setBlocks((prev) => [...prev, { id, query, status: "loading", source: "text" }]);
-    smoothScroll(id);
-    logTrace(traceId, "UI_UPDATE_DONE");
-
-    // 🌐 API setup
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    logTrace(traceId, "API_CALL_START");
-    const startTime = Date.now();
-
-    try {
-      const res = await fetch(`${BACKEND_URL}/query`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query,
-          voice: false,
-          user_profile: user ?? {},
-          traceId,
-        }),
-        signal: controller.signal,
-      });
-
-      const latency = Date.now() - startTime;
-      logTrace(traceId, "API_LATENCY_MS", latency);
-
-      clearTimeout(timeoutId);
-      clearThinkingTimer();
-      abortControllerRef.current = null;
-
-      // 🚫 Ignore if cancelled
-      if (discardResponseRef.current) {
-        discardResponseRef.current = false;
-        return;
-      }
-
-      if (!res.ok) {
-        logTrace(traceId, "API_HTTP_ERROR", res.status);
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-      logTrace(traceId, "RESPONSE_PARSED", data);
-      logTrace(traceId, "API_STATUS_SUCCESS");
-
-      const cleanedQuery =
-        typeof data.cleaned_query === "string" &&
-          data.cleaned_query.trim().length > 0
-          ? data.cleaned_query
-          : query;
-
-      const text =
-        typeof data.message === "string" && data.message.trim().length > 0
-          ? data.message
-          : "No response received.";
-
-      const sections = parseSections(text);
-
-      logTrace(traceId, "UI_UPDATE_START");
-
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
-            ? {
-              ...b,
-              query: cleanedQuery, // ✅ FIXED
-              status: "complete",
-              sections: sections ?? undefined,
-              rawText: sections ? undefined : text,
-            }
-            : b
-        )
-      );
-
-      smoothScroll(id);
-      logTrace(traceId, "UI_UPDATE_DONE");
-
-      updateVoiceState("IDLE");
-      setStatusText(null);
-
-    } catch (err: any) {
-      logTrace(traceId, "ERROR", err?.message);
-
-      clearTimeout(timeoutId);
-      clearThinkingTimer();
-      abortControllerRef.current = null;
-
-      if (discardResponseRef.current) {
-        discardResponseRef.current = false;
-        return;
-      }
-
-      const message =
-        err.name === "AbortError"
-          ? "Connection timed out. Please try again."
-          : "Connection issue. Please try again.";
-
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
-            ? {
-              ...b,
-              query: b.query || query, // ✅ preserve
-              status: "error",
-              errorMessage: message,
-            }
-            : b
-        )
-      );
-
-      setStatusText(message);
-      updateVoiceState("IDLE");
-
-      setTimeout(() => {
-        setStatusText((cur) => (cur === message ? null : cur));
-      }, 4000);
-    }
-  };
-
-  // ─── Recording control ────────────────────────────────────────────────────
-
-  const cancelRecording = async () => {
-    isStoppingRef.current = true;
-
-    if (maxDurationTimerRef.current) {
-      clearTimeout(maxDurationTimerRef.current);
-      maxDurationTimerRef.current = null;
-    }
-
-    clearThinkingTimer();
-
-    const rec = activeRecordingRef.current;
-    activeRecordingRef.current = null;
-
-    if (rec) {
-      try {
-        await rec.stopAndUnloadAsync();
-      } catch { }
-    }
-
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
-    } catch { }
-
-    if (voiceStateRef.current === "RECORDING") {
-      updateVoiceState("IDLE");
-    }
-    setStatusText(null);
-  };
-
-  const stopRecordingAndSend = async (isMaxDuration: boolean) => {
-    try {
-      console.log("⏱ AUTO STOP triggered");
-
-      const rec = activeRecordingRef.current;
-      if (!rec) {
-        console.log("❌ No active recording");
-        return;
-      }
-
-      activeRecordingRef.current = null;
-
-      await rec.stopAndUnloadAsync();
-
-      const uri = rec.getURI();
-      console.log("📁 Audio URI:", uri);
-
-      updateVoiceState("PROCESSING");
-
-      await sendVoiceQuery(uri!, isMaxDuration);
-
-    } catch (e) {
-      console.log("❌ Auto stop error:", e);
-      updateVoiceState("IDLE");
-    }
-  };
-
-  // Parallel recording guard — spec §13.1
+  // 🔹 Effect 1 — Recording cleanup (runs once)
   useEffect(() => {
     const cleanup = async () => {
       const dangling = activeRecordingRef.current;
@@ -666,152 +109,45 @@ export default function HomeScreen() {
     cleanup();
   }, []);
 
-  isStoppingRef.current = false;
-  lastSpeechTimeRef.current = Date.now();
+  // ─── State machine ───────────────────────────────────────────────────────
 
-  const initAudio = async () => {
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
-    } catch (e) {
-      console.log(e);
+  const updateVoiceState = (next: VoiceState) => {
+    const current = voiceStateRef.current;
+    const allowed = VALID_TRANSITIONS[current];
+    if (!allowed.includes(next)) {
+      console.warn(`[VoiceState] Invalid transition: ${current} → ${next} — ignored`);
+      return;
     }
+    console.log(`[VoiceState] ${current} → ${next}`);
+    voiceStateRef.current = next;
+    setVoiceState(next);
   };
 
-  initAudio();
+  const handleIntentRouting = (intent: string, data: any) => {
+    console.log("🧠 Routing intent:", intent, "mode:", data.mode);
 
-  // isMeteringEnabled: true required for silence detection — spec §13.1
-  const startRecording = async () => {
-    try {
-      console.log("🎤 START pressed");
-
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) {
-        console.log("❌ Permission denied");
-        return;
-      }
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+    // ✅ ONLY mode controls navigation
+    if (data.mode === "meal") {
+      router.push({
+        pathname: "/meal-main",
+        params: {
+          mode: UX_RUNMODE,
+          intent: intent,
+          score: data.score,
+          items: JSON.stringify(data.meal_items || []),
+        },
       });
-
-      const rec = new Audio.Recording();
-
-      const preset: Audio.RecordingOptions = {
-        ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
-        isMeteringEnabled: true,
-      };
-
-      await rec.prepareToRecordAsync(preset);
-      await rec.startAsync();
-
-      activeRecordingRef.current = rec;
-
-      setInput("");
-      updateVoiceState("RECORDING");
-      setStatusText("Listening...");
-
-      rec.setProgressUpdateInterval(200);
-
-      rec.setOnRecordingStatusUpdate((status) => {
-        if (!status.isRecording || isStoppingRef.current) return;
-
-        const db: number = (status as any).metering ?? -160;
-
-        if (db > SILENCE_DB_THRESHOLD) {
-          lastSpeechTimeRef.current = Date.now();
-          setStatusText("Listening...");
-        } else {
-          const silentFor = Date.now() - lastSpeechTimeRef.current;
-
-          if (silentFor >= FINAL_PAUSE_MS && !isStoppingRef.current) {
-            isStoppingRef.current = true;
-            stopRecordingAndSend(false);
-          } else if (silentFor >= SOFT_PAUSE_MS) {
-            setStatusText("Still listening...");
-          }
-        }
-      });
-
-      maxDurationTimerRef.current = setTimeout(() => {
-        if (!isStoppingRef.current && voiceStateRef.current === "RECORDING") {
-          isStoppingRef.current = true;
-          stopRecordingAndSend(true);
-        }
-      }, MAX_RECORDING_MS);
-
-    } catch (err) {
-      console.error("[startRecording] error:", err);
-      clearThinkingTimer();
-      activeRecordingRef.current = null;
-      updateVoiceState("IDLE");
-      setStatusText(null);
-    }
-  };
-
-  // ─── Input handlers ───────────────────────────────────────────────────────
-
-  const handleMicPress = async () => {
-    console.log("🎤 MIC PRESSED, state:", voiceStateRef.current);
-
-    const state = voiceStateRef.current;
-
-    if (state === "PLAYING") {
-      await stopAnyPlayback();
-      updateVoiceState("IDLE");
       return;
     }
 
-    if (state === "IDLE") {
-      await startRecording();
-      return;
-    }
-
-    if (state === "RECORDING") {
-      await stopRecordingAndSend(false);   // 🔥 FIX
-      return;
-    }
-
-    // PROCESSING → ignore
+    // ✅ chat mode → stay here
   };
 
+  // future:
+  // cholesterol → meal-main?intent=cholesterol
+  // weight → meal-main?intent=weight
 
-
-  const handleSendPress = () => {
-    if (voiceStateRef.current === "PROCESSING") return;
-    const query = input.trim();
-    if (!query) return;
-
-    const traceId = createTraceId();
-    logTrace(traceId, "KEYBOARD_START", query);
-
-    sendKeyboardQuery(query, traceId);
-  };
-
-  const handleChip = (value: string) => {
-    if (voiceStateRef.current === "PROCESSING") return;
-    const traceId = createTraceId();
-    logTrace(traceId, "KEYBOARD_START", value);
-    sendKeyboardQuery(value, traceId);
-  };
-
-  const handleActionChip = (label: string) => {
-    console.log("Chip pressed:", label);
-
-    if (label.toLowerCase().includes("analyze")) {
-      router.push(`/meal-main?mode=${UX_RUNMODE}&intent=analyze_meal`); // 👈 your Analyze tab
-    }
-    if (label.toLowerCase().includes("improve")) {
-      router.push(`/meal-main?mode=${UX_RUNMODE}&intent=improve_meal`); // 👈 your Improve tab
-    }
-  };
-
-  // ─── App lifecycle ────────────────────────────────────────────────────────
-
-
+  //🔹 Effect 2 — Load user on app start
   useEffect(() => {
     const initUser = async () => {
       //await saveUser("");   // 🔥 TEMP ONLY
@@ -830,6 +166,8 @@ export default function HomeScreen() {
 
     initUser();
   }, []);
+
+  // 🔹 Effect 3 — App state (background / interrupt handling)
 
   useEffect(() => {
     const sub = AppState.addEventListener("change", async (nextAppState) => {
@@ -878,11 +216,6 @@ export default function HomeScreen() {
   }, []);
 
   // ─── Render ───────────────────────────────────────────────────────────────
-
-  const isProcessing = voiceState === "PROCESSING";
-  const isRecording = voiceState === "RECORDING";
-
-
   const isErrorStatus =
     statusText !== null &&
     (statusText.includes("timed out") ||
@@ -891,8 +224,222 @@ export default function HomeScreen() {
       statusText.includes("Please say") ||
       statusText.includes("access is required"));
 
-
   if (checkingUser) return null;
+
+  const isProcessing = voiceState === "PROCESSING";
+  const isRecording = voiceState === "RECORDING";
+  const handleSendPress = () => {
+    if (voiceStateRef.current === "PROCESSING") return;
+
+    const query = input.trim();
+    if (!query) return;
+
+    Keyboard.dismiss(); // ✅ THIS is why import will stay
+
+    const traceId = Date.now().toString(); // simple id (or use createTraceId if you have it)
+
+    console.log("🔥 KEYBOARD SEND:", query);
+
+    sendKeyboardQuery(query, traceId);
+  };
+
+  const handleMicPress = async () => {
+    console.log("🎤 MIC PRESSED, state:", voiceStateRef.current);
+
+    const state = voiceStateRef.current;
+
+    if (state === "PLAYING") {
+      await stopAnyPlayback();
+      updateVoiceState("IDLE");
+      return;
+    }
+
+    if (state === "IDLE") {
+      await startRecording();
+      return;
+    }
+
+    if (state === "RECORDING") {
+      await stopRecordingAndSend(false);
+      return;
+    }
+  };
+
+  const sendKeyboardQuery = async (query: string, traceId: string) => {
+    console.log("🚀 API CALL START:", query);
+
+    setBlocks((prev) => [
+      ...prev,
+      { id: traceId, query, status: "loading", source: "text" }
+    ]);
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query,
+          voice: false,
+          user_profile: user ?? {},
+          traceId,
+        }),
+      });
+
+      const data = await res.json();
+
+      const text =
+        typeof data.message === "string" && data.message.trim().length > 0
+          ? data.message
+          : "No response";
+
+      setBlocks((prev) =>
+        prev.map((b) =>
+          b.id === traceId
+            ? {
+              ...b,
+              status: "complete",
+              rawText: text,
+              mode: data.mode,
+              score: data.score,
+            }
+            : b
+        )
+      );
+
+      console.log("✅ API SUCCESS:", data);
+      const intent = data.intent || "general";
+      setStatusText("Opening meal insights...");
+
+      setTimeout(() => {
+        handleIntentRouting(intent, data, "text");
+      }, 400);
+
+    } catch (err) {
+      console.log("❌ API ERROR:", err);
+
+      setBlocks((prev) =>
+        prev.map((b) =>
+          b.id === traceId
+            ? {
+              ...b,
+              status: "error",
+              errorMessage: "API failed",
+            }
+            : b
+        )
+      );
+    }
+  };
+  const sendVoiceQuery = async (uri: string, traceId: string) => {
+    console.log("🎤 VOICE SEND:", uri);
+
+    updateVoiceState("PROCESSING");
+    setStatusText("Processing voice...");
+
+    try {
+      const formData = new FormData();
+
+      formData.append("audio_file", {
+        uri,
+        name: "audio.m4a",
+        type: "audio/m4a",
+      } as any);
+
+      formData.append("traceId", traceId);
+      formData.append("user_profile", JSON.stringify(user ?? {}));
+
+      const res = await fetch(`${BACKEND_URL}/query`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const text = await res.text();
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.log("❌ RAW RESPONSE:", text);
+        throw new Error("Invalid JSON from backend");
+      }
+
+      console.log("🎤 VOICE RESPONSE:", data);
+
+      // ✅ SAME UI update as keyboard
+      setBlocks((prev) => [
+        ...prev,
+        {
+          id: traceId,
+          query: "Voice input",
+          status: "complete",
+          rawText: data.message,
+          mode: data.mode,
+          score: data.score,
+          meal_items: data.meal_items,
+          source: "voice",
+        },
+      ]);
+
+      // ✅ HYBRID routing
+      const intent = data.intent || "general";
+      handleIntentRouting(intent, data, "voice");
+
+      updateVoiceState("IDLE");
+      setStatusText(null);
+
+    } catch (err) {
+      console.log("❌ VOICE ERROR:", err);
+      updateVoiceState("IDLE");
+      setStatusText("Voice failed. Try again.");
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission.granted) return;
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const rec = new Audio.Recording();
+
+      await rec.prepareToRecordAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+
+      await rec.startAsync();
+
+      activeRecordingRef.current = rec;
+
+      updateVoiceState("RECORDING");
+      setStatusText("Listening...");
+    } catch (e) {
+      console.log("❌ startRecording error", e);
+    }
+  };
+
+  const stopRecordingAndSend = async () => {
+    try {
+      const rec = activeRecordingRef.current;
+      if (!rec) return;
+
+      activeRecordingRef.current = null;
+
+      await rec.stopAndUnloadAsync();
+
+      const uri = rec.getURI();
+      console.log("🎤 URI:", uri);
+
+      const traceId = Date.now().toString();
+
+      await sendVoiceQuery(uri!, traceId);
+    } catch (e) {
+      console.log("❌ stopRecording error", e);
+    }
+  };
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }}>
@@ -921,77 +468,82 @@ export default function HomeScreen() {
                 paddingBottom: 100,
               }}
             >
-              {blocks.map((block) => (
-                <View
-                  key={block.id}
-                  ref={(ref) => {
-                    if (ref) blockRefs.current[block.id] = ref;
-                    else delete blockRefs.current[block.id];
-                  }}
-                >
-                  {/* Query bubble — always shows cleaned_query per spec §8.3 */}
-                  {block.query ? (
-                    <View
-                      style={{
-                        alignSelf: "flex-end",
-                        backgroundColor:
-                          block.source === "voice"
-                            ? "#CDEBCC"
-                            : C.userBubble,
-                        paddingVertical: 6,
-                        paddingHorizontal: 10,
-                        borderRadius: 14,
-                        marginVertical: 3,
-                        maxWidth: "80%",
-                      }}
-                    >
-                      <Text style={{ color: C.textDark }}>
-                        {block.source === "voice" ? "🎤 " : ""}
-                        {block.query}
+              {blocks.map((block, index) => {
+                if (!block) return null;
+
+                return (
+                  <View
+                    key={block.id || index}
+                    ref={(ref) => {
+                      if (block?.id) {
+                        if (ref) blockRefs.current[block.id] = ref;
+                        else delete blockRefs.current[block.id];
+                      }
+                    }}
+                  >
+                    {/* Query bubble */}
+                    {typeof block.query === "string" && block.query.trim() ? (
+                      <View
+                        style={{
+                          alignSelf: "flex-end",
+                          backgroundColor:
+                            block.source === "voice" ? "#CDEBCC" : C.userBubble,
+                          paddingVertical: 6,
+                          paddingHorizontal: 10,
+                          borderRadius: 14,
+                          marginVertical: 3,
+                          maxWidth: "80%",
+                        }}
+                      >
+                        <Text style={{ color: C.textDark }}>
+                          {block.source === "voice" ? "🎤 " : ""}
+                          {block.query}
+                        </Text>
+                      </View>
+                    ) : null}
+
+                    {/* Loading */}
+                    {block.status === "loading" && (
+                      <View style={{ padding: 10 }}>
+                        <ActivityIndicator color={C.accent} />
+                      </View>
+                    )}
+
+                    {/* Error */}
+                    {block.status === "error" && (
+                      <Text style={{ color: C.error, paddingVertical: 4 }}>
+                        {block.errorMessage || "Something went wrong"}
                       </Text>
-                    </View>
-                  ) : null}
+                    )}
 
-                  {block.status === "loading" && (
-                    <View style={{ padding: 10 }}>
-                      <ActivityIndicator color={C.accent} />
-                    </View>
-                  )}
-
-                  {block.status === "error" && (
-                    <Text
-                      style={{
-                        color: C.error,
-                        paddingVertical: 4,
-                        paddingHorizontal: 2,
-                      }}
-                    >
-                      {block.errorMessage ??
-                        "Something went wrong. Please try again."}
-                    </Text>
-                  )}
-
-                  {block.status === "complete" &&
-                    block.sections?.map((s, i) => (
-                      <SectionCard key={i} title={s.title} content={s.content} />
-                    ))}
-
-                  {block.status === "complete" && block.rawText && (
-                    <View
-                      style={{
-                        backgroundColor: C.surfaceAlt,
-                        padding: 12,
-                        borderRadius: 14,
-                        marginVertical: 6,
-                      }}
-                    >
-                      <Text style={{ color: C.text }}>
-                        {block.rawText}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              ))}
+                    {/* Complete */}
+                    {block.status === "complete" ? (
+                      block.mode === "meal" ? (
+                        <MealCard block={block} />
+                      ) : block.sections && block.sections.length > 0 ? (
+                        block.sections.map((s, i) => (
+                          <SectionCard key={i} title={s.title} content={s.content} />
+                        ))
+                      ) : typeof block.rawText === "string" ? (
+                        <View
+                          style={{
+                            backgroundColor: C.surfaceAlt,
+                            padding: 12,
+                            borderRadius: 14,
+                            marginVertical: 6,
+                          }}
+                        >
+                          <Text style={{ color: C.text }}>
+                            {block.rawText}
+                          </Text>
+                        </View>
+                      ) : (
+                        <Text style={{ color: "red" }}>⚠️ No content</Text>
+                      )
+                    ) : null}
+                  </View>
+                );
+              })}
             </ScrollView>
 
             {/* Status indicator — separate from input field per spec §8.1, §8.2 */}
@@ -1076,7 +628,7 @@ export default function HomeScreen() {
                 value={input}
                 onChangeText={setInput}
                 editable={!isProcessing}
-                placeholder='Ask or speak… say “Go BetterMe”'
+                placeholder='Ask or speak… say “Go BuildJoy”'
                 placeholderTextColor={C.muted}
                 style={{ flex: 1, color: C.text }}
                 onSubmitEditing={handleSendPress}
@@ -1123,7 +675,10 @@ export default function HomeScreen() {
       </View>
     </SafeAreaView>
   )
-}
+
+
+};
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1167,3 +722,37 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 });
+
+function MealCard({ block }: { block: any }) {
+  return (
+    <View
+      style={{
+        backgroundColor: "#111",
+        padding: 14,
+        borderRadius: 14,
+        marginVertical: 6,
+      }}
+    >
+      <Text style={{ color: "gold", fontSize: 16, marginBottom: 10 }}>
+        Meal Score: {block.score ?? "-"}
+      </Text>
+
+      {block.sections && block.sections.length > 0 ? (
+        block.sections.map((s: any, i: number) => (
+          <View key={i} style={{ marginBottom: 10 }}>
+            <Text style={{ color: "#aaa", fontSize: 13 }}>
+              {s.title}
+            </Text>
+            <Text style={{ color: "white" }}>
+              {s.content}
+            </Text>
+          </View>
+        ))
+      ) : typeof block.rawText === "string" ? (
+        <Text style={{ color: "white" }}>
+          {block.rawText}
+        </Text>
+      ) : null}
+    </View>
+  );
+};

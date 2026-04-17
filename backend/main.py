@@ -24,6 +24,23 @@ SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"
 MODEL_OPENAI = os.getenv("MODEL_OPENAI", "gpt-4o-mini")
 MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
 
+FOOD_DB = {
+    "beans": {"fiber": 8, "carbs": 20, "fat": 1},
+    "rice": {"fiber": 1, "carbs": 30, "fat": 0},
+    "vegetable": {"fiber": 5, "carbs": 5, "fat": 0},
+    "lentils": {"fiber": 8, "carbs": 20, "fat": 1},
+    "paneer": {"fiber": 0, "carbs": 2, "fat": 20},
+    "oats": {"fiber": 10, "carbs": 27, "fat": 5},
+    "bread": {"fiber": 1, "carbs": 30, "fat": 0},
+}
+
+QUANTITY_MODIFIERS = {
+    "little": 0.7,
+    "small": 0.7,
+    "more": 1.3,
+    "large": 1.5,
+}
+
 print("LLM_MODE:", LLM_MODE)
 print("USE_LLM:", USE_LLM)
 print("USE_MOCK:", USE_MOCK)
@@ -43,7 +60,7 @@ USER_PROFILE = {
     "ldl": 100,
     "goal": "reduce glucose spikes",
     "diet": "vegetarian",
-    "phenotype": "post-meal spiker"
+    "phenotype": "post-meal spiker",
 }
 
 COMMON_CORRECTIONS = {
@@ -58,10 +75,12 @@ COMMON_CORRECTIONS = {
 
 # ---------------- SCROLL TEST ----------------
 def long_block(title: str) -> str:
-    return "\n".join([
-        f"{i+1}. {title} detail explaining behavior, impact, and optimization pattern."
-        for i in range(40)
-    ])
+    return "\n".join(
+        [
+            f"{i+1}. {title} detail explaining behavior, impact, and optimization pattern."
+            for i in range(40)
+        ]
+    )
 
 
 def scroll_test_response() -> str:
@@ -103,8 +122,7 @@ def is_hallucination(text: str) -> bool:
 # Matches "go improveme" or "go improve me" at the END of the transcript only.
 # Case-insensitive. Allows optional trailing punctuation. One pass only.
 TRIGGER_PATTERN = re.compile(
-    r'\s*(go\s+improve\s*me|इम्प्रूव\s*मी)\s*[.!?]?\s*$',
-    re.IGNORECASE
+    r"\s*(go\s+improve\s*me|इम्प्रूव\s*मी)\s*[.!?]?\s*$", re.IGNORECASE
 )
 
 
@@ -113,7 +131,7 @@ def has_trigger(text: str) -> bool:
 
 
 def remove_trigger(text: str) -> str:
-    return TRIGGER_PATTERN.sub('', text).strip()
+    return TRIGGER_PATTERN.sub("", text).strip()
 
 
 # ---------------- VALIDATION ----------------
@@ -137,12 +155,12 @@ def validate_voice_query(raw_transcript: str) -> tuple:
         return "Please say your question or meal before Go ImproveMe.", ""
 
     # Case C: no word with 3 or more characters
-    words = re.findall(r'\w+', cleaned)
+    words = re.findall(r"\w+", cleaned)
     if len(cleaned.strip()) < 3:
         return "Please say a complete question or meal.", cleaned
 
     # Case D: only whitespace or punctuation
-    if not re.sub(r'[^\w]', '', cleaned).strip():
+    if not re.sub(r"[^\w]", "", cleaned).strip():
         return "Could not understand. Please try again.", cleaned
 
     return None, cleaned
@@ -151,32 +169,43 @@ def validate_voice_query(raw_transcript: str) -> tuple:
 # ---------------- KEYWORD MAP ----------------
 KEYWORD_MAP = {
     "glucose": {
-        "primary": ["glucose", "blood glucose", "sugar", "blood sugar", "bg", "diabetes"],
-        "medical": ["a1c", "hba1c", "insulin", "glycemic", "hypoglycemia", "hyperglycemia"],
+        "primary": [
+            "glucose",
+            "blood glucose",
+            "sugar",
+            "blood sugar",
+            "bg",
+            "diabetes",
+        ],
+        "medical": [
+            "a1c",
+            "hba1c",
+            "insulin",
+            "glycemic",
+            "hypoglycemia",
+            "hyperglycemia",
+        ],
         "food": ["carb", "carbs", "dessert", "sweet", "juice", "soda"],
-        "context": ["fasting", "postprandial", "after meal", "post meal"]
+        "context": ["fasting", "postprandial", "after meal", "post meal"],
     },
-
     "bp": {
         "primary": ["blood pressure", "bp", "pressure", "hypertension", "hypotension"],
         "medical": ["systolic", "diastolic"],
         "lifestyle": ["salt", "sodium"],
-        "symptoms": ["dizziness", "headache"]
+        "symptoms": ["dizziness", "headache"],
     },
-
     "cholesterol": {
         "primary": ["cholesterol", "chol", "ldl", "hdl", "lipid", "triglyceride", "tg"],
         "medical": ["statin", "plaque"],
-        "food": ["fat", "saturated", "trans fat"]
+        "food": ["fat", "saturated", "trans fat"],
     },
-
     "lifestyle": {
         "diet": ["diet", "food", "meal", "eat", "nutrition"],
         "activity": ["exercise", "workout", "walk", "steps"],
         "recovery": ["sleep", "stress", "meditation"],
         "body": ["weight", "fitness"],
-        "habits": ["lifestyle", "habit", "routine"]
-    }
+        "habits": ["lifestyle", "habit", "routine"],
+    },
 }
 
 
@@ -192,8 +221,13 @@ def normalize(q: str) -> str:
 
 # ---------------- CONTEXT ----------------
 def detect_context(q: str) -> dict:
+    q = q.lower()
+
+    after = "after" in q or "post" in q
+    meal = "meal" in q or "food" in q or "eat" in q
+
     return {
-        "after_meal": any(x in q for x in ["after meal", "post meal"]),
+        "after_meal": after and meal,
         "high": any(x in q for x in ["high", "spike", "elevated"]),
         "low": any(x in q for x in ["low", "drop"]),
     }
@@ -208,7 +242,7 @@ def detect_intent(q: str) -> str:
         score = 0
         for group_name, keywords in groups.items():
             for kw in keywords:
-                if re.search(rf"\b{re.escape(kw)}\b", text):
+                if kw in text:  # 🔥 simpler + better for phrases
                     if group_name == "primary":
                         score += 3
                     elif group_name == "medical":
@@ -221,41 +255,194 @@ def detect_intent(q: str) -> str:
     if scores:
         return max(scores, key=scores.get)
 
+    # 🔥 fallback layer (critical)
+    if "cholesterol" in text or "ldl" in text:
+        return "cholesterol"
+    if "blood pressure" in text or "bp" in text:
+        return "bp"
+    if "sugar" in text or "glucose" in text:
+        return "glucose"
+
     return "unknown"
 
 
+def detect_mode(meal_data: dict, intent: str, q: str) -> str:
+
+    recognized = meal_data.get("recognized", [])
+    unknown = meal_data.get("unknown", [])
+
+    if len(recognized) > 0:
+        return "meal"
+
+    if len(unknown) > 0 and intent == "unknown":
+        return "meal"
+
+    if intent == "unknown" and any(x in q for x in ["eat", "ate", "meal", "food"]):
+        return "meal"
+
+    return "chat"
+
+
+def extract_meal_items(q: str) -> dict:
+    food_words = {
+        "rice",
+        "dal",
+        "roti",
+        "paneer",
+        "salad",
+        "bread",
+        "pasta",
+        "lentil",
+        "lentils",
+        "bean",
+        "beans",
+        "vegetable",
+        "vegetables",
+        "fruit",
+        "fruits",
+        "oats",
+        "egg",
+        "eggs",
+        "milk",
+        "yogurt",
+        "chicken",
+    }
+    STOPWORDS = {
+        "how",
+        "is",
+        "my",
+        "today",
+        "what",
+        "should",
+        "i",
+        "to",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+    }
+
+    CONTEXT_WORDS = {"after", "before", "meal", "spike", "fasting"}
+    INTENT_MODIFIERS = {"high", "low"}
+
+    FOOD_SYNONYMS = {
+        "rajma": "beans",
+        "chawal": "rice",
+        "chana": "beans",
+        "sabzi": "vegetable",
+        "bhindi": "vegetable",
+        "paratha": "bread",
+        "dal": "beans",
+        "sambar": "beans",
+        "lentils": "beans",
+        "dal": "beans",
+        "idli": "rice",
+        "dosa": "rice",
+    }
+
+    words = re.findall(r"[a-zA-Z]+", q.lower())
+    words = [FOOD_SYNONYMS.get(w, w) for w in words]
+
+    recognized = []
+    unknown = []
+    context = []
+
+    for w in words:
+        if w in STOPWORDS:
+            continue
+        elif w in food_words:
+            recognized.append(w)
+        elif w in CONTEXT_WORDS:
+            context.append(w)
+        else:
+            unknown.append(w)
+
+    quantity_factor = 1.0
+    for w in words:
+        if w in QUANTITY_MODIFIERS:
+            quantity_factor = QUANTITY_MODIFIERS[w]
+
+    return {
+        "recognized": list(dict.fromkeys(recognized)),
+        "unknown": list(dict.fromkeys(unknown)),
+        "context": list(dict.fromkeys(context)),
+        "quantity": quantity_factor,
+    }
+
+
+def save_unknown_foods(items):
+    with open("unknown_foods.log", "a") as f:
+        for item in set(items):  # remove duplicates per request
+            f.write(item + "\n")
+
+
 # ---------------- SCORE ----------------
-def compute_score(intent: str, q: str) -> int:
+def compute_meal_score(meal_items, unknown_items, ctx):
+
+    total_fiber = 0
+    total_carbs = 0
+
+    breakdown = []
+
+    for item in meal_items:
+        if item in FOOD_DB:
+            fiber = FOOD_DB[item]["fiber"]
+            carbs = FOOD_DB[item]["carbs"]
+
+            total_fiber += fiber
+            total_carbs += carbs
+
     score = 50
 
-    if intent == "unknown":
-        return 40
+    # Fiber boost
+    fiber_points = total_fiber * 2
+    score += fiber_points
+    breakdown.append(f"+ Fiber +{int(fiber_points)}")
 
-    if intent == "glucose":
-        if any(x in q for x in ["fiber", "vegetable"]):
-            score += 20
-        if any(x in q for x in ["sugar", "dessert"]):
-            score -= 20
+    # Carb penalty
+    if USER_PROFILE["phenotype"] == "post-meal spiker":
+        carb_penalty = total_carbs * 0.3
+    else:
+        carb_penalty = total_carbs * 0.2
 
-    elif intent == "bp":
-        if "salt" in q:
-            score -= 15
-        if any(x in q for x in ["walk", "exercise"]):
-            score += 15
+    total_carbs *= ctx.get("quantity", 1.0)
 
-    elif intent == "cholesterol":
-        if any(x in q for x in ["fiber", "oats"]):
-            score += 20
-        if "fat" in q:
-            score -= 10
+    score -= carb_penalty
+    breakdown.append(f"- Carbs -{int(carb_penalty)}")
 
-    elif intent == "lifestyle":
-        if any(x in q for x in ["exercise", "walk"]):
-            score += 10
-        if any(x in q for x in ["junk", "fried"]):
-            score -= 10
+    # Meal balance
+    has_carbs = any(x in meal_items for x in ["rice", "bread", "pasta"])
+    has_fiber = any(x in meal_items for x in ["vegetable", "beans", "lentils"])
+    has_protein = any(
+        x in meal_items
+        for x in ["beans", "lentils", "yogurt", "paneer", "milk", "eggs"]
+    )
 
-    return max(0, min(score, 100))
+    if has_fiber and has_protein and has_carbs:
+        score += 10
+        breakdown.append("+ Balanced meal +10")
+    elif has_carbs and not (has_fiber or has_protein):
+        score -= 15
+        breakdown.append("- No fiber/protein -15")
+    elif has_carbs and has_fiber:
+        score += 5
+        breakdown.append("+ Fiber with carbs +5")
+
+    # Context penalty (reduced — more correct)
+    if ctx.get("after_meal") and ctx.get("high"):
+        score -= 10
+        breakdown.append("- Spike detected -10")
+
+    # Unknown penalty
+    unknown_penalty = len(unknown_items) * 5
+    if unknown_penalty > 0:
+        score -= unknown_penalty
+        breakdown.append(f"- Unknown items -{unknown_penalty}")
+
+    score = int(max(0, min(score, 100)))
+
+    return score, breakdown
 
 
 # ---------------- MOCK ----------------
@@ -392,96 +579,242 @@ Try asking again with more detail.
 
 
 # ---------------- TTS ----------------
-def generate_tts(text: str):
+def generate_tts(text):
     try:
-        speech = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
-            input=text
+        from openai import OpenAI
+        import base64
+
+        client = OpenAI()
+
+        response = client.audio.speech.create(
+            model="gpt-4o-mini-tts", voice="alloy", input=text
         )
-        audio_bytes = speech.read()
-        return base64.b64encode(audio_bytes).decode("utf-8")
+
+        return base64.b64encode(response.content).decode("utf-8")
 
     except Exception as e:
-        print("TTS ERROR:", e)
-        return None
+        print("🔥 TTS ERROR:", str(e))
+        return None  # ✅ NEVER crash backend
 
 
 # ---------------- BUILD RESPONSE ----------------
 async def build_response(query: str):
     if not query:
-        return {"text": "Empty query", "score": 0}
+        return {
+            "text": "Empty query",
+            "score": 0,
+            "score_breakdown": [],
+            "intent": "unknown",
+            "mode": "chat",
+            "meal_items": [],
+            "unknown_items": [],
+        }
 
     q = correct_spelling(query)
     q = normalize(q)
 
-    ctx = detect_context(q)
-    intent = detect_intent(q)
+    meal_data = extract_meal_items(q)
+    meal_items = meal_data["recognized"]
+    unknown_items = meal_data["unknown"]
 
-    score = compute_score(intent, q)
+    intent = detect_intent(q)
+    print("🔥 QUERY:", cleaned_query)
+    print("🔥 INTENT AFTER DETECT:", intent)
+
+    if intent == "unknown" and len(q.split()) > 2:
+        q = normalize(correct_with_llm(q))
+        meal_data = extract_meal_items(q)
+        meal_items = meal_data["recognized"]
+        unknown_items = meal_data["unknown"]
+        intent = detect_intent(q)
+        print("🔥 QUERY2:", cleaned_query)
+        print("🔥 INTENT AFTER DETECT2:", intent)
+
+    ctx = detect_context(q)
+
+    if unknown_items:
+        print("NEW FOOD DETECTED:", unknown_items)
+        save_unknown_foods(unknown_items)
+
+    # FINAL MODE DECISION (single source of truth)
+
+    mode = detect_mode(meal_data, intent, q)
+
+    score, breakdown = compute_meal_score(meal_items, unknown_items, ctx)
+
+    confidence = "high" if len(meal_items) > 0 and len(unknown_items) == 0 else "low"
+
     print("SCORE:", score)
 
-    if intent == "unknown":
-        q = correct_with_llm(q)
-        intent = detect_intent(q)
+    print(
+        "FINAL:",
+        {
+            "q": q,
+            "meal_items": meal_items,
+            "unknown_items": unknown_items,
+            "intent": intent,
+            "mode": mode,
+            "score": score,
+            "score_breakdown": breakdown,
+        },
+    )
+    # 🔥 FAST PATH FOR SIMPLE MEALS (ADD HERE)
+    if (
+        mode == "meal"
+        and len(meal_items) <= 2
+        and len(unknown_items) == 0
+        and "rice" in meal_items
+        and not any(x in meal_items for x in ["beans", "lentils", "yogurt"])
+    ):
+        action = (
+            "Walk 15–20 minutes immediately"
+            if ctx["high"]
+            else "Walk 10–15 minutes after meal"
+        )
 
-    print("\n--- REQUEST ---")
-    print("QUERY:", q)
-    print("INTENT:", intent)
-
-    if intent == "unknown":
         return {
-        "text": """## Insight
-I can help with:
-- meals
-- glucose
-- blood pressure
-- cholesterol
+            "text": f"""## Meal Score
+    {score}
 
-## Try This
-Say something like:
-- "rice dal paneer"
-- "my sugar is high after meal"
-- "how to reduce BP"
-""",
-        "score": 0
+    ## What To Do
+    1) Add fiber (vegetables or salad before this)
+    2) Add protein (lentils, yogurt)
+    3) {action}
+
+    ## Try This Week
+    + Pair carbs with fiber + protein
+
+    ## Expected Outcome
+    Lower glucose spikes and better balance""",
+            "score": score,
+            "score_breakdown": breakdown,
+            "intent": intent,
+            "mode": mode,
+            "meal_items": meal_items,
+            "unknown_items": unknown_items,
+            "confidence": confidence,
+        }
+
+    if intent == "unknown" and mode == "chat":
+        return {
+            "text": """## Insight
+    I can help with:
+    - meals
+    - glucose
+    - blood pressure
+    - cholesterol
+
+    ## Try This
+    Say something like:
+    - "rice dal paneer"
+    - "my sugar is high after meal"
+    - "how to reduce BP"
+    """,
+            "score": 0,
+            "score_breakdown": [],
+            "intent": "unknown",
+            "mode": "chat",
+            "meal_items": meal_data["recognized"],
+            "unknown_items": meal_data["unknown"],
         }
 
     if SCROLL_TEST:
         print("🔥 SCROLL TEST MODE")
-        return {"text": scroll_test_response(), "score": score}
+        return {
+            "text": scroll_test_response(),
+            "score": score,
+            "score_breakdown": breakdown,
+            "intent": intent,
+            "mode": mode,
+            "meal_items": meal_data["recognized"],
+            "unknown_items": meal_data["unknown"],
+        }
 
     if USE_MOCK:
-        return {"text": mock_response(intent), "score": score}
+        return {
+            "text": mock_response(intent),
+            "score": score,
+            "score_breakdown": breakdown,
+            "intent": intent,
+            "mode": mode,
+            "meal_items": meal_data["recognized"],
+            "unknown_items": meal_data["unknown"],
+        }
 
     if USE_LLM:
         try:
+            # ✅ STRUCTURE INPUT (this is your big upgrade)
+            if meal_items or unknown_items:
+                structured_meal = " ".join(meal_items + unknown_items)
+                q_for_llm = f"""
+                Meal items: {structured_meal}
+
+                Computed Meal Score: {score}
+                Score Breakdown:
+                {chr(10).join(breakdown)}
+
+                User context:
+                - after meal: {ctx['after_meal']}
+                - glucose high: {ctx['high']}
+                - glucose low: {ctx['low']}
+                """
+            else:
+                q_for_llm = q
+
+            # ✅ SINGLE CLEAN CALL
             result = await asyncio.wait_for(
-                asyncio.to_thread(llm_response, q, ctx),
-                timeout=15
+                asyncio.to_thread(llm_response, q_for_llm, ctx), timeout=15
             )
-            return {"text": enforce_format(result), "score": score}
+
+            return {
+                "text": enforce_format(result),
+                "score": score,
+                "score_breakdown": breakdown,
+                "intent": intent,
+                "mode": mode,
+                "meal_items": meal_data["recognized"],
+                "unknown_items": meal_data["unknown"],
+            }
 
         except asyncio.TimeoutError:
             print("LLM TIMEOUT")
-            return {"text": "LLM timed out. Try again.", "score": score}
+            return {
+                "text": "LLM timed out. Try again.",
+                "score": score,
+                "score_breakdown": breakdown,
+                "intent": intent,
+                "mode": mode,
+                "meal_items": meal_data["recognized"],
+                "unknown_items": meal_data["unknown"],
+            }
 
         except Exception as e:
             print("LLM ERROR:", e)
             return {
                 "text": mock_response(intent),
                 "score": score,
-                "error": str(e)
+                "score_breakdown": breakdown,
+                "error": str(e),
+                "intent": intent,
+                "mode": mode,
+                "meal_items": meal_data["recognized"],
+                "unknown_items": meal_data["unknown"],
             }
 
     return {
         "text": """## Insight
-Fallback response active.
+    Fallback response active.
 
-## Next Step
-Try asking about lifestyle, BP, glucose, or cholesterol.""",
-        "score": score
+    ## Next Step
+    Try asking about lifestyle, BP, glucose, or cholesterol.""",
+        "score": score,
+        "score_breakdown": breakdown,
+        "intent": intent,
+        "mode": mode,
+        "meal_items": meal_data["recognized"],
+        "unknown_items": meal_data["unknown"],
     }
+
 
 def correct_spelling(text: str) -> str:
     words = text.split()
@@ -496,13 +829,16 @@ def correct_spelling(text: str) -> str:
             continue
 
         # fuzzy match (optional but useful)
-        match = difflib.get_close_matches(lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85)
+        match = difflib.get_close_matches(
+            lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85
+        )
         if match:
             corrected.append(COMMON_CORRECTIONS[match[0]])
         else:
             corrected.append(w)
 
     return " ".join(corrected)
+
 
 def correct_with_llm(text: str) -> str:
     try:
@@ -511,17 +847,28 @@ def correct_with_llm(text: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "Correct spelling only. Do not change meaning. Return only corrected sentence."
+                    "content": "Correct spelling only. Do not change meaning. Return only corrected sentence.",
                 },
-                {
-                    "role": "user",
-                    "content": text
-                }
+                {"role": "user", "content": text},
             ],
         )
         return extract_text(res).strip()
     except:
         return text
+
+
+def extract_meal_items_simple(query: str) -> dict:
+    foods = ["rice", "dal", "beans", "paneer", "roti", "bread", "milk"]
+
+    q = query.lower()
+
+    recognized = [f for f in foods if f in q]
+
+    words = q.split()
+    unknown = [w for w in words if w not in recognized]
+
+    return {"recognized": recognized, "unknown": unknown}
+
 
 # ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
 @app.post("/query")
@@ -535,6 +882,8 @@ async def handle_query(request: Request):
     Keyboard path: application/json with {query, voice: false}
                    Runs LLM only → audio is always null
     """
+    mode = "chat"
+    result = {}
     start = time.time()
     content_type = request.headers.get("content-type", "")
 
@@ -551,6 +900,11 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": [],
+                "unknown_items": [],
             }
 
         audio_bytes = await audio_file.read()
@@ -565,6 +919,11 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": [],
+                "unknown_items": [],
             }
 
         if len(audio_bytes) > 25 * 1024 * 1024:
@@ -575,6 +934,11 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": [],
+                "unknown_items": [],
             }
 
         # Whisper transcription
@@ -587,11 +951,10 @@ async def handle_query(request: Request):
             transcript_obj = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: client.audio.transcriptions.create(
-                        model="gpt-4o-mini-transcribe",
-                        file=audio_io
+                        model="gpt-4o-mini-transcribe", file=audio_io
                     )
                 ),
-                timeout=10
+                timeout=10,
             )
             raw_transcript = (transcript_obj.text or "").strip()
         except asyncio.TimeoutError:
@@ -603,6 +966,11 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": [],
+                "unknown_items": [],
             }
 
         print("WHISPER RAW:", raw_transcript)
@@ -618,36 +986,109 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": [],
+                "unknown_items": [],
             }
 
         print("CLEANED QUERY:", cleaned_query)
 
-        result = await build_response(cleaned_query)
-        text = result.get("text", "")
+        # ─── DETECT ─────────────────────────
+
+        meal_data = extract_meal_items_simple(cleaned_query)
+
+        intent = detect_intent(cleaned_query)
+
+        mode = detect_mode(meal_data, intent, cleaned_query)
+
+        # 🔥 override (temporary but powerful)
+        q_lower = cleaned_query.lower()
+        if "blood pressure" in q_lower:
+            intent = "bp"
+            mode = "chat"
+
+        print("🔥 INTENT:", intent)
+        print("🔥 MODE:", mode)
+        print("🔥 MEAL DATA:", meal_data)
+
+        # ─── ROUTING ────────────────────────
+        result = None
+
+        if mode == "meal":
+            result = process_meal(cleaned_query)
+
+        elif intent == "bp":
+            result = {
+                "message": "Your blood pressure may be elevated due to stress, salt, sleep, or hydration. Let’s break it down.",
+                "score": 30,
+                "score_breakdown": [],
+                "meal_items": [],
+                "unknown_items": [],
+                "intent": intent,
+                "mode": mode,
+            }
+
+        # 🔥 safety net
+        if result is None:
+            print("❌ FALLBACK TRIGGERED")
+            result = {
+                "message": "I understand your question. Let me guide you.",
+                "score": 0,
+                "score_breakdown": [],
+                "meal_items": [],
+                "unknown_items": [],
+                "intent": intent,
+                "mode": mode,
+            }
+
+        print("🔥 RESULT:", result)
+        audio_base64 = None
+
+        meal_items = result.get("meal_items", [])
+        unknown_items = result.get("unknown_items", [])
+
+        text = result.get("message", "")
+        score = result.get("score", 0)
+        intent = result.get("intent", "unknown")
+        mode = result.get("mode", "chat")
+        breakdown = result.get("score_breakdown", [])
+
         if not text:
             text = "Something went wrong. Please try again."
-        score = result.get("score", 0)
 
         # Backend selects TTS text — frontend never trims or selects
         tts_text = text
-        try:
-            audio = await asyncio.wait_for(
-                asyncio.to_thread(generate_tts, tts_text),
-                timeout=15
-            )
-        except asyncio.TimeoutError:
-            print("TTS TIMEOUT")
-            audio = None
+        audio = None
 
-        print("⏱️", round(time.time() - start, 2), "sec\n")
+        try:
+            raw_audio = await asyncio.wait_for(
+                asyncio.to_thread(generate_tts, tts_text), timeout=15
+            )
+
+            import base64
+
+            audio = base64.b64encode(raw_audio).decode("utf-8") if raw_audio else None
+
+            print("🎧 AUDIO GENERATED:", bool(audio))
+
+        except Exception as e:
+            print("🔥 TTS ERROR:", e)
+            audio = None
 
         return {
             "status": "success",
             "message": text,
             "cleaned_query": cleaned_query,
-            "tts_text": tts_text if audio else None,
+            "tts_text": text if audio else None,
             "audio": audio,
             "score": score,
+            "score_breakdown": breakdown,
+            "intent": intent,
+            "mode": mode,
+            "meal_items": meal_items,
+            "unknown_items": unknown_items,
         }
 
     # ── KEYBOARD PATH ────────────────────────────────────────────────────────
@@ -657,7 +1098,9 @@ async def handle_query(request: Request):
         voice = bool(data.get("voice", False))
 
         if voice:
-            print("WARNING: /query keyboard path received voice:true — treating as keyboard")
+            print(
+                "WARNING: /query keyboard path received voice:true — treating as keyboard"
+            )
 
         print(f"\n--- KEYBOARD REQUEST ---")
         print(f"QUERY: {query}")
@@ -670,6 +1113,11 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": [],
+                "unknown_items": [],
             }
 
         if len(query) > 500:
@@ -680,9 +1128,20 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": [],
+                "unknown_items": [],
             }
 
-        if len(query.split()) <= 1:
+        meal_data = extract_meal_items(query.lower())
+        meal_items = meal_data["recognized"]
+        unknown_items = meal_data["unknown"]
+
+        intent = detect_intent(query.lower())
+
+        if len(query.split()) <= 1 and intent == "unknown" and len(meal_items) == 0:
             return {
                 "status": "success",
                 "message": "Please say a full sentence like 'my sugar is high after meal'",
@@ -690,20 +1149,50 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": 0,
+                "score_breakdown": [],
+                "intent": "unknown",
+                "mode": "chat",
+                "meal_items": meal_items,
+                "unknown_items": unknown_items,
             }
 
         result = await build_response(query)
         text = result.get("text", "")
         score = result.get("score", 0)
+        intent = result.get("intent", "unknown")
+        mode = result.get("mode", "chat")
+        meal_items = result.get("meal_items", [])
+        unknown_items = result.get("unknown_items", [])
 
         print("⏱️", round(time.time() - start, 2), "sec\n")
 
         # audio is always null for keyboard — spec constraint
+
+        print("DEBUG INTENT:", intent)
+        print("DEBUG MODE:", mode)
+        print("DEBUG RESULT:", result)
+
+        safe_result = result if isinstance(result, dict) else {}
+
+        text = safe_result.get("message", "Something went wrong. Please try again.")
+
+        q_lower = (cleaned_query or "").lower()
+
+        if "blood pressure" in q_lower:
+            intent = "bp"
+            mode = "chat"
+            print("🔥 INTENT AFTER OVERRIDE:", intent)
+
         return {
-            "status": "success",
+            "status": "success" if safe_result else "error",
             "message": text,
-            "cleaned_query": None,
-            "tts_text": None,
+            "cleaned_query": cleaned_query,
+            "tts_text": text,
             "audio": None,
-            "score": score,
+            "score": safe_result.get("score", 0),
+            "score_breakdown": safe_result.get("score_breakdown", []),
+            "intent": intent or "unknown",
+            "mode": mode or "chat",
+            "meal_items": meal_items if "meal_items" in locals() else [],
+            "unknown_items": unknown_items if "unknown_items" in locals() else [],
         }
