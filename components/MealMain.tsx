@@ -175,8 +175,15 @@ function estimateNutrition(items: MealItem[]): NutritionSummary {
   for (const item of items) {
     const food = FOODS[item.name] ?? FOODS._default;
     const qty = item.quantity ?? 1;
-    const scale = item.unit === "g" ? qty / 100 : qty;
+    let scale = 1;
 
+    if (item.unit === "g") {
+      scale = qty / 100; // grams normalized
+    } else if (item.unit === "cup") {
+      scale = qty * 2; // 🔥 rough heuristic (1 cup ≈ 2 servings)
+    } else {
+      scale = qty; // pieces
+    }
     carbs += food.carbs * scale;
     protein += food.protein * scale;
     fats += food.fats * scale;
@@ -324,10 +331,33 @@ function ItemRow({
           marginHorizontal: 6,
         }}
       />
+      <TouchableOpacity
+        onPress={() => {
+          const nextUnit =
+            item.unit === "g"
+              ? "cup"
+              : item.unit === "cup"
+                ? "piece"
+                : "g";
 
-      <Text style={{ color: C.muted, fontSize: 12, width: 28 }}>
-        {item.unit === "g" ? "g" : item.unit === "cup" ? "cup" : "pc"}
-      </Text>
+          onUpdate(item.id, { unit: nextUnit });
+        }}
+        style={{
+          backgroundColor: C.surfaceAlt,
+          borderRadius: 6,
+          paddingHorizontal: 6,
+          paddingVertical: 3,
+          marginHorizontal: 4,
+        }}
+      >
+        <Text style={{ color: C.accent, fontSize: 12 }}>
+          {item.unit === "g"
+            ? "g"
+            : item.unit === "cup"
+              ? "cup"
+              : "pc"}
+        </Text>
+      </TouchableOpacity>
 
       <TouchableOpacity
         onPress={() => onDelete(item.id)}
@@ -379,9 +409,20 @@ function ConfirmStage({
         Edit your meal
       </Text>
 
-      <Text style={{ color: C.muted, fontSize: 13, marginBottom: 16 }}>
-        Add, remove, or adjust items before analysis.
+      <Text style={{ color: C.muted, fontSize: 13, marginBottom: 8 }}>
+        Detected {items.length} item{items.length !== 1 ? "s" : ""}
       </Text>
+
+      <Text style={{ color: C.muted, fontSize: 13, marginBottom: 16 }}>
+        Add, remove, or adjust before analysis.
+      </Text>
+
+      {/* ⚠️ Trust fallback */}
+      {items.length === 0 && (
+        <Text style={{ color: C.error, marginBottom: 12 }}>
+          Couldn't detect items clearly. Please add manually.
+        </Text>
+      )}
 
       {items.map((item) => (
         <ItemRow key={item.id} item={item} onUpdate={updateItem} onDelete={deleteItem} />
@@ -708,21 +749,6 @@ function ResultStage({
       {improvements.length > 0 && (
         <ImprovementSection suggestions={improvements} />
       )}
-
-      <TouchableOpacity
-        onPress={onReset}
-        style={{
-          marginTop: 4,
-          marginBottom: 8,
-          borderWidth: 1,
-          borderColor: C.border,
-          borderRadius: 14,
-          paddingVertical: 13,
-          alignItems: "center",
-        }}
-      >
-        <Text style={{ color: C.muted, fontSize: 14 }}>Analyze another meal</Text>
-      </TouchableOpacity>
     </View>
   );
 }
@@ -829,59 +855,64 @@ export default function MealMain() {
         keyboardVerticalOffset={0}
       >
         <View style={{ flex: 1, backgroundColor: C.bg }}>
+
+          {/* ✅ HEADER (NON-SCROLLING) */}
+          <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+            <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
+              Meal
+            </Text>
+
+            <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>
+              Meal Impact
+            </Text>
+          </View>
+
+          {/* ✅ SCROLL CONTENT ONLY */}
           <ScrollView
             ref={scrollRef}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
             contentContainerStyle={{
               paddingHorizontal: 16,
-              paddingTop: 8,
               paddingBottom: 120,
             }}
           >
-            <View style={{ marginTop: 6, marginBottom: 4 }}>
-              <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
-                Meal
+
+            {/* CAPTURE */}
+            {stage === "capture" && (
+              <Text
+                style={{
+                  color: C.muted,
+                  textAlign: "center",
+                  marginTop: 20,
+                }}
+              >
+                Enter your meal or describe it…
               </Text>
+            )}
 
-              <Text style={{ color: C.muted, fontSize: 13, marginBottom: 18 }}>
-                Meal Impact
-              </Text>
+            {/* ✅ CONFIRM */}
+            {stage === "confirm" && (
+              <ConfirmStage
+                items={mealItems}
+                onChange={setMealItems}
+                onConfirm={() => runMealProcessing(mealItems)}
+              />
+            )}
 
-              {/* CAPTURE */}
-              {stage === "capture" && (
-                <Text
-                  style={{
-                    color: C.muted,
-                    textAlign: "center",
-                    marginTop: 20,
-                  }}
-                >
-                  Enter your meal or describe it…
-                </Text>
-              )}
+            {/* RESULT */}
+            {stage === "result" && nutritionSummary && mealResult && (
+              <ResultStage
+                nutrition={nutritionSummary}
+                result={mealResult}
+                improvements={improvements}
+                onReset={handleReset}
+              />
+            )}
 
-              {/* ✅ CONFIRM STAGE (NEW) */}
-              {stage === "confirm" && (
-                <ConfirmStage
-                  items={mealItems}
-                  onChange={setMealItems}
-                  onConfirm={() => runMealProcessing(mealItems)}
-                />
-              )}
-
-              {/* RESULT */}
-              {stage === "result" && nutritionSummary && mealResult && (
-                <ResultStage
-                  nutrition={nutritionSummary}
-                  result={mealResult}
-                  improvements={improvements}
-                  onReset={handleReset}
-                />
-              )}
-            </View>
           </ScrollView>
 
+          {/* STATUS */}
           {micStatus && (
             <View style={{ alignItems: "center", paddingVertical: 4 }}>
               <Text style={{ color: C.muted, fontSize: 13 }}>{micStatus}</Text>
@@ -950,7 +981,7 @@ export default function MealMain() {
               <Text style={{ fontSize: 16 }}>🎤</Text>
             </TouchableOpacity>
 
-            {/* Action Button */}
+            {/* Action */}
             <TouchableOpacity
               onPress={handleBottomSend}
               style={{
@@ -965,6 +996,7 @@ export default function MealMain() {
               </Text>
             </TouchableOpacity>
           </View>
+
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
