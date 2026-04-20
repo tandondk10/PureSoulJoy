@@ -885,12 +885,7 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }}>
-      <View
-        style={{
-          flex: 1,
-          backgroundColor: "#0B0F14",
-        }}
-      >
+      <View style={{ flex: 1, backgroundColor: "#0B0F14" }}>
         <AppHeader />
 
         <KeyboardAvoidingView
@@ -899,17 +894,67 @@ export default function HomeScreen() {
           keyboardVerticalOffset={80}
         >
           <View style={{ flex: 1 }}>
+
+            {/* 🔥 HEADER (NON-SCROLLING) */}
+            <View style={{ paddingHorizontal: 16, paddingTop: 6 }}>
+              <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
+                Lifestyle
+              </Text>
+
+              <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>
+                Lifestyle Chat
+              </Text>
+            </View>
+
+            {/* 🔥 SCROLLABLE AREA */}
             <ScrollView
               ref={scrollRef}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
               contentContainerStyle={{
-                backgroundColor: C.bg,
                 paddingHorizontal: 16,
-                paddingTop: 6,
                 paddingBottom: 100,
               }}
             >
+              {/* EMPTY STATE */}
+              {blocks.length === 0 && (
+                <View style={{ marginTop: 30 }}>
+                  <Text
+                    style={{
+                      color: C.text,
+                      fontSize: 16,
+                      textAlign: "center",
+                      marginBottom: 16,
+                    }}
+                  >
+                    Ask anything about your lifestyle
+                  </Text>
+
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center" }}>
+                    {[
+                      "How to control sugar spikes?",
+                      "Best post-meal walk timing?",
+                      "Healthy breakfast ideas",
+                    ].map((q, i) => (
+                      <TouchableOpacity
+                        key={i}
+                        onPress={() => handleChip(q)}
+                        style={{
+                          backgroundColor: C.surfaceAlt,
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: 12,
+                          margin: 4,
+                        }}
+                      >
+                        <Text style={{ color: C.text, fontSize: 13 }}>{q}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {/* CHAT BLOCKS */}
               {blocks.map((block) => (
                 <View
                   key={block.id}
@@ -918,15 +963,13 @@ export default function HomeScreen() {
                     else delete blockRefs.current[block.id];
                   }}
                 >
-                  {/* Query bubble — always shows cleaned_query per spec §8.3 */}
-                  {block.query ? (
+                  {/* Query bubble */}
+                  {block.query && (
                     <View
                       style={{
                         alignSelf: "flex-end",
                         backgroundColor:
-                          block.source === "voice"
-                            ? "#CDEBCC"
-                            : C.userBubble,
+                          block.source === "voice" ? "#CDEBCC" : C.userBubble,
                         paddingVertical: 6,
                         paddingHorizontal: 10,
                         borderRadius: 14,
@@ -939,7 +982,7 @@ export default function HomeScreen() {
                         {block.query}
                       </Text>
                     </View>
-                  ) : null}
+                  )}
 
                   {block.status === "loading" && (
                     <View style={{ padding: 10 }}>
@@ -948,15 +991,8 @@ export default function HomeScreen() {
                   )}
 
                   {block.status === "error" && (
-                    <Text
-                      style={{
-                        color: C.error,
-                        paddingVertical: 4,
-                        paddingHorizontal: 2,
-                      }}
-                    >
-                      {block.errorMessage ??
-                        "Something went wrong. Please try again."}
+                    <Text style={{ color: C.error, paddingVertical: 4 }}>
+                      {block.errorMessage ?? "Something went wrong."}
                     </Text>
                   )}
 
@@ -983,15 +1019,9 @@ export default function HomeScreen() {
               ))}
             </ScrollView>
 
-            {/* Status indicator — separate from input field per spec §8.1, §8.2 */}
-            {statusText ? (
-              <View
-                style={{
-                  paddingHorizontal: 16,
-                  paddingVertical: 6,
-                  alignItems: "center",
-                }}
-              >
+            {/* STATUS */}
+            {statusText && (
+              <View style={{ alignItems: "center", paddingVertical: 6 }}>
                 <Text
                   style={{
                     color: isErrorStatus ? C.error : C.muted,
@@ -1001,16 +1031,14 @@ export default function HomeScreen() {
                   {statusText}
                 </Text>
               </View>
-            ) : null}
+            )}
 
-            <View
-              style={{
-                paddingHorizontal: 16,
-                paddingBottom: 6,
-              }}
-            >
+            {/* CAPTURE BUTTON */}
+            <View style={{ paddingHorizontal: 16, paddingBottom: 6 }}>
               <TouchableOpacity
-                onPress={() => router.replace(`/meal-main?mode=${UX_RUNMODE}&intent=analyze_meal`)}
+                onPress={() =>
+                  router.replace(`/meal-main?mode=${UX_RUNMODE}&intent=analyze_meal`)
+                }
                 style={{
                   backgroundColor: C.accent,
                   paddingVertical: 14,
@@ -1023,7 +1051,8 @@ export default function HomeScreen() {
                 </Text>
               </TouchableOpacity>
             </View>
-            {/* Input bar */}
+
+            {/* INPUT BAR */}
             <View
               style={{
                 flexDirection: "row",
@@ -1034,19 +1063,17 @@ export default function HomeScreen() {
                 alignItems: "center",
               }}
             >
-              {/* Input field — read-only during PROCESSING only, never overwritten by status — spec §8.1 */}
               <TextInput
                 value={input}
                 onChangeText={setInput}
                 editable={!isProcessing}
-                placeholder='Ask or speak… say “Go BetterMe”'
+                placeholder='Ask or speak… say “Go BuildJoy”'
                 placeholderTextColor={C.muted}
                 style={{ flex: 1, color: C.text }}
                 onSubmitEditing={handleSendPress}
                 returnKeyType="send"
               />
 
-              {/* Mic button — red during RECORDING, disabled during PROCESSING */}
               <TouchableOpacity
                 onPress={handleMicPress}
                 disabled={isProcessing}
@@ -1062,11 +1089,12 @@ export default function HomeScreen() {
                 }}
               >
                 <Text style={{ color: C.text }}>
-                  {voiceState === "RECORDING" || voiceState === "PLAYING" ? "⏹" : "🎤"}
+                  {voiceState === "RECORDING" || voiceState === "PLAYING"
+                    ? "⏹"
+                    : "🎤"}
                 </Text>
               </TouchableOpacity>
 
-              {/* Send button */}
               <TouchableOpacity
                 disabled={isProcessing}
                 onPress={handleSendPress}
@@ -1081,12 +1109,14 @@ export default function HomeScreen() {
                 <Text style={{ color: "#000" }}>Send</Text>
               </TouchableOpacity>
             </View>
+
           </View>
         </KeyboardAvoidingView>
       </View>
     </SafeAreaView>
-  )
+  );
 }
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
