@@ -1,6 +1,6 @@
 import AppHeader from "@/components/AppHeader";
 import { C } from "@/constants/colors";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import {
   KeyboardAvoidingView,
@@ -104,30 +104,36 @@ const FOODS: Record<string, FoodEntry> = {
 function extractMealItems(text: string): MealItem[] {
   console.log("🔥 extractMealItems CALLED with:", text);
 
-  // ✅ STEP 1 — CLEAN FIRST (critical fix)
+  // 🔥 FOOD ALIASES (critical intelligence layer)
+  const FOOD_ALIASES: Record<string, string> = {
+    saag: "spinach",
+    dal: "lentils",
+    rajma: "beans",
+    chana: "chickpeas",
+    sabzi: "vegetable",
+  };
+
+  // 🔥 STEP 1 — normalize
   let cleaned = text.toLowerCase();
 
-  cleaned = text.toLowerCase();
+  // 🔥 STEP 2 — remove common sentence prefixes
+  cleaned = cleaned.replace(/\b(i|we)\s+(had|ate)\b/g, "");
 
-  // 🔥 STEP 1 — Remove sentence prefixes safely
-  cleaned = cleaned.replace(
-    /\b(i|we)\s+(had|ate)\b/g,
-    ""
-  );
+  // 🔥 STEP 3 — split multi-meal indicators
+  cleaned = cleaned.replace(/\b(lunch|dinner|breakfast|snack)\b/g, ",");
 
-  // 🔥 STEP 2 — Normalize connectors → commas
-  cleaned = cleaned.replace(
-    /\b(and|with|plus|then)\b/g,
-    ","
-  );
+  // 🔥 STEP 4 — normalize connectors → commas
+  cleaned = cleaned.replace(/\b(and|with|plus|then|&)\b/g, ",");
 
-  // 🔥 STEP 3 — Remove noise characters
+  // 🔥 STEP 5 — remove noise
   cleaned = cleaned
     .replace(/[^a-z0-9.,\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
+  console.log("🧹 CLEANED:", cleaned);
 
+  // 🔥 STEP 6 — split into parts
   const parts = cleaned
     .split(",")
     .map((s) => s.trim())
@@ -148,12 +154,23 @@ function extractMealItems(text: string): MealItem[] {
 
     if (!name || name.length < 2) return;
 
+    // 🔥 APPLY ALIAS MAPPING
+    // 🔥 SMART ALIAS MATCH (handles "chana salad", "saag curry", etc.)
+    for (const key in FOOD_ALIASES) {
+      if (name.includes(key)) {
+        console.log(`🔁 Alias mapped: ${name} → ${FOOD_ALIASES[key]}`);
+        name = FOOD_ALIASES[key];
+        break;
+      }
+    }
+
+    // 🔥 unit normalization
     let unit: MealUnit = "piece";
     if (unitRaw.startsWith("cup")) unit = "cup";
     else if (unitRaw.startsWith("g")) unit = "g";
 
     items.push({
-      id: String(i),
+      id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
       name,
       quantity: qty,
       unit,
@@ -471,19 +488,25 @@ function ConfirmStage({
         </TouchableOpacity>
       </View>
 
-      <TouchableOpacity
-        onPress={onConfirm}
-        style={{
-          backgroundColor: C.accent,
-          borderRadius: 14,
-          paddingVertical: 15,
-          alignItems: "center",
-        }}
-      >
-        <Text style={{ color: "#000", fontWeight: "700", fontSize: 15 }}>
-          Analyze Meal
-        </Text>
-      </TouchableOpacity>
+      <View style={{ alignItems: "center", marginTop: 10 }}>
+        <TouchableOpacity
+          onPress={onConfirm}
+          style={{
+            backgroundColor: C.accent,
+            borderRadius: 14,
+            paddingVertical: 14,
+            paddingHorizontal: 24,
+            alignItems: "center",
+
+            minWidth: "50%",   // 🔥 key: not full width
+            maxWidth: 320,     // 🔥 keeps it premium on large screens
+          }}
+        >
+          <Text style={{ color: "#000", fontWeight: "700", fontSize: 15 }}>
+            Analyze Meal
+          </Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -757,6 +780,30 @@ function ResultStage({
 
 export default function MealMain() {
 
+  // 🔥 1. HOOKS FIRST
+  const router = useRouter();
+  const { prefill } = useLocalSearchParams();
+  const scrollRef = useRef<ScrollView>(null);
+
+  // 🔥 2. STATE (MUST be before effects)
+  const [stage, setStage] = useState<Stage>("capture");
+  const [mealItems, setMealItems] = useState<MealItem[]>([]);
+  const [nutritionSummary, setNutritionSummary] = useState<NutritionSummary | null>(null);
+  const [mealResult, setMealResult] = useState<MealResult | null>(null);
+  const [improvements, setImprovements] = useState<string[]>([]);
+
+  // 🔥 ADD THIS
+  const lastMealRef = useRef<{
+    items: MealItem[];
+    nutrition: NutritionSummary | null;
+    result: MealResult | null;
+    improvements: string[];
+  } | null>(null);
+
+  // 🔥 3. REFS
+  const handledPrefillRef = useRef<string | null>(null);
+
+  // 🔥 4. DEBUG EFFECTS
   useEffect(() => {
     console.log("🧠 Stage changed:", stage);
   }, [stage]);
@@ -769,14 +816,113 @@ export default function MealMain() {
     console.log("🚨 MealMain mounted");
   }, []);
 
-  const scrollRef = useRef<ScrollView>(null);
-  const router = useRouter();
+  // 🔥 5. PREFILL EFFECT
+  useEffect(() => {
+    const normalizedPrefillRaw =
+      typeof prefill === "string"
+        ? prefill
+        : Array.isArray(prefill)
+          ? prefill.join(", ")
+          : null;
 
-  const [stage, setStage] = useState<Stage>("capture");
-  const [mealItems, setMealItems] = useState<MealItem[]>([]);
-  const [nutritionSummary, setNutritionSummary] = useState<NutritionSummary | null>(null);
-  const [mealResult, setMealResult] = useState<MealResult | null>(null);
-  const [improvements, setImprovements] = useState<string[]>([]);
+    if (!normalizedPrefillRaw) return;
+
+    const normalized = normalizedPrefillRaw.toLowerCase();
+
+    // 🔒 prevent duplicate handling
+    if (handledPrefillRef.current === normalized) return;
+
+    console.log("🔥 Prefill received:", normalized);
+
+    // ✅ reset previous result state
+    setNutritionSummary(null);
+    setMealResult(null);
+    setImprovements([]);
+
+    const items = extractMealItems(normalized);
+
+    // ❌ parser fallback path
+    if (items.length === 0) {
+      console.log("⚠️ Prefill parsing failed");
+
+      const fallbackItems = normalized
+        .split(/\s*(?:,|and|with|&)\s*/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      if (fallbackItems.length === 0) {
+        fallbackItems.push(normalized);
+      }
+
+      setMealItems(
+        fallbackItems.map((name, i) => ({
+          id: `${normalized}-${i}`,
+          name,
+          quantity: 1,
+          unit: "piece",
+        }))
+      );
+
+      setStage("confirm");
+
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ y: 0, animated: true });
+      });
+
+      handledPrefillRef.current = normalized;
+
+      setTimeout(() => {
+        router.setParams({ prefill: undefined });
+      }, 0);
+
+      return;
+    }
+
+    // ✅ normal flow
+    setMealItems(items);
+    setStage("confirm");
+
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+    });
+
+    handledPrefillRef.current = normalized;
+
+    setTimeout(() => {
+      router.setParams({ prefill: undefined });
+    }, 0);
+
+  }, [prefill]);
+
+  // 🔥 5. PREFILL EFFECT
+  useEffect(() => {
+    // your existing prefill logic
+  }, [prefill]);
+
+  // 🔥 6. RESTORE EFFECT (ADD HERE)
+  useEffect(() => {
+    const hasPrefill =
+      typeof prefill === "string"
+        ? prefill.trim().length > 0
+        : Array.isArray(prefill)
+          ? prefill.join("").trim().length > 0
+          : false;
+
+    // 🔥 Only restore when NO prefill
+    if (!hasPrefill && lastMealRef.current) {
+      console.log("♻️ Restoring previous meal");
+
+      const prev = lastMealRef.current;
+
+      setMealItems(prev.items);
+      setNutritionSummary(prev.nutrition);
+      setMealResult(prev.result);
+      setImprovements(prev.improvements);
+
+      setStage(prev.result ? "result" : "confirm");
+    }
+  }, [prefill]);
+
   const [bottomInput, setBottomInput] = useState("");
   const [micStatus, setMicStatus] = useState<string | null>(null);
 
@@ -815,6 +961,14 @@ export default function MealMain() {
     setMealResult(result);
     setImprovements(suggestions);
     setStage("result");
+
+    // 🔥 SAVE LAST STATE
+    lastMealRef.current = {
+      items,
+      nutrition,
+      result,
+      improvements: suggestions,
+    };
 
     setTimeout(() => {
       scrollRef.current?.scrollToEnd({ animated: true });

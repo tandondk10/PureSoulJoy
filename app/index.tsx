@@ -68,9 +68,12 @@ export default function HomeScreen() {
   const [blocks, setBlocks] = useState<QueryBlock[]>([]);
   const [input, setInput] = useState("");
 
+  const [pendingMealQuery, setPendingMealQuery] = useState<string | null>(null);
+
   const router = useRouter();
   const { user, setUser } = useUser();
   const [checkingUser, setCheckingUser] = useState(true);
+  const [pendingMeal, setPendingMeal] = useState<string | null>(null);
 
   // other refs and state...
 
@@ -109,8 +112,8 @@ export default function HomeScreen() {
     console.log("🧠 Routing intent:", intent);
 
     if (intent === "glucose") {
-      // TEMP: direct routing (we add Chat Lite next)
-      router.push(`/meal-main?intent=glucose`);
+      setStatusText("Do you want to analyze a meal?");
+      return;
     }
 
     // future:
@@ -778,13 +781,38 @@ export default function HomeScreen() {
     // PROCESSING → ignore
   };
 
+  // 🔥 SIMPLE MEAL DETECTOR (fast heuristic)
+  const looksLikeMeal = (text: string) => {
+    const foodWords = [
+      "rice", "dal", "roti", "chapati", "bread", "egg", "eggs",
+      "chicken", "fish", "paneer", "tofu",
+      "beans", "lentils", "salad", "vegetable", "sabzi",
+      "saag", "curry", "oats", "idli", "dosa", "banana", "apple"
+    ];
 
+    const lower = text.toLowerCase();
+
+    return foodWords.some(word => lower.includes(word));
+  };
 
   const handleSendPress = () => {
     if (voiceStateRef.current === "PROCESSING") return;
+
     const query = input.trim();
     if (!query) return;
 
+    // 🔥 STEP 1 — detect meal BEFORE API
+    if (looksLikeMeal(query)) {
+      setPendingMeal(query);
+      // user types meal
+      setPendingMealQuery(query);   // 🔥 store it
+      setStatusText("Do you want to analyze a meal?");
+
+      // ❌ DO NOT clear input here
+      return;
+    }
+
+    // 🔥 STEP 2 — normal flow
     const traceId = createTraceId();
     logTrace(traceId, "KEYBOARD_START", query);
 
@@ -1030,20 +1058,80 @@ export default function HomeScreen() {
                 >
                   {statusText}
                 </Text>
+
+                {/* 🔥 NEW: Action buttons for routing */}
+                {statusText === "Do you want to analyze a meal?" && (
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "center",
+                      marginTop: 8,
+                    }}
+                  >
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (!pendingMeal) return;
+
+                        setStatusText(null);
+
+                        router.push(
+                          `/meal-main?prefill=${encodeURIComponent(pendingMeal)}`
+                        );
+
+                        setPendingMeal(null); // cleanup
+                      }}
+                      style={{
+                        backgroundColor: C.accent,
+                        paddingHorizontal: 16,
+                        paddingVertical: 8,
+                        borderRadius: 10,
+                        marginRight: 8,
+                      }}
+                    >
+                      <Text style={{ color: "#000", fontWeight: "600" }}>
+                        Yes
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => {
+                        setStatusText(null);
+
+                        if (pendingMealQuery) {
+                          setInput(pendingMealQuery);
+                          setPendingMealQuery(null);
+                        }
+                      }}
+                      style={{
+                        backgroundColor: "#1E2A38",
+                        paddingHorizontal: 16,
+                        paddingVertical: 8,
+                        borderRadius: 10
+                      }}
+                    >
+                      <Text style={{ color: "#FFFFFF", fontWeight: "500" }}>
+                        No
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
             )}
 
             {/* CAPTURE BUTTON */}
-            <View style={{ paddingHorizontal: 16, paddingBottom: 6 }}>
+            <View style={{ alignItems: "center", marginVertical: 10 }}>
               <TouchableOpacity
                 onPress={() =>
-                  router.replace(`/meal-main?mode=${UX_RUNMODE}&intent=analyze_meal`)
+                  router.replace(`/meal-main?intent=analyze_meal`)
                 }
                 style={{
                   backgroundColor: C.accent,
                   paddingVertical: 14,
+                  paddingHorizontal: 24,
                   borderRadius: 14,
                   alignItems: "center",
+                  minWidth: "40%",   // 🔥 balanced width
+                  maxWidth: 320,     // 🔥 clean UI cap
                 }}
               >
                 <Text style={{ color: "#000", fontWeight: "600" }}>
