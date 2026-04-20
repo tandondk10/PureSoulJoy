@@ -68,8 +68,6 @@ export default function HomeScreen() {
   const [blocks, setBlocks] = useState<QueryBlock[]>([]);
   const [input, setInput] = useState("");
 
-  const [pendingMealQuery, setPendingMealQuery] = useState<string | null>(null);
-
   const router = useRouter();
   const { user, setUser } = useUser();
   const [checkingUser, setCheckingUser] = useState(true);
@@ -804,8 +802,6 @@ export default function HomeScreen() {
     // 🔥 STEP 1 — detect meal BEFORE API
     if (looksLikeMeal(query)) {
       setPendingMeal(query);
-      // user types meal
-      setPendingMealQuery(query);   // 🔥 store it
       setStatusText("Do you want to analyze a meal?");
 
       // ❌ DO NOT clear input here
@@ -1077,8 +1073,6 @@ export default function HomeScreen() {
                         router.push(
                           `/meal-main?prefill=${encodeURIComponent(pendingMeal)}`
                         );
-
-                        setPendingMeal(null); // cleanup
                       }}
                       style={{
                         backgroundColor: C.accent,
@@ -1096,11 +1090,7 @@ export default function HomeScreen() {
                     <TouchableOpacity
                       onPress={() => {
                         setStatusText(null);
-
-                        if (pendingMealQuery) {
-                          setInput(pendingMealQuery);
-                          setPendingMealQuery(null);
-                        }
+                        // input is unchanged; keep pendingMeal for Capture Meal
                       }}
                       style={{
                         backgroundColor: "#1E2A38",
@@ -1121,9 +1111,15 @@ export default function HomeScreen() {
             {/* CAPTURE BUTTON */}
             <View style={{ alignItems: "center", marginVertical: 10 }}>
               <TouchableOpacity
-                onPress={() =>
-                  router.replace(`/meal-main?intent=analyze_meal`)
-                }
+                onPress={() => {
+                  const meal = input.trim();
+
+                  if (meal && looksLikeMeal(meal)) {
+                    router.push(`/meal-main?prefill=${encodeURIComponent(meal)}`);
+                  } else {
+                    router.push(`/meal-main`);
+                  }
+                }}
                 style={{
                   backgroundColor: C.accent,
                   paddingVertical: 14,
@@ -1153,7 +1149,7 @@ export default function HomeScreen() {
             >
               <TextInput
                 value={input}
-                onChangeText={setInput}
+                onChangeText={(v) => { setInput(v); if (pendingMeal) setPendingMeal(null); }}
                 editable={!isProcessing}
                 placeholder='Ask or speak… say “Go BuildJoy”'
                 placeholderTextColor={C.muted}
