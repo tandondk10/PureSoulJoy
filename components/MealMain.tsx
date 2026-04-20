@@ -792,14 +792,6 @@ export default function MealMain() {
   const [mealResult, setMealResult] = useState<MealResult | null>(null);
   const [improvements, setImprovements] = useState<string[]>([]);
 
-  // 🔥 ADD THIS
-  const lastMealRef = useRef<{
-    items: MealItem[];
-    nutrition: NutritionSummary | null;
-    result: MealResult | null;
-    improvements: string[];
-  } | null>(null);
-
   // 🔥 3. REFS
   const handledPrefillRef = useRef<string | null>(null);
 
@@ -894,34 +886,6 @@ export default function MealMain() {
 
   }, [prefill]);
 
-  // 🔥 5. PREFILL EFFECT
-  useEffect(() => {
-    // your existing prefill logic
-  }, [prefill]);
-
-  // 🔥 6. RESTORE EFFECT (ADD HERE)
-  useEffect(() => {
-    const hasPrefill =
-      typeof prefill === "string"
-        ? prefill.trim().length > 0
-        : Array.isArray(prefill)
-          ? prefill.join("").trim().length > 0
-          : false;
-
-    // 🔥 Only restore when NO prefill
-    if (!hasPrefill && lastMealRef.current) {
-      console.log("♻️ Restoring previous meal");
-
-      const prev = lastMealRef.current;
-
-      setMealItems(prev.items);
-      setNutritionSummary(prev.nutrition);
-      setMealResult(prev.result);
-      setImprovements(prev.improvements);
-
-      setStage(prev.result ? "result" : "confirm");
-    }
-  }, [prefill]);
 
   const [bottomInput, setBottomInput] = useState("");
   const [micStatus, setMicStatus] = useState<string | null>(null);
@@ -961,14 +925,6 @@ export default function MealMain() {
     setMealResult(result);
     setImprovements(suggestions);
     setStage("result");
-
-    // 🔥 SAVE LAST STATE
-    lastMealRef.current = {
-      items,
-      nutrition,
-      result,
-      improvements: suggestions,
-    };
 
     setTimeout(() => {
       scrollRef.current?.scrollToEnd({ animated: true });
@@ -1089,7 +1045,7 @@ export default function MealMain() {
           >
             {/* Home */}
             <TouchableOpacity
-              onPress={() => router.replace("/")}
+              onPress={() => router.back()}
               style={{
                 marginRight: 6,
                 paddingHorizontal: 10,
