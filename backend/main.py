@@ -1,17 +1,25 @@
 from fastapi import FastAPI, Request
+from openai import OpenAI
+import io
 import re
 import os
 import time
+import asyncio
+import base64
+import difflib
+
+
 from litellm import completion
 from dotenv import load_dotenv
 
 load_dotenv()
+client = OpenAI()
 
 # ---------------- CONFIG ----------------
 LLM_MODE = os.getenv("LLM_MODE", "openai")
 USE_LLM = os.getenv("USE_LLM", "true").lower() == "true"
 USE_MOCK = os.getenv("USE_MOCK", "false").lower() == "true"
-SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"  # 🔥 ADDED
+SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"
 
 MODEL_OPENAI = os.getenv("MODEL_OPENAI", "gpt-4o-mini")
 MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
@@ -19,11 +27,33 @@ MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
 print("LLM_MODE:", LLM_MODE)
 print("USE_LLM:", USE_LLM)
 print("USE_MOCK:", USE_MOCK)
-print("SCROLL_TEST:", SCROLL_TEST)  # 🔥 ADDED
+print("SCROLL_TEST:", SCROLL_TEST)
 
 app = FastAPI()
 
 print("🚨 LLM BACKEND RUNNING")
+
+
+# ---------------- USER PROFILE ----------------
+USER_PROFILE = {
+    "name": "Deepak",
+    "age": 63,
+    "condition": "prediabetic",
+    "a1c": 6.0,
+    "ldl": 100,
+    "goal": "reduce glucose spikes",
+    "diet": "vegetarian",
+    "phenotype": "post-meal spiker"
+}
+
+COMMON_CORRECTIONS = {
+    "excercise": "exercise",
+    "excersise": "exercise",
+    "glocose": "glucose",
+    "suger": "sugar",
+    "colestrol": "cholesterol",
+    "bp": "blood pressure",  # you already handle this, but safe
+}
 
 
 # ---------------- SCROLL TEST ----------------
@@ -44,6 +74,78 @@ def scroll_test_response() -> str:
 ## Next Step
 {long_block("Next Step")}
 """
+
+
+# ---------------- WHISPER HALLUCINATION LIST ----------------
+# Maintainable — add entries as observed in production
+WHISPER_HALLUCINATIONS = {
+    "",
+    "thank you.",
+    "thank you",
+    "thanks for watching.",
+    "thanks for watching",
+    "you",
+    "you.",
+    ".",
+    "...",
+    "bye.",
+    "bye",
+    "goodbye.",
+    "goodbye",
+}
+
+
+def is_hallucination(text: str) -> bool:
+    return text.strip().lower() in WHISPER_HALLUCINATIONS
+
+
+# ---------------- TRIGGER REMOVAL ----------------
+# Matches "go improveme" or "go improve me" at the END of the transcript only.
+# Case-insensitive. Allows optional trailing punctuation. One pass only.
+TRIGGER_PATTERN = re.compile(
+    r'\s*(go\s+improve\s*me|इम्प्रूव\s*मी)\s*[.!?]?\s*$',
+    re.IGNORECASE
+)
+
+
+def has_trigger(text: str) -> bool:
+    return bool(TRIGGER_PATTERN.search(text))
+
+
+def remove_trigger(text: str) -> str:
+    return TRIGGER_PATTERN.sub('', text).strip()
+
+
+# ---------------- VALIDATION ----------------
+def validate_voice_query(raw_transcript: str) -> tuple:
+    """
+    Validates Whisper transcript. Returns (error_msg | None, cleaned_query).
+    Order: A → B → C → D exactly per spec.
+    """
+    raw = (raw_transcript or "").strip()
+
+    # Case A: null, empty, or Whisper hallucination
+    if not raw or is_hallucination(raw):
+        return "Could not understand. Please try again.", ""
+
+    # Trigger removal (before B/C/D checks)
+    trigger_found = has_trigger(raw)
+    cleaned = remove_trigger(raw)
+
+    # Case B: transcript contained only the trigger phrase
+    if trigger_found and not cleaned:
+        return "Please say your question or meal before Go ImproveMe.", ""
+
+    # Case C: no word with 3 or more characters
+    words = re.findall(r'\w+', cleaned)
+    if len(cleaned.strip()) < 3:
+        return "Please say a complete question or meal.", cleaned
+
+    # Case D: only whitespace or punctuation
+    if not re.sub(r'[^\w]', '', cleaned).strip():
+        return "Could not understand. Please try again.", cleaned
+
+    return None, cleaned
 
 
 # ---------------- KEYWORD MAP ----------------
@@ -82,18 +184,16 @@ KEYWORD_MAP = {
 def normalize(q: str) -> str:
     q = q.lower().strip()
     q = q.replace("-", " ")
-
     q = re.sub(r"\bbp\b", "blood pressure", q)
     q = re.sub(r"\bbg\b", "blood glucose", q)
     q = re.sub(r"\bblood sugar\b", "glucose", q)
-
     return q
 
 
 # ---------------- CONTEXT ----------------
 def detect_context(q: str) -> dict:
     return {
-        "after_meal": any(x in q for x in ["after", "post meal"]),
+        "after_meal": any(x in q for x in ["after meal", "post meal"]),
         "high": any(x in q for x in ["high", "spike", "elevated"]),
         "low": any(x in q for x in ["low", "drop"]),
     }
@@ -106,23 +206,20 @@ def detect_intent(q: str) -> str:
 
     for category, groups in KEYWORD_MAP.items():
         score = 0
-
         for group_name, keywords in groups.items():
             for kw in keywords:
-                if kw in text:
+                if re.search(rf"\b{re.escape(kw)}\b", text):
                     if group_name == "primary":
                         score += 3
                     elif group_name == "medical":
                         score += 2
                     else:
                         score += 1
-
         if score > 0:
             scores[category] = score
 
     if scores:
-        top = max(scores, key=scores.get)
-        return top
+        return max(scores, key=scores.get)
 
     return "unknown"
 
@@ -163,7 +260,6 @@ def compute_score(intent: str, q: str) -> int:
 
 # ---------------- MOCK ----------------
 def mock_response(intent: str) -> str:
-
     if intent == "glucose":
         return """## Likely Cause
 Glucose spike likely due to high carbs without fiber.
@@ -216,6 +312,14 @@ def build_prompt(q: str, ctx: dict) -> str:
     return f"""
 You are a lifestyle health assistant.
 
+User Profile:
+- Age: {USER_PROFILE['age']}
+- Condition: {USER_PROFILE['condition']} (A1C {USER_PROFILE['a1c']})
+- LDL: {USER_PROFILE['ldl']}
+- Goal: {USER_PROFILE['goal']}
+- Diet: {USER_PROFILE['diet']}
+- Phenotype: {USER_PROFILE['phenotype']}
+
 User query: "{q}"
 
 Context:
@@ -223,15 +327,29 @@ Context:
 - High: {ctx["high"]}
 - Low: {ctx["low"]}
 
+Instructions:
+- Personalize recommendations based on the profile
+- Max 3 actionable steps
+- Be specific (minutes, portions)
+- Adjust intensity:
+    * Prediabetic → moderate
+    * Diabetic → strict
+    * Healthy → flexible
+
 Respond ONLY in this exact format:
 
-## Likely Cause
+## Meal Score
 ...
 
 ## What To Do
-...
+1) ...
+2) ...
+3) ...
 
-## Next Step
+## Try This Week
++ ...
+
+## Expected Outcome
 ...
 """
 
@@ -239,22 +357,17 @@ Respond ONLY in this exact format:
 # ---------------- EXTRACT ----------------
 def extract_text(res):
     try:
-        msg = res.get("choices", [{}])[0].get("message", {})
-        content = msg.get("content", "")
-
-        if isinstance(content, list):
-            return "".join([c.get("text", "") for c in content])
-
-        return content
-
-    except Exception:
+        if isinstance(res, dict):
+            return res["choices"][0]["message"]["content"]
+        return res.choices[0].message.content
+    except Exception as e:
+        print("EXTRACT ERROR:", e)
         return str(res)
 
 
 # ---------------- LLM ----------------
 def llm_response(q: str, ctx: dict) -> str:
     prompt = build_prompt(q, ctx)
-
     model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
 
     res = completion(
@@ -267,7 +380,7 @@ def llm_response(q: str, ctx: dict) -> str:
 
 # ---------------- FORMAT ----------------
 def enforce_format(text: str) -> str:
-    if "## Likely Cause" in text:
+    if "## Meal Score" in text:
         return text
 
     return f"""## Insight
@@ -278,20 +391,62 @@ Try asking again with more detail.
 """
 
 
-# ---------------- MAIN ----------------
-def build_response(query: str):
-    q = normalize(query)
+# ---------------- TTS ----------------
+def generate_tts(text: str):
+    try:
+        speech = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=text
+        )
+        audio_bytes = speech.read()
+        return base64.b64encode(audio_bytes).decode("utf-8")
+
+    except Exception as e:
+        print("TTS ERROR:", e)
+        return None
+
+
+# ---------------- BUILD RESPONSE ----------------
+async def build_response(query: str):
+    if not query:
+        return {"text": "Empty query", "score": 0}
+
+    q = correct_spelling(query)
+    q = normalize(q)
+
     ctx = detect_context(q)
     intent = detect_intent(q)
+
+    score = compute_score(intent, q)
+    print("SCORE:", score)
+
+    if intent == "unknown":
+        q = correct_with_llm(q)
+        intent = detect_intent(q)
 
     print("\n--- REQUEST ---")
     print("QUERY:", q)
     print("INTENT:", intent)
 
-    score = compute_score(intent, q)
-    print("SCORE:", score)
+    if intent == "unknown":
+        return {
+        "text": """## Insight
+I can help with:
+- meals
+- glucose
+- blood pressure
+- cholesterol
 
-    # 🔥 SCROLL MODE (SAFE INJECTION)
+## Try This
+Say something like:
+- "rice dal paneer"
+- "my sugar is high after meal"
+- "how to reduce BP"
+""",
+        "score": 0
+        }
+
     if SCROLL_TEST:
         print("🔥 SCROLL TEST MODE")
         return {"text": scroll_test_response(), "score": score}
@@ -301,10 +456,23 @@ def build_response(query: str):
 
     if USE_LLM:
         try:
-            result = llm_response(q, ctx)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(llm_response, q, ctx),
+                timeout=15
+            )
             return {"text": enforce_format(result), "score": score}
+
+        except asyncio.TimeoutError:
+            print("LLM TIMEOUT")
+            return {"text": "LLM timed out. Try again.", "score": score}
+
         except Exception as e:
             print("LLM ERROR:", e)
+            return {
+                "text": mock_response(intent),
+                "score": score,
+                "error": str(e)
+            }
 
     return {
         "text": """## Insight
@@ -315,23 +483,227 @@ Try asking about lifestyle, BP, glucose, or cholesterol.""",
         "score": score
     }
 
+def correct_spelling(text: str) -> str:
+    words = text.split()
+    corrected = []
 
-# ---------------- API ----------------
+    for w in words:
+        lw = w.lower()
+
+        # direct correction
+        if lw in COMMON_CORRECTIONS:
+            corrected.append(COMMON_CORRECTIONS[lw])
+            continue
+
+        # fuzzy match (optional but useful)
+        match = difflib.get_close_matches(lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85)
+        if match:
+            corrected.append(COMMON_CORRECTIONS[match[0]])
+        else:
+            corrected.append(w)
+
+    return " ".join(corrected)
+
+def correct_with_llm(text: str) -> str:
+    try:
+        res = completion(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Correct spelling only. Do not change meaning. Return only corrected sentence."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+        )
+        return extract_text(res).strip()
+    except:
+        return text
+
+# ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
 @app.post("/query")
 async def handle_query(request: Request):
+    """
+    Single endpoint for both voice and keyboard input.
+
+    Voice path:   multipart/form-data with audio_file field
+                  Runs Whisper → validate (A→B→C→D) → LLM → TTS → returns audio
+
+    Keyboard path: application/json with {query, voice: false}
+                   Runs LLM only → audio is always null
+    """
     start = time.time()
+    content_type = request.headers.get("content-type", "")
 
-    data = await request.json()
-    query = (data.get("query") or "").strip()
+    # ── VOICE PATH ──────────────────────────────────────────────────────────
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        audio_file = form.get("audio_file")
 
-    result = build_response(query)
+        if audio_file is None:
+            return {
+                "status": "error",
+                "message": "Could not understand. Please try again.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-    response = {
-        "status": "success",
-        "message": result.get("text", ""),
-        "score": result.get("score")
-    }
+        audio_bytes = await audio_file.read()
+        print(f"\n--- VOICE REQUEST ---")
+        print(f"File: {audio_file.filename}, Size: {len(audio_bytes)} bytes")
 
-    print("⏱️", round(time.time() - start, 2), "sec\n")
+        if len(audio_bytes) == 0:
+            return {
+                "status": "error",
+                "message": "Could not understand. Please try again.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
 
-    return response
+        if len(audio_bytes) > 25 * 1024 * 1024:
+            return {
+                "status": "error",
+                "message": "Audio file too large.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        # Whisper transcription
+        audio_io = io.BytesIO(audio_bytes)
+        filename = (audio_file.filename or "").lower()
+        ext = filename.split(".")[-1] if "." in filename else "m4a"
+        audio_io.name = audio_file.filename or f"audio.{ext}"
+
+        try:
+            transcript_obj = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=audio_io
+                    )
+                ),
+                timeout=10
+            )
+            raw_transcript = (transcript_obj.text or "").strip()
+        except asyncio.TimeoutError:
+            print("WHISPER TIMEOUT")
+            return {
+                "status": "error",
+                "message": "Could not understand. Please try again.",
+                "cleaned_query": "",
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        print("WHISPER RAW:", raw_transcript)
+
+        error_msg, cleaned_query = validate_voice_query(raw_transcript)
+
+        if error_msg:
+            print("VALIDATION FAILED:", error_msg)
+            return {
+                "status": "error",
+                "message": error_msg,
+                "cleaned_query": cleaned_query,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        print("CLEANED QUERY:", cleaned_query)
+
+        result = await build_response(cleaned_query)
+        text = result.get("text", "")
+        if not text:
+            text = "Something went wrong. Please try again."
+        score = result.get("score", 0)
+
+        # Backend selects TTS text — frontend never trims or selects
+        tts_text = text
+        try:
+            audio = await asyncio.wait_for(
+                asyncio.to_thread(generate_tts, tts_text),
+                timeout=15
+            )
+        except asyncio.TimeoutError:
+            print("TTS TIMEOUT")
+            audio = None
+
+        print("⏱️", round(time.time() - start, 2), "sec\n")
+
+        return {
+            "status": "success",
+            "message": text,
+            "cleaned_query": cleaned_query,
+            "tts_text": tts_text if audio else None,
+            "audio": audio,
+            "score": score,
+        }
+
+    # ── KEYBOARD PATH ────────────────────────────────────────────────────────
+    else:
+        data = await request.json()
+        query = (data.get("query") or "").strip()
+        voice = bool(data.get("voice", False))
+
+        if voice:
+            print("WARNING: /query keyboard path received voice:true — treating as keyboard")
+
+        print(f"\n--- KEYBOARD REQUEST ---")
+        print(f"QUERY: {query}")
+
+        if not query:
+            return {
+                "status": "error",
+                "message": "Please enter a question.",
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        if len(query) > 500:
+            return {
+                "status": "error",
+                "message": "Query too long.",
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        if len(query.split()) <= 1:
+            return {
+                "status": "success",
+                "message": "Please say a full sentence like 'my sugar is high after meal'",
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": 0,
+            }
+
+        result = await build_response(query)
+        text = result.get("text", "")
+        score = result.get("score", 0)
+
+        print("⏱️", round(time.time() - start, 2), "sec\n")
+
+        # audio is always null for keyboard — spec constraint
+        return {
+            "status": "success",
+            "message": text,
+            "cleaned_query": None,
+            "tts_text": None,
+            "audio": None,
+            "score": score,
+        }

@@ -5,7 +5,7 @@ type Props = {
   onSelect: (value: string) => void;
 };
 
-const chips = ["BP", "Glucose", "Cholesterol"];
+const chips = ["Check BP", "Check Glucose", "Check Cholesterol"];
 
 export default function QuickChips({ onSelect }: Props) {
   return (
