@@ -798,17 +798,6 @@ export default function HomeScreen() {
     sendKeyboardQuery(value, traceId);
   };
 
-  const handleActionChip = (label: string) => {
-    console.log("Chip pressed:", label);
-
-    if (label.toLowerCase().includes("analyze")) {
-      router.push(`/meal-main?mode=${UX_RUNMODE}&intent=analyze_meal`); // 👈 your Analyze tab
-    }
-    if (label.toLowerCase().includes("improve")) {
-      router.push(`/meal-main?mode=${UX_RUNMODE}&intent=improve_meal`); // 👈 your Improve tab
-    }
-  };
-
   // ─── App lifecycle ────────────────────────────────────────────────────────
 
 
@@ -1020,45 +1009,19 @@ export default function HomeScreen() {
                 paddingBottom: 6,
               }}
             >
-              <Text
+              <TouchableOpacity
+                onPress={() => router.replace(`/meal-main?mode=${UX_RUNMODE}&intent=analyze_meal`)}
                 style={{
-                  color: C.muted,
-                  fontSize: 12,
-                  marginBottom: 6,
+                  backgroundColor: C.accent,
+                  paddingVertical: 14,
+                  borderRadius: 14,
+                  alignItems: "center",
                 }}
               >
-                Quick actions
-              </Text>
-
-              <View
-                style={{
-                  flexDirection: "row",
-                  flexWrap: "wrap",
-                  justifyContent: "space-between",
-                }}
-              >
-                {[
-                  "🍽 Analyze my meal",
-                  "🥗 Improve my meal",
-                ].map((label) => (
-                  <TouchableOpacity
-                    key={label}
-                    onPress={() => handleActionChip(label)}
-                    style={{
-                      width: "48%",
-                      backgroundColor: C.surfaceAlt,
-                      paddingVertical: 10,
-                      paddingHorizontal: 12,
-                      borderRadius: 14,
-                      marginBottom: 8,
-                    }}
-                  >
-                    <Text style={{ color: C.text }}>
-                      {label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+                <Text style={{ color: "#000", fontWeight: "600" }}>
+                  📸 Capture Meal
+                </Text>
+              </TouchableOpacity>
             </View>
             {/* Input bar */}
             <View
