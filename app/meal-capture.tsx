@@ -16,8 +16,15 @@ import {
 } from "react-native";
 
 const FOOD_ITEMS = [
-  "salad", "chicken", "rice", "eggs", "beans",
-  "yogurt", "paneer", "vegetables", "fruit",
+  "Rice 1 cup",
+  "Chicken 100 g",
+  "Chips 50 g",
+  "Beans 100 g",
+  "Milk 200 ml",
+  "Egg 1 piece",
+  "Salad 100 g",
+  "Yogurt 150 g",
+  "Paneer 100 g",
 ];
 
 export default function MealCaptureScreen() {
@@ -139,7 +146,7 @@ export default function MealCaptureScreen() {
         <TextInput
           value={input}
           onChangeText={setInput}
-          placeholder="Describe your meal..."
+          placeholder="Rice 1 cup, Chicken 100 g, Milk 200 ml"
           placeholderTextColor={C.muted}
           style={styles.input}
           onSubmitEditing={handleSend}

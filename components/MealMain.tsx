@@ -19,13 +19,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Stage = "capture" | "confirm" | "processing" | "result";
-type MealUnit = "g" | "cup" | "piece";
+type MealUnit = "g" | "ml" | "cup" | "piece";
 
 type MealItem = {
   id: string;
   name: string;
   quantity?: number;
   unit?: MealUnit;
+  inferred?: boolean;
 };
 
 type NutritionSummary = {
@@ -141,31 +142,58 @@ function extractMealItems(text: string): MealItem[] {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  const COMBINED_QTY = /^(\d+(?:\.\d+)?)(g|ml|cups?|pieces?|kg)$/i;
+  const KNOWN_UNITS = new Set(["g", "ml", "cup", "cups", "piece", "pieces", "kg"]);
+
+  const parseUnit = (raw: string): MealUnit | undefined => {
+    const u = raw.toLowerCase();
+    if (u === "g" || u === "gram" || u === "grams" || u === "kg") return "g";
+    if (u === "ml") return "ml";
+    if (u === "cup" || u === "cups") return "cup";
+    if (u === "piece" || u === "pieces") return "piece";
+    return undefined;
+  };
+
   const items: MealItem[] = [];
 
   parts.forEach((part, i) => {
-    // 🔥 SAFE UNIT MATCH (word boundary aware)
-    const match = part.match(
-      /^(\d+\.?\d*)?\s*(cups?|grams?|pieces?|slices?|\bg\b)?\s*(?:of\s+)?(.+)$/
-    );
+    const tokens = part.split(/\s+/).filter(Boolean);
+    const nameTokens: string[] = [];
+    let qty: number | undefined;
+    let unit: MealUnit | undefined;
 
-    if (!match) return;
+    let j = 0;
+    while (j < tokens.length) {
+      const tok = tokens[j];
+      const next = tokens[j + 1];
 
-    let qty = match[1] ? parseFloat(match[1]) : 1;
-    let unitRaw = match[2] || "";
-    let name = match[3]?.trim();
+      // Combined token: "100g", "200ml", "2piece"
+      const combined = tok.match(COMBINED_QTY);
+      if (combined) {
+        if (qty == null) { qty = parseFloat(combined[1]); unit = parseUnit(combined[2]); }
+        j++;
+        continue;
+      }
+
+      // Separated tokens: "100 g", "200 ml"
+      if (/^\d+(?:\.\d+)?$/.test(tok) && next && KNOWN_UNITS.has(next.toLowerCase())) {
+        if (qty == null) { qty = parseFloat(tok); unit = parseUnit(next); }
+        j += 2;
+        continue;
+      }
+
+      nameTokens.push(tok);
+      j++;
+    }
+
+    let name = nameTokens.join(" ").trim();
+
+    // remove "of" prefix
+    name = name.replace(/^of\s+/i, "").trim();
 
     if (!name || name.length < 2) return;
 
-    // 🔥 HANDLE "100g chicken" style (no space)
-    const tightGramMatch = name.match(/^(\d+\.?\d*)g\s+(.+)$/);
-    if (tightGramMatch) {
-      qty = parseFloat(tightGramMatch[1]);
-      unitRaw = "g";
-      name = tightGramMatch[2];
-    }
-
-    // 🔥 APPLY ALIAS MAPPING (smarter but safe)
+    // alias mapping
     for (const key in FOOD_ALIASES) {
       if (name.includes(key)) {
         console.log(`🔁 Alias mapped: ${name} → ${FOOD_ALIASES[key]}`);
@@ -174,17 +202,11 @@ function extractMealItems(text: string): MealItem[] {
       }
     }
 
-    // 🔥 UNIT NORMALIZATION (STRICT)
-    let unit: MealUnit = "piece";
-
-    if (/^cups?/.test(unitRaw)) unit = "cup";
-    else if (/^grams?$/.test(unitRaw) || unitRaw === "g") unit = "g";
-
     items.push({
       id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
       name,
-      quantity: qty,
-      unit,
+      ...(qty != null ? { quantity: qty } : {}),
+      ...(unit != null ? { unit } : {}),
     });
   });
 
@@ -303,6 +325,94 @@ function computeImprovementSuggestions(nutrition: NutritionSummary): string[] {
   return suggestions;
 }
 
+// ─── Inference helpers ────────────────────────────────────────────────────────
+
+function inferUnit(name: string): MealUnit {
+  const n = name.toLowerCase();
+  if (/milk|juice|oil|coffee|tea/.test(n)) return "ml";
+  if (/\beggs?\b|roti|chapati|apple|banana/.test(n)) return "piece";
+  return "g";
+}
+
+function getDefaultPortion(name: string, unit: MealUnit): number {
+  if (unit === "piece") return 1;
+  if (unit === "ml") return 200;
+  const n = name.toLowerCase();
+  if (n.includes("rice")) return 150;
+  if (n.includes("chicken")) return 120;
+  if (n.includes("chips")) return 50;
+  if (n.includes("beans")) return 100;
+  return 100;
+}
+
+function applyInference(item: MealItem): MealItem {
+  if (item.quantity != null && item.unit != null) return { ...item, inferred: false };
+  const unit = item.unit ?? inferUnit(item.name);
+  const quantity = item.quantity ?? getDefaultPortion(item.name, unit);
+  return { ...item, quantity, unit, inferred: true };
+}
+
+function tokenSplit(segment: string): string[] {
+  const tokens = segment.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return [];
+
+  const isQtyToken = (i: number): number => {
+    const tok = tokens[i];
+    const next = tokens[i + 1];
+    if (/^\d+(\.\d+)?(g|ml|kg|cups?|pieces?)$/i.test(tok)) return 1;
+    if (/^\d+(\.\d+)?$/.test(tok) && next && /^(g|ml|kg|cups?|pieces?)$/i.test(next)) return 2;
+    return 0;
+  };
+
+  let hasQty = false;
+  for (let i = 0; i < tokens.length; i++) {
+    if (isQtyToken(i)) { hasQty = true; break; }
+  }
+  if (!hasQty) return [segment];
+
+  const result: string[] = [];
+  let current: string[] = [];
+  let currentHasQty = false;
+
+  let i = 0;
+  while (i < tokens.length) {
+    const qtyLen = isQtyToken(i);
+
+    if (qtyLen > 0) {
+      if (current.length > 0 && !currentHasQty) {
+        // Food-first: qty closes the current food phrase
+        for (let j = 0; j < qtyLen; j++) current.push(tokens[i + j]);
+        i += qtyLen;
+        result.push(current.join(" "));
+        current = [];
+        currentHasQty = false;
+      } else {
+        // Qty-first OR current already has a qty → flush and start fresh
+        if (current.length > 0) { result.push(current.join(" ")); current = []; }
+        for (let j = 0; j < qtyLen; j++) current.push(tokens[i + j]);
+        i += qtyLen;
+        currentHasQty = true;
+      }
+    } else {
+      current.push(tokens[i]);
+      i++;
+    }
+  }
+
+  if (current.length > 0) result.push(current.join(" "));
+
+  return result;
+}
+
+function splitMealItems(text: string): string[] {
+  return text
+    .split(",")
+    .flatMap((s) => s.split(/\s+and\s+/i))
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .flatMap(tokenSplit);
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function ItemRow({
@@ -338,52 +448,16 @@ function ItemRow({
         }}
       />
 
-      <TextInput
-        value={item.name}
-        onChangeText={(v) => onUpdate(item.id, { name: v })}
-        style={{ flex: 1, color: C.text, fontSize: 15 }}
-        placeholderTextColor={C.muted}
-      />
-
-      <TextInput
-        value={String(item.quantity ?? 1)}
-        onChangeText={(v) => onUpdate(item.id, { quantity: parseFloat(v) || 1 })}
-        keyboardType="numeric"
-        style={{
-          color: C.accent,
-          fontSize: 14,
-          width: 34,
-          textAlign: "center",
-          marginHorizontal: 6,
-        }}
-      />
-      <TouchableOpacity
-        onPress={() => {
-          const nextUnit =
-            item.unit === "g"
-              ? "cup"
-              : item.unit === "cup"
-                ? "piece"
-                : "g";
-
-          onUpdate(item.id, { unit: nextUnit });
-        }}
-        style={{
-          backgroundColor: C.surfaceAlt,
-          borderRadius: 6,
-          paddingHorizontal: 6,
-          paddingVertical: 3,
-          marginHorizontal: 4,
-        }}
-      >
-        <Text style={{ color: C.accent, fontSize: 12 }}>
-          {item.unit === "g"
-            ? "g"
-            : item.unit === "cup"
-              ? "cup"
-              : "pc"}
-        </Text>
-      </TouchableOpacity>
+      <View style={{ flex: 1 }}>
+        {console.log("UI item:", item.name) as any}
+        <TextInput
+          value={item.name}
+          onChangeText={(v) => onUpdate(item.id, { name: v, inferred: false })}
+          style={{ color: C.text, fontSize: 15 }}
+          placeholderTextColor={C.muted}
+          placeholder="e.g. Chicken 100 g"
+        />
+      </View>
 
       <TouchableOpacity
         onPress={() => onDelete(item.id)}
@@ -413,19 +487,9 @@ function ConfirmStage({
     onChange(items.filter((item) => item.id !== id));
 
   const addItem = () => {
-    const name = addText.trim();
-    if (!name) return;
-
-    onChange([
-      ...items,
-      {
-        id: `${Date.now()}`,
-        name: name.toLowerCase(),
-        quantity: 1,
-        unit: "piece",
-      },
-    ]);
-
+    const raw = addText.trim();
+    if (!raw) return;
+    onChange([...items, { id: `${Date.now()}`, name: raw, inferred: false }]);
     setAddText("");
   };
 
@@ -465,7 +529,7 @@ function ConfirmStage({
         <TextInput
           value={addText}
           onChangeText={setAddText}
-          placeholder="+ Add item"
+          placeholder="e.g. Chicken 100 g"
           placeholderTextColor={C.muted}
           onSubmitEditing={addItem}
           returnKeyType="done"
@@ -795,14 +859,27 @@ function deriveBehavior(nutrition: NutritionSummary, result: MealResult) {
   else if (fiber >= 8) sequence = "Start with fiber, then rest";
 
   let walk = "No walk required";
-  if (netCarbs > 60) walk = "Walk 20–30 min (Zone 2) within 30 min after meal";
-  else if (netCarbs > 40) walk = "Walk 10–15 min after meal";
+  if (netCarbs > 60) walk = "Walk 25 minutes (Zone 2) within 30 minutes after this meal";
+  else if (netCarbs > 40) walk = "Walk 15 minutes within 30 minutes after this meal";
 
-  let nextMeal = "Next meal in 3–4 hours";
-  if (netCarbs > 70) nextMeal = "Next meal in 4–5 hours";
-  else if (fiber >= 10 && protein >= 20) nextMeal = "Next meal in 2–3 hours if hungry";
+  let hoursUntilNextMeal = 3;
+  if (netCarbs > 70) hoursUntilNextMeal = 4;
+  else if (fiber >= 10 && protein >= 20) hoursUntilNextMeal = 2;
 
-  return { sequence, walk, nextMeal };
+  const now = new Date();
+  const nextMealDate = new Date(now.getTime() + hoursUntilNextMeal * 60 * 60 * 1000);
+  const hours = nextMealDate.getHours();
+  const minutes = nextMealDate.getMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  const displayHour = hours % 12 === 0 ? 12 : hours % 12;
+  const nextMeal = `Your next meal is at ~${displayHour}:${minutes} ${ampm}`;
+
+  let lastMealGuidance: string | null = null;
+  if (now.getHours() >= 16) {
+    lastMealGuidance = "If this is your last meal, finish ≥2–3 hours before sleep (ideally by ~7 PM)";
+  }
+
+  return { sequence, walk, nextMeal, lastMealGuidance };
 }
 
 // ─── Image placeholder ────────────────────────────────────────────────────────
@@ -879,46 +956,14 @@ export default function MealMain() {
     setMealResult(null);
     setImprovements([]);
 
-    const items = extractMealItems(normalized);
+    // Split first, parse later (in runMealProcessing)
+    const segments = splitMealItems(normalized);
+    const items: MealItem[] = segments.map((seg, i) => ({
+      id: `${Date.now()}-${i}`,
+      name: seg.trim(),
+      inferred: false,
+    }));
 
-    // ❌ parser fallback path
-    if (items.length === 0) {
-      console.log("⚠️ Prefill parsing failed");
-
-      const fallbackItems = normalized
-        .split(/\s*(?:,|and|with|&)\s*/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      if (fallbackItems.length === 0) {
-        fallbackItems.push(normalized);
-      }
-
-      setMealItems(
-        fallbackItems.map((name, i) => ({
-          id: `${normalized}-${i}`,
-          name,
-          quantity: 1,
-          unit: "piece",
-        }))
-      );
-
-      setStage("confirm");
-
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ y: 0, animated: true });
-      });
-
-      handledPrefillRef.current = normalized;
-
-      setTimeout(() => {
-        router.setParams({ prefill: undefined });
-      }, 0);
-
-      return;
-    }
-
-    // ✅ normal flow
     setMealItems(items);
     setStage("confirm");
 
@@ -940,7 +985,14 @@ export default function MealMain() {
     if (!uri) return;
     if (handledImageRef.current === uri) return;
 
-    const newItems = extractMealItems(mockMealFromImage(uri));
+    const mockText = mockMealFromImage(uri);
+    const segments = splitMealItems(mockText);
+    const newItems: MealItem[] = segments.map((seg, i) => ({
+      id: `${Date.now()}-${i}`,
+      name: seg.trim(),
+      inferred: false,
+    }));
+    console.log("UI items:", newItems.map((it) => it.name));
     handledImageRef.current = uri;
     setMealItems(newItems);
     setStage("confirm");
@@ -975,7 +1027,18 @@ export default function MealMain() {
   };
 
   const runMealProcessing = (items: MealItem[]) => {
-    const nutrition = estimateNutrition(items);
+    const parsedItems = items.flatMap((item) => {
+      if (item.quantity != null && item.unit) return [item];
+      const segments = splitMealItems(item.name);
+      return segments.flatMap((seg, i) => {
+        const results = extractMealItems(seg);
+        if (results.length > 0) {
+          return results.map((r) => applyInference({ ...r, id: `${item.id}_${i}` }));
+        }
+        return [applyInference({ id: `${item.id}_${i}`, name: seg })];
+      });
+    });
+    const nutrition = estimateNutrition(parsedItems);
     const result = computeResult(nutrition);
     const suggestions = computeImprovementSuggestions(nutrition);
 
@@ -998,9 +1061,8 @@ export default function MealMain() {
 
     console.log("👉 INPUT:", text);
 
-    const items = extractMealItems(text);
-
-    if (items.length === 0) {
+    const segments = splitMealItems(text);
+    if (segments.length === 0) {
       setMicStatus("Couldn't understand meal. Try again.");
       return;
     }
@@ -1010,7 +1072,14 @@ export default function MealMain() {
     setMealResult(null);
     setImprovements([]);
 
-    // send new meal into edit/confirm
+    const items: MealItem[] = segments.map((seg, i) => ({
+      id: `${Date.now()}-${i}`,
+      name: seg.trim(),
+      inferred: false,
+    }));
+
+    console.log("UI items:", items.map((it) => it.name));
+
     setMealItems(items);
     setStage("confirm");
     setBottomInput("");
@@ -1104,7 +1173,10 @@ export default function MealMain() {
                   content={
                     `• ${(mealResult as any)?.sequence}\n` +
                     `• ${(mealResult as any)?.walk}\n` +
-                    `• ${(mealResult as any)?.nextMeal}`
+                    `• ${(mealResult as any)?.nextMeal}` +
+                    ((mealResult as any)?.lastMealGuidance
+                      ? `\n• ${(mealResult as any)?.lastMealGuidance}`
+                      : "")
                   }
                 />
                 {(() => {
@@ -1220,7 +1292,7 @@ export default function MealMain() {
                 setBottomInput(text);
                 if (micStatus) setMicStatus(null);
               }}
-              placeholder="Describe your meal…"
+              placeholder="Rice 1 cup, Chicken 100 g, Milk 200 ml"
               placeholderTextColor={C.muted}
               style={{
                 flex: 1,
