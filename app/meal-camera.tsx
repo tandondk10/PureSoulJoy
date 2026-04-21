@@ -19,6 +19,9 @@ export default function MealCameraScreen() {
         <TouchableOpacity style={styles.permBtn} onPress={requestPermission}>
           <Text style={styles.permBtnText}>Grant Permission</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={styles.cancelLink} onPress={() => router.back()}>
+          <Text style={styles.cancelLinkText}>Cancel</Text>
+        </TouchableOpacity>
       </SafeAreaView>
     );
   }
@@ -31,9 +34,22 @@ export default function MealCameraScreen() {
     }
   };
 
+  const handleCancel = () => {
+    router.back();
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
       <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back" />
+
+      {/* Cancel — top-left, always visible */}
+      <SafeAreaView style={styles.cancelRow} edges={["top"]}>
+        <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel}>
+          <Text style={styles.cancelText}>Cancel</Text>
+        </TouchableOpacity>
+      </SafeAreaView>
+
+      {/* Capture — bottom center */}
       <View style={styles.captureRow}>
         <TouchableOpacity style={styles.captureBtn} onPress={handleCapture}>
           <Text style={styles.captureBtnText}>Capture</Text>
@@ -65,6 +81,33 @@ const styles = StyleSheet.create({
   },
   permBtnText: {
     color: "#000",
+    fontWeight: "600",
+    fontSize: 15,
+  },
+  cancelLink: {
+    marginTop: 16,
+  },
+  cancelLinkText: {
+    color: C.muted,
+    fontSize: 15,
+  },
+  cancelRow: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+  },
+  cancelBtn: {
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(0,0,0,0.5)",
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+  },
+  cancelText: {
+    color: "#fff",
     fontWeight: "600",
     fontSize: 15,
   },
