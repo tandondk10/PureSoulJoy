@@ -5,8 +5,10 @@ import { Text, View } from "react-native";
 
 export default function AppHeader({
   showProfile = true,
+  rightAction,
 }: {
   showProfile?: boolean;
+  rightAction?: React.ReactNode;
 }) {
   const { user } = useUser();
 
@@ -26,12 +28,15 @@ export default function AppHeader({
           shadowOffset: { width: 0, height: 2 },
         }}
       >
-        {/* 🔹 TITLE */}
-        <Text style={{ fontSize: 26, fontWeight: "600", lineHeight: 28 }}>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          {/* 🔹 TITLE */}
+          <Text style={{ fontSize: 26, fontWeight: "600", lineHeight: 28 }}>
           <Text style={{ color: C.text }}>Build</Text>
           <Text style={{ color: C.accent }}>Joy</Text>
           <Text style={{ color: C.muted, opacity: 0.5 }}>{" · Health"}</Text>
         </Text>
+          {rightAction && <View>{rightAction}</View>}
+        </View>
 
         {/* 🔹 TAGLINE */}
         <Text
