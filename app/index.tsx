@@ -20,6 +20,7 @@ import {
 
 import AppHeader from "@/components/AppHeader";
 import { useUser } from "@/context/UserContext";
+import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SectionCard from "../components/SectionCard";
@@ -85,6 +86,8 @@ export default function HomeScreen() {
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const discardResponseRef = useRef(false);
+
+  const navigatedToMealRef = useRef(false);
 
   const scrollRef = useRef<ScrollView>(null);
   const blockRefs = useRef<Record<string, View | null>>({});
@@ -890,6 +893,16 @@ export default function HomeScreen() {
     return () => sub.remove();
   }, []);
 
+  useFocusEffect(
+    React.useCallback(() => {
+      if (navigatedToMealRef.current) {
+        setInput("");
+        setPendingMeal(null);
+        navigatedToMealRef.current = false;
+      }
+    }, [])
+  );
+
   // ─── Render ───────────────────────────────────────────────────────────────
 
   const isProcessing = voiceState === "PROCESSING";
@@ -1069,6 +1082,7 @@ export default function HomeScreen() {
                         if (!pendingMeal) return;
 
                         setStatusText(null);
+                        navigatedToMealRef.current = true;
 
                         router.push(
                           `/meal-main?prefill=${encodeURIComponent(pendingMeal)}`
@@ -1112,13 +1126,8 @@ export default function HomeScreen() {
             <View style={{ alignItems: "center", marginVertical: 10 }}>
               <TouchableOpacity
                 onPress={() => {
-                  const meal = input.trim();
-
-                  if (meal && looksLikeMeal(meal)) {
-                    router.push(`/meal-main?prefill=${encodeURIComponent(meal)}`);
-                  } else {
-                    router.push(`/meal-main`);
-                  }
+                  navigatedToMealRef.current = true;
+                  router.push("/meal-capture");
                 }}
                 style={{
                   backgroundColor: C.accent,

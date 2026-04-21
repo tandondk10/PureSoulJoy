@@ -3,6 +3,8 @@ import { C } from "@/constants/colors";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -15,7 +17,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Stage = "capture" | "confirm" | "result";
+type Stage = "capture" | "confirm" | "processing" | "result";
 type MealUnit = "g" | "cup" | "piece";
 
 type MealItem = {
@@ -104,7 +106,6 @@ const FOODS: Record<string, FoodEntry> = {
 function extractMealItems(text: string): MealItem[] {
   console.log("🔥 extractMealItems CALLED with:", text);
 
-  // 🔥 FOOD ALIASES (critical intelligence layer)
   const FOOD_ALIASES: Record<string, string> = {
     saag: "spinach",
     dal: "lentils",
@@ -125,7 +126,7 @@ function extractMealItems(text: string): MealItem[] {
   // 🔥 STEP 4 — normalize connectors → commas
   cleaned = cleaned.replace(/\b(and|with|plus|then|&)\b/g, ",");
 
-  // 🔥 STEP 5 — remove noise
+  // 🔥 STEP 5 — remove noise (KEEP letters intact)
   cleaned = cleaned
     .replace(/[^a-z0-9.,\s]/g, " ")
     .replace(/\s+/g, " ")
@@ -142,8 +143,9 @@ function extractMealItems(text: string): MealItem[] {
   const items: MealItem[] = [];
 
   parts.forEach((part, i) => {
+    // 🔥 SAFE UNIT MATCH (word boundary aware)
     const match = part.match(
-      /^(\d+\.?\d*)?\s*(cups?|grams?|pieces?|slices?|g)?\s*(?:of\s+)?(.+)$/
+      /^(\d+\.?\d*)?\s*(cups?|grams?|pieces?|slices?|\bg\b)?\s*(?:of\s+)?(.+)$/
     );
 
     if (!match) return;
@@ -154,8 +156,15 @@ function extractMealItems(text: string): MealItem[] {
 
     if (!name || name.length < 2) return;
 
-    // 🔥 APPLY ALIAS MAPPING
-    // 🔥 SMART ALIAS MATCH (handles "chana salad", "saag curry", etc.)
+    // 🔥 HANDLE "100g chicken" style (no space)
+    const tightGramMatch = name.match(/^(\d+\.?\d*)g\s+(.+)$/);
+    if (tightGramMatch) {
+      qty = parseFloat(tightGramMatch[1]);
+      unitRaw = "g";
+      name = tightGramMatch[2];
+    }
+
+    // 🔥 APPLY ALIAS MAPPING (smarter but safe)
     for (const key in FOOD_ALIASES) {
       if (name.includes(key)) {
         console.log(`🔁 Alias mapped: ${name} → ${FOOD_ALIASES[key]}`);
@@ -164,10 +173,11 @@ function extractMealItems(text: string): MealItem[] {
       }
     }
 
-    // 🔥 unit normalization
+    // 🔥 UNIT NORMALIZATION (STRICT)
     let unit: MealUnit = "piece";
-    if (unitRaw.startsWith("cup")) unit = "cup";
-    else if (unitRaw.startsWith("g")) unit = "g";
+
+    if (/^cups?/.test(unitRaw)) unit = "cup";
+    else if (/^grams?$/.test(unitRaw) || unitRaw === "g") unit = "g";
 
     items.push({
       id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
@@ -176,8 +186,6 @@ function extractMealItems(text: string): MealItem[] {
       unit,
     });
   });
-
-  console.log("✅ PARSED ITEMS FINAL:", items);
 
   return items;
 }
@@ -776,13 +784,31 @@ function ResultStage({
   );
 }
 
+// ─── Image placeholder ────────────────────────────────────────────────────────
+
+const IMAGE_MEAL_PROFILES = [
+  "rice, dal, salad",
+  "chicken, bread, yogurt",
+  "eggs, beans, vegetables",
+  "paneer, roti, spinach",
+  "oats, banana, milk",
+  "fish, sweet potato, broccoli",
+  "tofu, naan, chickpeas",
+  "pasta, chicken breast, salad",
+];
+
+function mockMealFromImage(uri: string): string {
+  const hash = uri.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return IMAGE_MEAL_PROFILES[hash % IMAGE_MEAL_PROFILES.length];
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function MealMain() {
 
   // 🔥 1. HOOKS FIRST
   const router = useRouter();
-  const { prefill } = useLocalSearchParams();
+  const { prefill, image } = useLocalSearchParams();
   const scrollRef = useRef<ScrollView>(null);
 
   // 🔥 2. STATE (MUST be before effects)
@@ -794,6 +820,7 @@ export default function MealMain() {
 
   // 🔥 3. REFS
   const handledPrefillRef = useRef<string | null>(null);
+  const handledImageRef = useRef<string | null>(null);
 
   // 🔥 4. DEBUG EFFECTS
   useEffect(() => {
@@ -886,6 +913,17 @@ export default function MealMain() {
 
   }, [prefill]);
 
+  // 🔥 IMAGE EFFECT
+  useEffect(() => {
+    const uri = typeof image === "string" ? image : null;
+    if (!uri) return;
+    if (handledImageRef.current === uri) return;
+
+    const newItems = extractMealItems(mockMealFromImage(uri));
+    handledImageRef.current = uri;
+    setMealItems(newItems);
+    setStage("confirm");
+  }, [image]);
 
   const [bottomInput, setBottomInput] = useState("");
   const [micStatus, setMicStatus] = useState<string | null>(null);
@@ -1001,12 +1039,29 @@ export default function MealMain() {
               </Text>
             )}
 
+            {/* PROCESSING (photo) */}
+            {stage === "processing" && (
+              <View style={{ alignItems: "center", marginTop: 40 }}>
+                {typeof image === "string" && image.length > 0 && (
+                  <Image
+                    source={{ uri: image }}
+                    style={{ width: "100%", height: 220, borderRadius: 14, marginBottom: 20 }}
+                    resizeMode="cover"
+                  />
+                )}
+                <ActivityIndicator color={C.accent} size="large" />
+                <Text style={{ color: C.muted, fontSize: 14, marginTop: 12 }}>
+                  Analyzing photo…
+                </Text>
+              </View>
+            )}
+
             {/* ✅ CONFIRM */}
             {stage === "confirm" && (
               <ConfirmStage
                 items={mealItems}
                 onChange={setMealItems}
-                onConfirm={() => runMealProcessing(mealItems)}
+                onConfirm={() => { setStage("processing"); runMealProcessing(mealItems); }}
               />
             )}
 
@@ -1029,6 +1084,23 @@ export default function MealMain() {
             </View>
           )}
 
+          {/* Capture Another Meal */}
+          <View style={{ alignItems: "center", marginBottom: 6 }}>
+            <TouchableOpacity
+              onPress={() => router.push("/meal-capture")}
+              style={{
+                backgroundColor: C.accent,
+                paddingVertical: 10,
+                paddingHorizontal: 24,
+                borderRadius: 12,
+              }}
+            >
+              <Text style={{ color: "#000", fontWeight: "600", fontSize: 14 }}>
+                📸 Capture Another Meal
+              </Text>
+            </TouchableOpacity>
+          </View>
+
           {/* 🔥 Bottom Bar */}
           <View
             style={{
@@ -1045,7 +1117,7 @@ export default function MealMain() {
           >
             {/* Home */}
             <TouchableOpacity
-              onPress={() => router.back()}
+              onPress={() => router.replace("/")}
               style={{
                 marginRight: 6,
                 paddingHorizontal: 10,
