@@ -1,5 +1,6 @@
 import { C } from "@/constants/colors";
 import { profiles } from "@/data/profiles";
+import useKeyboardVisible from "@/hooks/useKeyboardVisible";
 //import { loadUser, saveUser } from "@/utils/storage";
 import { loadUser } from "@/utils/storage";
 import { Audio } from "expo-av";
@@ -15,6 +16,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View,
 } from "react-native";
 
@@ -906,6 +908,7 @@ export default function HomeScreen() {
 
   const isProcessing = voiceState === "PROCESSING";
   const isRecording = voiceState === "RECORDING";
+  const isKeyboardVisible = useKeyboardVisible();
 
 
   const isErrorStatus =
@@ -929,6 +932,7 @@ export default function HomeScreen() {
           behavior={Platform.OS === "ios" ? "padding" : "height"}
           keyboardVerticalOffset={80}
         >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <View style={{ flex: 1 }}>
 
             {/* 🔥 HEADER (NON-SCROLLING) */}
@@ -1122,29 +1126,31 @@ export default function HomeScreen() {
             )}
 
             {/* CAPTURE BUTTON */}
-            <View style={{ alignItems: "center", paddingHorizontal: 16, marginVertical: 10 }}>
-              <View style={{ width: 260 }}>
-                <TouchableOpacity
-                  onPress={() => {
-                    navigatedToMealRef.current = true;
-                    router.push("/meal-capture");
-                  }}
-                  style={{
-                    backgroundColor: C.accent,
-                    paddingVertical: 16,
-                    paddingHorizontal: 20,
-                    borderRadius: 12,
-                    alignItems: "center",
-                    width: "100%",
-                    elevation: 2,
-                  }}
-                >
-                  <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
-                    📸 Capture Meal
-                  </Text>
-                </TouchableOpacity>
+            {!isKeyboardVisible && (
+              <View style={{ alignItems: "center", paddingHorizontal: 16, marginVertical: 10 }}>
+                <View style={{ width: 260 }}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      navigatedToMealRef.current = true;
+                      router.push("/meal-capture");
+                    }}
+                    style={{
+                      backgroundColor: C.accent,
+                      paddingVertical: 16,
+                      paddingHorizontal: 20,
+                      borderRadius: 12,
+                      alignItems: "center",
+                      width: "100%",
+                      elevation: 2,
+                    }}
+                  >
+                    <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
+                      📸 Capture Meal
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-            </View>
+            )}
 
             {/* INPUT BAR */}
             <View
@@ -1205,6 +1211,7 @@ export default function HomeScreen() {
             </View>
 
           </View>
+          </TouchableWithoutFeedback>
         </KeyboardAvoidingView>
       </View>
     </SafeAreaView>

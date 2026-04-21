@@ -1,17 +1,20 @@
 import AppHeader from "@/components/AppHeader";
 import SectionCard from "@/components/SectionCard";
 import { C } from "@/constants/colors";
+import useKeyboardVisible from "@/hooks/useKeyboardVisible";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -952,6 +955,7 @@ export default function MealMain() {
   const router = useRouter();
   const { prefill, image } = useLocalSearchParams();
   const scrollRef = useRef<ScrollView>(null);
+  const isKeyboardVisible = useKeyboardVisible();
 
   // 🔥 2. STATE (MUST be before effects)
   const [stage, setStage] = useState<Stage>("capture");
@@ -1157,18 +1161,29 @@ export default function MealMain() {
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
       >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View style={{ flex: 1, backgroundColor: C.bg }}>
 
           {/* ✅ HEADER (NON-SCROLLING) */}
-          <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
-            <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
-              Meal
-            </Text>
-
-            <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>
-              Meal Impact
-            </Text>
-          </View>
+          {(() => {
+            const STAGE_HEADER: Record<Stage, { title: string; subtitle: string }> = {
+              capture:    { title: "Describe your meal",    subtitle: "Get instant insight before or after you eat" },
+              confirm:    { title: "Review your meal",      subtitle: "Adjust anything before analysis" },
+              processing: { title: "Analyzing your meal",   subtitle: "Calculating impact and next steps" },
+              result:     { title: "Meal Impact",           subtitle: "Here's what to do next" },
+            };
+            const { title, subtitle } = STAGE_HEADER[stage];
+            return (
+              <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+                <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
+                  {title}
+                </Text>
+                <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>
+                  {subtitle}
+                </Text>
+              </View>
+            );
+          })()}
 
           {/* ✅ SCROLL CONTENT ONLY */}
           <ScrollView
@@ -1303,26 +1318,27 @@ export default function MealMain() {
             </View>
           )}
 
-          {/* Capture Another Meal */}
-          <View style={{ alignItems: "center", marginVertical: 6 }}>
-            <View style={{ width: 260 }}>
-              <TouchableOpacity
-                onPress={() => router.push("/meal-capture")}
-                style={{
-                  width: "100%",
-                  backgroundColor: C.accent,
-                  paddingVertical: 16,
-                  borderRadius: 12,
-                  alignItems: "center",
-                  elevation: 2,
-                }}
-              >
-                <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
-                  📸 Capture Another Meal
-                </Text>
-              </TouchableOpacity>
+          {!isKeyboardVisible && (
+            <View style={{ alignItems: "center", marginVertical: 6 }}>
+              <View style={{ width: 260 }}>
+                <TouchableOpacity
+                  onPress={() => router.push("/meal-capture")}
+                  style={{
+                    width: "100%",
+                    backgroundColor: C.accent,
+                    paddingVertical: 16,
+                    borderRadius: 12,
+                    alignItems: "center",
+                    elevation: 2,
+                  }}
+                >
+                  <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
+                    📸 Capture Another Meal
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
+          )}
 
           {/* 🔥 Bottom Bar */}
           <View
@@ -1339,18 +1355,22 @@ export default function MealMain() {
             }}
           >
             {/* Home */}
-            <TouchableOpacity
-              onPress={() => router.replace("/")}
-              style={{
-                marginRight: 6,
-                paddingHorizontal: 10,
-                paddingVertical: 8,
-                borderRadius: 10,
-                backgroundColor: C.surfaceAlt,
-              }}
-            >
-              <Text style={{ fontSize: 16 }}>🏠</Text>
-            </TouchableOpacity>
+            {!isKeyboardVisible ? (
+              <TouchableOpacity
+                onPress={() => router.replace("/")}
+                style={{
+                  marginRight: 6,
+                  paddingHorizontal: 10,
+                  paddingVertical: 8,
+                  borderRadius: 10,
+                  backgroundColor: C.surfaceAlt,
+                }}
+              >
+                <Text style={{ fontSize: 16 }}>🏠</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={{ width: 40, marginRight: 6 }} />
+            )}
 
             {/* Input */}
             <TextInput
@@ -1359,7 +1379,7 @@ export default function MealMain() {
                 setBottomInput(text);
                 if (micStatus) setMicStatus(null);
               }}
-              placeholder="Rice 1 cup, Chicken 100 g, Milk 200 ml"
+              placeholder="What's in your meal?"
               placeholderTextColor={C.muted}
               style={{
                 flex: 1,
@@ -1373,18 +1393,22 @@ export default function MealMain() {
             />
 
             {/* Mic */}
-            <TouchableOpacity
-              onPress={handleMicPress}
-              style={{
-                marginRight: 6,
-                paddingHorizontal: 10,
-                paddingVertical: 8,
-                borderRadius: 10,
-                backgroundColor: C.surfaceAlt,
-              }}
-            >
-              <Text style={{ fontSize: 16 }}>🎤</Text>
-            </TouchableOpacity>
+            {!isKeyboardVisible ? (
+              <TouchableOpacity
+                onPress={handleMicPress}
+                style={{
+                  marginRight: 6,
+                  paddingHorizontal: 10,
+                  paddingVertical: 8,
+                  borderRadius: 10,
+                  backgroundColor: C.surfaceAlt,
+                }}
+              >
+                <Text style={{ fontSize: 16 }}>🎤</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={{ width: 40, marginRight: 6 }} />
+            )}
 
             {/* Action */}
             <TouchableOpacity
@@ -1397,12 +1421,13 @@ export default function MealMain() {
               }}
             >
               <Text style={{ color: "#000", fontWeight: "600", fontSize: 13 }}>
-                {imageUri ? "Analyze Photo" : "Analyze Meal"}
+                Send
               </Text>
             </TouchableOpacity>
           </View>
 
         </View>
+        </TouchableWithoutFeedback>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

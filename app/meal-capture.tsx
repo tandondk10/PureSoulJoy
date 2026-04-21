@@ -84,6 +84,16 @@ export default function MealCaptureScreen() {
         >
           <View style={{ flex: 1 }}>
 
+            {/* HEADER (NON-SCROLLING) */}
+            <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+              <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
+                Describe your meal
+              </Text>
+              <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }} numberOfLines={1}>
+                Take a photo, choose one, or select items to get instant insight
+              </Text>
+            </View>
+
             <ScrollView
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
@@ -112,7 +122,7 @@ export default function MealCaptureScreen() {
         </View>
 
         {/* Chip selector */}
-        <Text style={styles.title}>What did you eat?</Text>
+        <Text style={styles.title}>What's in your meal?</Text>
         <View style={styles.chips}>
           {FOOD_ITEMS.map((item) => {
             const isSelected = selected.has(item);
@@ -122,7 +132,11 @@ export default function MealCaptureScreen() {
                 onPress={() => toggle(item)}
                 style={[styles.chip, isSelected && styles.chipSelected]}
               >
-                <Text style={[styles.chipText, isSelected && styles.chipTextSelected]}>
+                <Text
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                  style={[styles.chipText, isSelected && styles.chipTextSelected]}
+                >
                   {item}
                 </Text>
               </TouchableOpacity>
@@ -203,25 +217,34 @@ const styles = StyleSheet.create({
   chips: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 10,
+    justifyContent: "space-between",
     marginBottom: 16,
   },
   chip: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
+    flexBasis: "31%",
+    maxWidth: "31%",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "transparent",
     backgroundColor: "#1E2A38",
+    marginBottom: 10,
   },
   chipSelected: {
     backgroundColor: C.accent,
+    borderColor: C.accent,
   },
   chipText: {
     color: C.text,
-    fontSize: 15,
+    fontSize: 13,
+    textAlign: "center",
+    includeFontPadding: false,
   },
   chipTextSelected: {
     color: "#000",
-    fontWeight: "600",
   },
   btnWrapper: {
     alignItems: "center",
