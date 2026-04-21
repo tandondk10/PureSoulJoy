@@ -47,6 +47,12 @@ type MealResult = {
   waitHours: number;
   highSolubleFiber: boolean;
   glucoseImpact: "Low" | "Moderate" | "High";
+  score: number;
+  items: MealItem[];
+  sequence: string;
+  walk: string;
+  nextMeal: string;
+  lastMealGuidance?: string | null;
 };
 
 // ─── Food Database ────────────────────────────────────────────────────────────
@@ -473,10 +479,12 @@ function ConfirmStage({
   items,
   onChange,
   onConfirm,
+  confirmLabel,
 }: {
   items: MealItem[];
   onChange: (items: MealItem[]) => void;
   onConfirm: () => void;
+  confirmLabel: string;
 }) {
   const [addText, setAddText] = useState("");
 
@@ -576,7 +584,7 @@ function ConfirmStage({
           }}
         >
           <Text style={{ color: "#000", fontWeight: "700", fontSize: 15 }}>
-            Analyze Meal
+            {confirmLabel}
           </Text>
         </TouchableOpacity>
       </View>
@@ -900,6 +908,42 @@ function mockMealFromImage(uri: string): string {
   return IMAGE_MEAL_PROFILES[hash % IMAGE_MEAL_PROFILES.length];
 }
 
+function formatMealItemDisplay(item: MealItem): string {
+  const { name, quantity, unit } = item;
+  if (quantity == null || unit == null) return name;
+  if (unit === "cup") {
+    const label = quantity === 1 ? "cup" : "cups";
+    return `${quantity} ${label} ${name}`;
+  }
+  if (unit === "piece") {
+    const label = quantity === 1 ? "piece" : "pieces";
+    return `${quantity} ${label} ${name}`;
+  }
+  // g / ml — compact with no space
+  return `${quantity}${unit} ${name}`;
+}
+
+async function normalizeItems(names: string[]): Promise<string[]> {
+  const backendUrl = process.env.EXPO_PUBLIC_API_URL ?? "";
+  try {
+    const res = await fetch(`${backendUrl}/normalize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: names }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const result = data?.items;
+    if (!Array.isArray(result) || result.length !== names.length) {
+      throw new Error("Invalid response from /normalize");
+    }
+    return result as string[];
+  } catch (e) {
+    console.warn("normalizeItems failed:", e);
+    return names;
+  }
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function MealMain() {
@@ -912,6 +956,7 @@ export default function MealMain() {
   // 🔥 2. STATE (MUST be before effects)
   const [stage, setStage] = useState<Stage>("capture");
   const [mealItems, setMealItems] = useState<MealItem[]>([]);
+  const [imageUri, setImageUri] = useState<string | null>(null);
   const [nutritionSummary, setNutritionSummary] = useState<NutritionSummary | null>(null);
   const [mealResult, setMealResult] = useState<MealResult | null>(null);
   const [improvements, setImprovements] = useState<string[]>([]);
@@ -994,8 +1039,13 @@ export default function MealMain() {
     }));
     console.log("UI items:", newItems.map((it) => it.name));
     handledImageRef.current = uri;
+    setImageUri(uri);
     setMealItems(newItems);
     setStage("confirm");
+
+    setTimeout(() => {
+      router.setParams({ image: undefined });
+    }, 0);
   }, [image]);
 
   const [bottomInput, setBottomInput] = useState("");
@@ -1026,8 +1076,19 @@ export default function MealMain() {
     setBottomInput("");
   };
 
-  const runMealProcessing = (items: MealItem[]) => {
-    const parsedItems = items.flatMap((item) => {
+  const runMealProcessing = async (items: MealItem[]) => {
+    const rawNames = items.map((i) => i.name);
+    console.log("RAW:", rawNames);
+    const normalizedNames = await normalizeItems(rawNames);
+    console.log("NORMALIZED:", normalizedNames);
+    const safeNames =
+      normalizedNames.length === rawNames.length ? normalizedNames : rawNames;
+    const normalizedItems = items.map((item, idx) => ({
+      ...item,
+      name: safeNames[idx] || item.name,
+    }));
+
+    const parsedItems = normalizedItems.flatMap((item) => {
       if (item.quantity != null && item.unit) return [item];
       const segments = splitMealItems(item.name);
       return segments.flatMap((seg, i) => {
@@ -1050,7 +1111,7 @@ export default function MealMain() {
 
     setMealItems(items);
     setNutritionSummary({ ...nutrition, score } as any);
-    setMealResult({ ...result, score, ...behavior } as any);
+    setMealResult({ ...result, score, ...behavior, items: parsedItems });
     setImprovements(suggestions);
     setStage("result");
   };
@@ -1067,7 +1128,9 @@ export default function MealMain() {
       return;
     }
 
-    // clear old result state
+    // clear old result state and any stale image
+    handledImageRef.current = null;
+    setImageUri(null);
     setNutritionSummary(null);
     setMealResult(null);
     setImprovements([]);
@@ -1134,16 +1197,16 @@ export default function MealMain() {
             {/* PROCESSING (photo) */}
             {stage === "processing" && (
               <View style={{ alignItems: "center", marginTop: 40 }}>
-                {typeof image === "string" && image.length > 0 && (
+                {imageUri && (
                   <Image
-                    source={{ uri: image }}
+                    source={{ uri: imageUri }}
                     style={{ width: "100%", height: 220, borderRadius: 14, marginBottom: 20 }}
                     resizeMode="cover"
                   />
                 )}
                 <ActivityIndicator color={C.accent} size="large" />
                 <Text style={{ color: C.muted, fontSize: 14, marginTop: 12 }}>
-                  Analyzing photo…
+                  {imageUri ? "Analyzing photo…" : "Analyzing meal…"}
                 </Text>
               </View>
             )}
@@ -1153,7 +1216,8 @@ export default function MealMain() {
               <ConfirmStage
                 items={mealItems}
                 onChange={setMealItems}
-                onConfirm={() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); setStage("processing"); runMealProcessing(mealItems); }}
+                onConfirm={() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); setStage("processing"); void runMealProcessing(mealItems); }}
+                confirmLabel={imageUri ? "Analyze Photo" : "Analyze Meal"}
               />
             )}
 
@@ -1163,8 +1227,11 @@ export default function MealMain() {
                 <SectionCard
                   title="Your Meal"
                   content={
-                    mealItems.filter((i) => i?.name).length > 0
-                      ? mealItems.map((i) => i.name).filter(Boolean).join(", ")
+                    mealResult?.items?.length > 0
+                      ? mealResult.items
+                        .map(formatMealItemDisplay)
+                        .filter(Boolean)
+                        .join(", ")
                       : "Meal not available"
                   }
                 />
@@ -1330,7 +1397,7 @@ export default function MealMain() {
               }}
             >
               <Text style={{ color: "#000", fontWeight: "600", fontSize: 13 }}>
-                Analyze
+                {imageUri ? "Analyze Photo" : "Analyze Meal"}
               </Text>
             </TouchableOpacity>
           </View>

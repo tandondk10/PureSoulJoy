@@ -587,6 +587,73 @@ def correct_with_llm(text: str) -> str:
     except:
         return text
 
+# ---------------- NORMALIZE ENDPOINT ----------------
+from pydantic import BaseModel
+from typing import List
+
+class NormalizeRequest(BaseModel):
+    items: List[str]
+
+@app.post("/normalize")
+async def normalize_food_items(req: NormalizeRequest):
+    """
+    Normalize food item names: fix spelling, standardize names.
+    Quantities and units are preserved. Items are not split or merged.
+    Falls back to original items on any failure.
+    """
+    original = req.items
+    print("NORMALIZE RAW:", original)
+
+    if not original:
+        return {"items": original}
+
+    prompt = "\n".join([
+        "Normalize the following food items:",
+        "- Fix spelling mistakes",
+        '- Standardize names (e.g. "chxicken" → "chicken")',
+        "- DO NOT change quantities or units",
+        "- DO NOT split or merge items",
+        "Return ONLY a JSON array of corrected items.",
+        "",
+        f"Input: {original}",
+        "Output:",
+    ])
+
+    try:
+        res = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: completion(
+                    model=MODEL_OPENAI,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                    max_tokens=256,
+                )
+            ),
+            timeout=10,
+        )
+        text = extract_text(res).strip()
+
+        match = re.search(r'\[[\s\S]*\]', text)
+        if not match:
+            raise ValueError("No JSON array in response")
+
+        parsed = __import__('json').loads(match.group(0))
+
+        if not isinstance(parsed, list):
+            raise ValueError("Response is not a list")
+
+        if len(parsed) != len(original):
+            raise ValueError(f"Length mismatch: got {len(parsed)}, expected {len(original)}")
+
+        result = [str(item) for item in parsed]
+        print("NORMALIZE OUTPUT:", result)
+        return {"items": result}
+
+    except Exception as e:
+        print("NORMALIZE ERROR:", e)
+        return {"items": original}
+
+
 # ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
 @app.post("/query")
 async def handle_query(request: Request):
