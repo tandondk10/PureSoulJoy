@@ -470,8 +470,8 @@ export default function HomeScreen() {
 
     setInput("");
     logTrace(traceId, "UI_UPDATE_START");
-    setBlocks((prev) => [...prev, { id, query, status: "loading", source: "text" }]);
-    smoothScroll(id);
+    setBlocks((prev) => [{ id, query, status: "loading", source: "text" }, ...prev]);
+    setTimeout(() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); }, 0);
     logTrace(traceId, "UI_UPDATE_DONE");
 
     // 🌐 API setup
@@ -546,7 +546,6 @@ export default function HomeScreen() {
         )
       );
 
-      smoothScroll(id);
       logTrace(traceId, "UI_UPDATE_DONE");
 
       updateVoiceState("IDLE");

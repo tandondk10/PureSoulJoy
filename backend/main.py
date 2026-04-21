@@ -221,6 +221,11 @@ def detect_intent(q: str) -> str:
     if scores:
         return max(scores, key=scores.get)
 
+    q = text
+
+    if any(w in q for w in ["healthy", "breakfast", "lunch", "dinner", "food", "diet", "eat", "ideas"]):
+        return "lifestyle"
+
     return "unknown"
 
 

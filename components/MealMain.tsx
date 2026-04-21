@@ -963,10 +963,6 @@ export default function MealMain() {
     setMealResult(result);
     setImprovements(suggestions);
     setStage("result");
-
-    setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    }, 100);
   };
 
   const handleBottomSend = () => {
@@ -1061,18 +1057,43 @@ export default function MealMain() {
               <ConfirmStage
                 items={mealItems}
                 onChange={setMealItems}
-                onConfirm={() => { setStage("processing"); runMealProcessing(mealItems); }}
+                onConfirm={() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); setStage("processing"); runMealProcessing(mealItems); }}
               />
             )}
 
             {/* RESULT */}
             {stage === "result" && nutritionSummary && mealResult && (
-              <ResultStage
-                nutrition={nutritionSummary}
-                result={mealResult}
-                improvements={improvements}
-                onReset={handleReset}
-              />
+              <>
+                <ResultStage
+                  nutrition={nutritionSummary}
+                  result={mealResult}
+                  improvements={improvements}
+                  onReset={handleReset}
+                />
+                {(() => {
+                  const count = mealItems.length;
+                  const rows = [
+                    { label: "Carbs",         value: count * 20 },
+                    { label: "Protein",        value: count * 10 },
+                    { label: "Fat",            value: count * 8  },
+                    { label: "Saturated Fat",  value: count * 3  },
+                    { label: "Fiber",          value: count * 5  },
+                  ];
+                  return (
+                    <View style={{ backgroundColor: C.surfaceAlt, borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: C.border }}>
+                      <Text style={{ color: C.accent, fontSize: 11, fontWeight: "700", letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 12 }}>
+                        Nutrition Summary
+                      </Text>
+                      {rows.map((r) => (
+                        <View key={r.label} style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 6 }}>
+                          <Text style={{ color: C.muted, fontSize: 14 }}>{r.label}</Text>
+                          <Text style={{ color: C.text, fontSize: 14, fontWeight: "500" }}>{r.value}g</Text>
+                        </View>
+                      ))}
+                    </View>
+                  );
+                })()}
+              </>
             )}
 
           </ScrollView>
