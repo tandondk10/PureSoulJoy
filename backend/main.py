@@ -200,6 +200,40 @@ def detect_context(q: str) -> dict:
 
 
 # ---------------- INTENT ----------------
+
+VALID_INTENTS = {"lifestyle", "glucose", "cholesterol", "blood_pressure", "unknown"}
+
+model_name = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
+
+
+def classify_intent_llm(query: str) -> str:
+    prompt = f"""Classify the user query into ONE of these intents:
+- lifestyle
+- glucose
+- cholesterol
+- blood_pressure
+- unknown
+
+If the query is unclear, meaningless, or unrelated to health, return "unknown".
+
+Return ONLY the intent. No explanation.
+
+Query: "{query}"
+"""
+    try:
+        response = completion(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=5,
+        )
+        intent = response["choices"][0]["message"]["content"].strip().lower()
+        return intent
+    except Exception as e:
+        print("LLM intent error:", e)
+        return "unknown"
+
+
 def detect_intent(q: str) -> str:
     text = q.lower()
     scores = {}
@@ -221,12 +255,35 @@ def detect_intent(q: str) -> str:
     if scores:
         return max(scores, key=scores.get)
 
-    q = text
+    q = text.lower().strip()
 
-    if any(w in q for w in ["healthy", "breakfast", "lunch", "dinner", "food", "diet", "eat", "ideas"]):
+    if any(w in q for w in [
+        # General lifestyle / food
+        "healthy", "breakfast", "lunch", "dinner", "food", "diet", "eat", "ideas",
+        # Definition / education
+        "what is", "define", "meaning", "explain",
+        # Metabolic health
+        "prediabetes", "prediabetic", "diabetes",
+        "glucose", "blood sugar", "a1c",
+        # Insulin
+        "insulin", "insulin resistance", "insulin sensitivity",
+        # Glucose behavior
+        "spike", "spikes", "crash", "response", "responder",
+        # Glucotype
+        "glucotype", "glucose type", "type of glucose",
+    ]):
+        print("KEYWORD_MATCH:", q)
         return "lifestyle"
 
-    return "unknown"
+    print("FALLING_TO_LLM:", q)
+    if USE_LLM:
+        intent = classify_intent_llm(q)
+        if intent not in VALID_INTENTS:
+            return "unknown"
+        print("LLM_INTENT_USED:", q, "→", intent)
+        return intent
+
+    return "lifestyle"
 
 
 # ---------------- SCORE ----------------
@@ -454,10 +511,10 @@ Say something like:
 
     if SCROLL_TEST:
         print("🔥 SCROLL TEST MODE")
-        return {"text": scroll_test_response(), "score": score}
+        return {"text": scroll_test_response(), "score": score, "intent": intent}
 
     if USE_MOCK:
-        return {"text": mock_response(intent), "score": score}
+        return {"text": mock_response(intent), "score": score, "intent": intent}
 
     if USE_LLM:
         try:
@@ -465,17 +522,18 @@ Say something like:
                 asyncio.to_thread(llm_response, q, ctx),
                 timeout=15
             )
-            return {"text": enforce_format(result), "score": score}
+            return {"text": enforce_format(result), "score": score, "intent": intent}
 
         except asyncio.TimeoutError:
             print("LLM TIMEOUT")
-            return {"text": "LLM timed out. Try again.", "score": score}
+            return {"text": "LLM timed out. Try again.", "score": score, "intent": intent}
 
         except Exception as e:
             print("LLM ERROR:", e)
             return {
                 "text": mock_response(intent),
                 "score": score,
+                "intent": intent,
                 "error": str(e)
             }
 
@@ -485,7 +543,8 @@ Fallback response active.
 
 ## Next Step
 Try asking about lifestyle, BP, glucose, or cholesterol.""",
-        "score": score
+        "score": score,
+        "intent": intent,
     }
 
 def correct_spelling(text: str) -> str:
@@ -711,4 +770,5 @@ async def handle_query(request: Request):
             "tts_text": None,
             "audio": None,
             "score": score,
+            "intent": result.get("intent", "general"),
         }

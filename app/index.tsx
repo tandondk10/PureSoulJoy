@@ -1122,26 +1122,28 @@ export default function HomeScreen() {
             )}
 
             {/* CAPTURE BUTTON */}
-            <View style={{ alignItems: "center", marginVertical: 10 }}>
-              <TouchableOpacity
-                onPress={() => {
-                  navigatedToMealRef.current = true;
-                  router.push("/meal-capture");
-                }}
-                style={{
-                  backgroundColor: C.accent,
-                  paddingVertical: 14,
-                  paddingHorizontal: 24,
-                  borderRadius: 14,
-                  alignItems: "center",
-                  minWidth: "40%",   // 🔥 balanced width
-                  maxWidth: 320,     // 🔥 clean UI cap
-                }}
-              >
-                <Text style={{ color: "#000", fontWeight: "600" }}>
-                  📸 Capture Meal
-                </Text>
-              </TouchableOpacity>
+            <View style={{ alignItems: "center", paddingHorizontal: 16, marginVertical: 10 }}>
+              <View style={{ width: 260 }}>
+                <TouchableOpacity
+                  onPress={() => {
+                    navigatedToMealRef.current = true;
+                    router.push("/meal-capture");
+                  }}
+                  style={{
+                    backgroundColor: C.accent,
+                    paddingVertical: 16,
+                    paddingHorizontal: 20,
+                    borderRadius: 12,
+                    alignItems: "center",
+                    width: "100%",
+                    elevation: 2,
+                  }}
+                >
+                  <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
+                    📸 Capture Meal
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
             {/* INPUT BAR */}

@@ -1,4 +1,5 @@
 import AppHeader from "@/components/AppHeader";
+import SectionCard from "@/components/SectionCard";
 import { C } from "@/constants/colors";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
@@ -773,8 +774,6 @@ function ResultStage({
   return (
     <View>
       <MealImpactSection classification={result.classification} glucoseImpact={result.glucoseImpact} />
-      <FiberInsightSection nutrition={nutrition} />
-      <ActionSection result={result} />
       <LearningSection result={result} />
 
       {improvements.length > 0 && (
@@ -782,6 +781,28 @@ function ResultStage({
       )}
     </View>
   );
+}
+
+// ─── Behavior derivation ─────────────────────────────────────────────────────
+
+function deriveBehavior(nutrition: NutritionSummary, result: MealResult) {
+  const fiber = nutrition.fiber_total;
+  const protein = nutrition.protein;
+  const netCarbs = result.netCarbs;
+
+  let sequence = "Eat normally";
+  if (netCarbs > 50) sequence = "Start with fiber → protein → carbs";
+  else if (fiber >= 8) sequence = "Start with fiber, then rest";
+
+  let walk = "No walk required";
+  if (netCarbs > 60) walk = "Walk 20–30 min (Zone 2) within 30 min after meal";
+  else if (netCarbs > 40) walk = "Walk 10–15 min after meal";
+
+  let nextMeal = "Next meal in 3–4 hours";
+  if (netCarbs > 70) nextMeal = "Next meal in 4–5 hours";
+  else if (fiber >= 10 && protein >= 20) nextMeal = "Next meal in 2–3 hours if hungry";
+
+  return { sequence, walk, nextMeal };
 }
 
 // ─── Image placeholder ────────────────────────────────────────────────────────
@@ -958,9 +979,15 @@ export default function MealMain() {
     const result = computeResult(nutrition);
     const suggestions = computeImprovementSuggestions(nutrition);
 
+    const score = result.classification === "light" ? 85
+      : result.classification === "heavy" ? 60
+        : 30;
+
+    const behavior = deriveBehavior(nutrition, result);
+
     setMealItems(items);
-    setNutritionSummary(nutrition);
-    setMealResult(result);
+    setNutritionSummary({ ...nutrition, score } as any);
+    setMealResult({ ...result, score, ...behavior } as any);
     setImprovements(suggestions);
     setStage("result");
   };
@@ -1064,35 +1091,67 @@ export default function MealMain() {
             {/* RESULT */}
             {stage === "result" && nutritionSummary && mealResult && (
               <>
-                <ResultStage
-                  nutrition={nutritionSummary}
-                  result={mealResult}
-                  improvements={improvements}
-                  onReset={handleReset}
+                <SectionCard
+                  title="Your Meal"
+                  content={
+                    mealItems.filter((i) => i?.name).length > 0
+                      ? mealItems.map((i) => i.name).filter(Boolean).join(", ")
+                      : "Meal not available"
+                  }
+                />
+                <SectionCard
+                  title="🔥 What To Do Now"
+                  content={
+                    `• ${(mealResult as any)?.sequence}\n` +
+                    `• ${(mealResult as any)?.walk}\n` +
+                    `• ${(mealResult as any)?.nextMeal}`
+                  }
                 />
                 {(() => {
-                  const count = mealItems.length;
-                  const rows = [
-                    { label: "Carbs",         value: count * 20 },
-                    { label: "Protein",        value: count * 10 },
-                    { label: "Fat",            value: count * 8  },
-                    { label: "Saturated Fat",  value: count * 3  },
-                    { label: "Fiber",          value: count * 5  },
-                  ];
+                  const n = nutritionSummary as any;
+                  const content =
+                    `Carbs: ${n.carbs_total ?? 0}g\n` +
+                    `Protein: ${n.protein ?? 0}g\n` +
+                    `Fat: ${n.fat_total ?? 0}g\n` +
+                    `Saturated Fat: ${n.sat_fat ?? 0}g\n\n` +
+                    `Fiber: ${n.fiber_total ?? 0}g\n` +
+                    `  • Soluble: ${n.fiber_soluble ?? 0}g\n` +
+                    `  • Insoluble: ${n.fiber_insoluble ?? 0}g`;
+                  return <SectionCard title="Nutrition Summary" content={content} />;
+                })()}
+                {(() => {
+                  const r = mealResult;
+                  const weightLabel = r.classification === "light" ? "Light"
+                    : r.classification === "heavy" ? "Heavy" : "Very Heavy";
                   return (
-                    <View style={{ backgroundColor: C.surfaceAlt, borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: C.border }}>
-                      <Text style={{ color: C.accent, fontSize: 11, fontWeight: "700", letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 12 }}>
-                        Nutrition Summary
-                      </Text>
-                      {rows.map((r) => (
-                        <View key={r.label} style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 6 }}>
-                          <Text style={{ color: C.muted, fontSize: 14 }}>{r.label}</Text>
-                          <Text style={{ color: C.text, fontSize: 14, fontWeight: "500" }}>{r.value}g</Text>
-                        </View>
-                      ))}
-                    </View>
+                    <SectionCard
+                      title="Meal Impact"
+                      content={`${weightLabel} meal • ${r.glucoseImpact} glucose impact`}
+                    />
                   );
                 })()}
+                {(mealResult.classification === "light" || mealResult.highSolubleFiber) && (
+                  <SectionCard
+                    title="Learning"
+                    content={
+                      mealResult.classification === "light" && mealResult.highSolubleFiber
+                        ? "Light meal · Fiber shield active"
+                        : mealResult.classification === "light"
+                          ? "Light meal · Keep this pattern"
+                          : "Fiber shield active · Good food choice"
+                    }
+                  />
+                )}
+                {improvements.length > 0 && (
+                  <SectionCard
+                    title="Improvements"
+                    content={improvements.map((s) => `• ${s}`).join("\n")}
+                  />
+                )}
+                <SectionCard
+                  title="Meal Score"
+                  content={String((nutritionSummary as any)?.score ?? (mealResult as any)?.score ?? "--")}
+                />
               </>
             )}
 
@@ -1106,20 +1165,24 @@ export default function MealMain() {
           )}
 
           {/* Capture Another Meal */}
-          <View style={{ alignItems: "center", marginBottom: 6 }}>
-            <TouchableOpacity
-              onPress={() => router.push("/meal-capture")}
-              style={{
-                backgroundColor: C.accent,
-                paddingVertical: 10,
-                paddingHorizontal: 24,
-                borderRadius: 12,
-              }}
-            >
-              <Text style={{ color: "#000", fontWeight: "600", fontSize: 14 }}>
-                📸 Capture Another Meal
-              </Text>
-            </TouchableOpacity>
+          <View style={{ alignItems: "center", marginVertical: 6 }}>
+            <View style={{ width: 260 }}>
+              <TouchableOpacity
+                onPress={() => router.push("/meal-capture")}
+                style={{
+                  width: "100%",
+                  backgroundColor: C.accent,
+                  paddingVertical: 16,
+                  borderRadius: 12,
+                  alignItems: "center",
+                  elevation: 2,
+                }}
+              >
+                <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
+                  📸 Capture Another Meal
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           {/* 🔥 Bottom Bar */}
