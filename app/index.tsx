@@ -26,6 +26,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { createTraceId, logTrace } from "../utils/trace";
+import { cleanMealText, parseMealItems } from "./utils/mealParser";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
@@ -438,7 +439,8 @@ export default function HomeScreen() {
 
   // ─── Keyboard query ───────────────────────────────────────────────────────
 
-  const sendKeyboardQuery = async (query: string, traceId: string) => {
+  const sendKeyboardQuery = async (query: string, traceId: string, raw?: string) => {
+    const displayText = raw ?? query;
     // 🔒 Debounce (FIRST)
     const now = Date.now();
     if (now - lastSubmitRef.current < 300) return;
@@ -477,7 +479,7 @@ export default function HomeScreen() {
 
     setInput("");
     logTrace(traceId, "UI_UPDATE_START");
-    setBlocks((prev) => [...prev, { id, query, status: "loading", source: "text" }]);
+    setBlocks((prev) => [...prev, { id, query: displayText, status: "loading", source: "text" }]);
     requestAnimationFrame(() => {
       scrollRef.current?.scrollToEnd({ animated: true });
     });
@@ -547,7 +549,6 @@ export default function HomeScreen() {
           b.id === id
             ? {
               ...b,
-              query: cleanedQuery,
               status: "complete",
               sections: liteMode ? undefined : sections ?? undefined,
               rawText: liteMode ? text : (sections ? undefined : text),
@@ -791,18 +792,29 @@ export default function HomeScreen() {
     // PROCESSING → ignore
   };
 
-  // 🔥 SIMPLE MEAL DETECTOR (fast heuristic)
-  const looksLikeMeal = (text: string) => {
-    const foodWords = [
-      "rice", "dal", "roti", "chapati", "bread", "egg", "eggs",
-      "chicken", "fish", "paneer", "tofu",
-      "beans", "lentils", "salad", "vegetable", "sabzi",
-      "saag", "curry", "oats", "idli", "dosa", "banana", "apple"
-    ];
-
+  // 🔥 MEAL DETECTOR — dual detection on raw input
+  const looksLikeMeal = (text: string): boolean => {
     const lower = text.toLowerCase();
 
-    return foodWords.some(word => lower.includes(word));
+    // Signal 1: consumption phrases
+    const consumptionPhrases = [
+      /\bi (just )?(ate|had|consumed)\b/i,
+      /\bmy meal was\b/i,
+      /\bfor (breakfast|lunch|dinner)\b/i,
+    ];
+    if (consumptionPhrases.some(p => p.test(lower))) return true;
+
+    // Signal 2: parseMealItems returns multiple distinct items
+    if (parseMealItems(text).length >= 2) return true;
+
+    // Signal 3: fallback single food keyword
+    const foodWords = [
+      "rice", "dal", "roti", "chapati", "bread", "egg", "eggs",
+      "chicken", "fish", "paneer", "tofu", "beans", "lentils",
+      "salad", "vegetable", "sabzi", "saag", "curry", "oats",
+      "idli", "dosa", "banana", "apple",
+    ];
+    return foodWords.some(w => lower.includes(w));
   };
 
   const handleSendPress = () => {
@@ -1171,8 +1183,9 @@ export default function HomeScreen() {
                           setStatusText(null);
                           navigatedToMealRef.current = true;
 
+                          const parsed = parseMealItems(pendingMeal).join(", ");
                           router.push(
-                            `/meal-main?prefill=${encodeURIComponent(pendingMeal)}`
+                            `/meal-main?prefill=${encodeURIComponent(parsed)}`
                           );
                         }}
                         style={{
@@ -1190,8 +1203,15 @@ export default function HomeScreen() {
 
                       <TouchableOpacity
                         onPress={() => {
+                          const raw = pendingMeal;
                           setStatusText(null);
-                          // input is unchanged; keep pendingMeal for Capture Meal
+                          setPendingMeal(null);
+                          if (raw) {
+                            const parsed = parseMealItems(raw).join(", ");
+                            const traceId = createTraceId();
+                            logTrace(traceId, "KEYBOARD_START", parsed);
+                            sendKeyboardQuery(parsed, traceId, raw);
+                          }
                         }}
                         style={{
                           backgroundColor: "#1E2A38",

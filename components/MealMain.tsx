@@ -1,3 +1,4 @@
+import { parseMealItems } from "@/app/utils/mealParser";
 import AppHeader from "@/components/AppHeader";
 import SectionCard from "@/components/SectionCard";
 import { C } from "@/constants/colors";
@@ -1004,7 +1005,7 @@ export default function MealMain() {
     setImprovements([]);
 
     // Split first, parse later (in runMealProcessing)
-    const segments = splitMealItems(normalized);
+    const segments = parseMealItems(normalized);
     const items: MealItem[] = segments.map((seg, i) => ({
       id: `${Date.now()}-${i}`,
       name: seg.trim(),
@@ -1033,7 +1034,7 @@ export default function MealMain() {
     if (handledImageRef.current === uri) return;
 
     const mockText = mockMealFromImage(uri);
-    const segments = splitMealItems(mockText);
+    const segments = parseMealItems(mockText);
     const newItems: MealItem[] = segments.map((seg, i) => ({
       id: `${Date.now()}-${i}`,
       name: seg.trim(),
@@ -1124,7 +1125,7 @@ export default function MealMain() {
 
     console.log("👉 INPUT:", text);
 
-    const segments = splitMealItems(text);
+    const segments = parseMealItems(text);
     if (segments.length === 0) {
       setMicStatus("Couldn't understand meal. Try again.");
       return;
