@@ -55,6 +55,8 @@ COMMON_CORRECTIONS = {
     "bp": "blood pressure",  # you already handle this, but safe
 }
 
+QUESTION_STARTS = ("what", "how", "which", "best")
+
 
 # ---------------- SCROLL TEST ----------------
 def long_block(title: str) -> str:
@@ -288,8 +290,100 @@ def is_food_list(q: str) -> bool:
     return len(parts) >= 2 and all(len(p) > 1 for p in parts)
 
 
+FOOD_WORDS = {
+    "rice",
+    "dal",
+    "roti",
+    "bread",
+    "egg",
+    "eggs",
+    "chicken",
+    "fish",
+    "paneer",
+    "tofu",
+    "beans",
+    "lentils",
+    "salad",
+    "coffee",
+    "tea",
+    "oats",
+    "banana",
+    "apple",
+    "coke",
+    "pizza",
+    "milk",
+    "yogurt",
+}
+
+
+def is_single_food_phrase(q: str) -> bool:
+    words = q.lower().split()
+    if not (1 <= len(words) <= 3):
+        return False
+    food_hits = sum(1 for w in words if w in FOOD_WORDS)
+    return food_hits >= 1 and food_hits >= len(words) / 2
+
+
+def is_question(q: str) -> bool:
+    return any(w in q.lower().split() for w in ["what", "why", "how", "when", "where"])
+
+
+def is_pairing_query(q: str) -> bool:
+
+    s = q.lower().strip()
+
+    # 1) must be a question-like query
+
+    is_question = "?" in s or any(s.startswith(w) for w in QUESTION_STARTS)
+
+    # 2) must contain "with <something>"
+
+    m = re.search(r"\bwith\s+([a-z][a-z\s\-]+)\b", s)
+
+    if not m:
+
+        return False
+
+    target = m.group(1).strip()
+
+    # 3) simple guards (avoid non-food contexts)
+
+    if any(x in s for x in ["with friends", "with family"]):
+
+        return False
+
+    if any(x in s for x in ["with life", "with stress", "with time"]):
+
+        return False
+
+    # 4) lightweight length guard (avoid long abstract questions)
+
+    if len(s.split()) > 8:
+
+        return False
+
+    return is_question and bool(target)
+
+
 def detect_intent(q: str) -> str:
-    if is_food_list(q):
+
+    s = q.lower()
+
+    # 🔥 DOMAIN INTENTS FIRST
+
+    if "bp" in s or "blood pressure" in s:
+        return "bp"
+
+    if "sugar" in s or "glucose" in s:
+        return "glucose"
+
+    if "cholesterol" in s:
+        return "cholesterol"
+
+    if is_question(q):
+        return "unknown"
+
+    if is_food_list(q) or is_single_food_phrase(q):
         return "lifestyle"
 
     text = q.lower()
@@ -666,18 +760,39 @@ def generate_tts(text: str):
         return None
 
 
+# ---------------- LITE FALLBACK ----------------
+def lite_fallback_response() -> dict:
+    return {
+        "text": """I didn't fully understand that.
+
+Try something like:
+• How to control sugar spikes?
+• What should I eat with ice cream?
+• Best post meal walk timing
+""",
+        "score": 0,
+        "intent": "unknown",
+    }
+
+
 # ---------------- BUILD RESPONSE ----------------
-async def build_response(
-    query: str,
-    lite: bool,
-):
+async def build_response(query: str, lite: bool):
     print("LITE MODE:", lite)
 
     if not query:
         return {"text": "Empty query", "score": 0}
 
+    # ✅ normalize FIRST
     q = correct_spelling(query)
     q = normalize(q)
+
+    # ✅ pairing override
+    if is_pairing_query(q):
+        return {
+            **build_pairing_response(q),
+            "score": 50,
+            "intent": "lifestyle",
+        }
 
     ctx = detect_context(q)
     intent = detect_intent(q)
@@ -693,7 +808,10 @@ async def build_response(
     print("QUERY:", q)
     print("INTENT:", intent)
 
-    if intent == "unknown":
+    # ✅ fallback (safe now)
+    if intent in ("unknown", "general"):
+        if lite:
+            return lite_fallback_response()
         return {
             "text": """## Insight
 I can help with:
@@ -796,6 +914,66 @@ def correct_with_llm(text: str) -> str:
         return extract_text(res).strip()
     except:
         return text
+
+
+def extract_target_food(q: str) -> str:
+    q = q.lower()
+    match = re.search(r"(?:with|for)\s+(.+)", q)
+    if not match:
+        return ""
+    return match.group(1).replace("?", "").strip()
+
+
+def build_pairing_response(q: str) -> dict:
+    food = extract_target_food(q)
+
+    if not food:
+        return lite_fallback_response()
+
+    return {
+        "text": get_pairing_advice(food),
+        "intent": "lifestyle",
+        "score": 0,
+    }
+
+
+def get_pairing_advice(food: str) -> str:
+    food = food.lower()
+
+    if "turmeric" in food:
+        return """Turmeric works best with black pepper.
+
+Combine with:
+• Black pepper (improves absorption)
+• Healthy fat (milk, ghee)
+• Warm liquids (tea)
+
+This improves effectiveness."""
+
+    if "fries" in food:
+        return """Fries are high in refined carbs.
+
+Add:
+• Protein (chicken, paneer)
+• Fiber (salad, vegetables)
+• Optional: vinegar or lemon
+
+This helps reduce glucose spikes."""
+
+    if "ice cream" in food:
+        return """Ice cream is high in sugar.
+
+Add:
+• Nuts or yogurt (fat/protein)
+• Fruit or chia (fiber)
+• A short walk after eating
+
+This helps stabilize glucose."""
+
+    return f"""For {food}:
+
+Add protein and fiber to balance it.
+A short walk after eating also helps."""
 
 
 # ---------------- NORMALIZE ENDPOINT ----------------
