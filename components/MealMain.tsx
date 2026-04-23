@@ -7,15 +7,13 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
-  Keyboard,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
   Text,
   TextInput,
   TouchableOpacity,
-  TouchableWithoutFeedback,
-  View,
+  View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -1161,16 +1159,16 @@ export default function MealMain() {
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
       >
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        {/*<TouchableWithoutFeedback onPress={Keyboard.dismiss}>*/}
         <View style={{ flex: 1, backgroundColor: C.bg }}>
 
           {/* ✅ HEADER (NON-SCROLLING) */}
           {(() => {
             const STAGE_HEADER: Record<Stage, { title: string; subtitle: string }> = {
-              capture:    { title: "Describe your meal",    subtitle: "Get instant insight before or after you eat" },
-              confirm:    { title: "Review your meal",      subtitle: "Adjust anything before analysis" },
-              processing: { title: "Analyzing your meal",   subtitle: "Calculating impact and next steps" },
-              result:     { title: "Meal Impact",           subtitle: "Here's what to do next" },
+              capture: { title: "Describe your meal", subtitle: "Get instant insight before or after you eat" },
+              confirm: { title: "Review your meal", subtitle: "Adjust anything before analysis" },
+              processing: { title: "Analyzing your meal", subtitle: "Calculating impact and next steps" },
+              result: { title: "Meal Impact", subtitle: "Here's what to do next" },
             };
             const { title, subtitle } = STAGE_HEADER[stage];
             return (
@@ -1427,7 +1425,7 @@ export default function MealMain() {
           </View>
 
         </View>
-        </TouchableWithoutFeedback>
+        {/*</TouchableWithoutFeedback>*/}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

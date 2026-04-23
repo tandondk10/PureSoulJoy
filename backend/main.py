@@ -43,7 +43,7 @@ USER_PROFILE = {
     "ldl": 100,
     "goal": "reduce glucose spikes",
     "diet": "vegetarian",
-    "phenotype": "post-meal spiker"
+    "phenotype": "post-meal spiker",
 }
 
 COMMON_CORRECTIONS = {
@@ -58,10 +58,12 @@ COMMON_CORRECTIONS = {
 
 # ---------------- SCROLL TEST ----------------
 def long_block(title: str) -> str:
-    return "\n".join([
-        f"{i+1}. {title} detail explaining behavior, impact, and optimization pattern."
-        for i in range(40)
-    ])
+    return "\n".join(
+        [
+            f"{i+1}. {title} detail explaining behavior, impact, and optimization pattern."
+            for i in range(40)
+        ]
+    )
 
 
 def scroll_test_response() -> str:
@@ -103,8 +105,7 @@ def is_hallucination(text: str) -> bool:
 # Matches "go improveme" or "go improve me" at the END of the transcript only.
 # Case-insensitive. Allows optional trailing punctuation. One pass only.
 TRIGGER_PATTERN = re.compile(
-    r'\s*(go\s+improve\s*me|इम्प्रूव\s*मी)\s*[.!?]?\s*$',
-    re.IGNORECASE
+    r"\s*(go\s+improve\s*me|इम्प्रूव\s*मी)\s*[.!?]?\s*$", re.IGNORECASE
 )
 
 
@@ -113,7 +114,7 @@ def has_trigger(text: str) -> bool:
 
 
 def remove_trigger(text: str) -> str:
-    return TRIGGER_PATTERN.sub('', text).strip()
+    return TRIGGER_PATTERN.sub("", text).strip()
 
 
 # ---------------- VALIDATION ----------------
@@ -137,12 +138,12 @@ def validate_voice_query(raw_transcript: str) -> tuple:
         return "Please say your question or meal before Go ImproveMe.", ""
 
     # Case C: no word with 3 or more characters
-    words = re.findall(r'\w+', cleaned)
+    words = re.findall(r"\w+", cleaned)
     if len(cleaned.strip()) < 3:
         return "Please say a complete question or meal.", cleaned
 
     # Case D: only whitespace or punctuation
-    if not re.sub(r'[^\w]', '', cleaned).strip():
+    if not re.sub(r"[^\w]", "", cleaned).strip():
         return "Could not understand. Please try again.", cleaned
 
     return None, cleaned
@@ -151,32 +152,43 @@ def validate_voice_query(raw_transcript: str) -> tuple:
 # ---------------- KEYWORD MAP ----------------
 KEYWORD_MAP = {
     "glucose": {
-        "primary": ["glucose", "blood glucose", "sugar", "blood sugar", "bg", "diabetes"],
-        "medical": ["a1c", "hba1c", "insulin", "glycemic", "hypoglycemia", "hyperglycemia"],
+        "primary": [
+            "glucose",
+            "blood glucose",
+            "sugar",
+            "blood sugar",
+            "bg",
+            "diabetes",
+        ],
+        "medical": [
+            "a1c",
+            "hba1c",
+            "insulin",
+            "glycemic",
+            "hypoglycemia",
+            "hyperglycemia",
+        ],
         "food": ["carb", "carbs", "dessert", "sweet", "juice", "soda"],
-        "context": ["fasting", "postprandial", "after meal", "post meal"]
+        "context": ["fasting", "postprandial", "after meal", "post meal"],
     },
-
     "bp": {
         "primary": ["blood pressure", "bp", "pressure", "hypertension", "hypotension"],
         "medical": ["systolic", "diastolic"],
         "lifestyle": ["salt", "sodium"],
-        "symptoms": ["dizziness", "headache"]
+        "symptoms": ["dizziness", "headache"],
     },
-
     "cholesterol": {
         "primary": ["cholesterol", "chol", "ldl", "hdl", "lipid", "triglyceride", "tg"],
         "medical": ["statin", "plaque"],
-        "food": ["fat", "saturated", "trans fat"]
+        "food": ["fat", "saturated", "trans fat"],
     },
-
     "lifestyle": {
         "diet": ["diet", "food", "meal", "eat", "nutrition"],
         "activity": ["exercise", "workout", "walk", "steps"],
         "recovery": ["sleep", "stress", "meditation"],
         "body": ["weight", "fitness"],
-        "habits": ["lifestyle", "habit", "routine"]
-    }
+        "habits": ["lifestyle", "habit", "routine"],
+    },
 }
 
 
@@ -257,21 +269,46 @@ def detect_intent(q: str) -> str:
 
     q = text.lower().strip()
 
-    if any(w in q for w in [
-        # General lifestyle / food
-        "healthy", "breakfast", "lunch", "dinner", "food", "diet", "eat", "ideas",
-        # Definition / education
-        "what is", "define", "meaning", "explain",
-        # Metabolic health
-        "prediabetes", "prediabetic", "diabetes",
-        "glucose", "blood sugar", "a1c",
-        # Insulin
-        "insulin", "insulin resistance", "insulin sensitivity",
-        # Glucose behavior
-        "spike", "spikes", "crash", "response", "responder",
-        # Glucotype
-        "glucotype", "glucose type", "type of glucose",
-    ]):
+    if any(
+        w in q
+        for w in [
+            # General lifestyle / food
+            "healthy",
+            "breakfast",
+            "lunch",
+            "dinner",
+            "food",
+            "diet",
+            "eat",
+            "ideas",
+            # Definition / education
+            "what is",
+            "define",
+            "meaning",
+            "explain",
+            # Metabolic health
+            "prediabetes",
+            "prediabetic",
+            "diabetes",
+            "glucose",
+            "blood sugar",
+            "a1c",
+            # Insulin
+            "insulin",
+            "insulin resistance",
+            "insulin sensitivity",
+            # Glucose behavior
+            "spike",
+            "spikes",
+            "crash",
+            "response",
+            "responder",
+            # Glucotype
+            "glucotype",
+            "glucose type",
+            "type of glucose",
+        ]
+    ):
         print("KEYWORD_MATCH:", q)
         return "lifestyle"
 
@@ -416,6 +453,35 @@ Respond ONLY in this exact format:
 """
 
 
+# ---------------- LITE PROMPT ----------------
+def build_lite_prompt(q: str) -> str:
+    return f"""You are a simple, practical lifestyle coach.
+
+User asked:
+"{q}"
+
+Give a clear and direct answer.
+
+Rules:
+- Use 2–3 short sentences
+- First sentence must directly answer the question
+- Use simple everyday language
+- No headings, no bullets, no markdown
+- No technical or medical jargon
+- Keep it natural and conversational
+
+Guidance:
+- If the question is informational → do not force action
+- If the question is about improvement → include a simple helpful action
+- Only include action if it feels natural
+
+Tone:
+- Calm
+- Clear
+- Human
+"""
+
+
 # ---------------- EXTRACT ----------------
 def extract_text(res):
     try:
@@ -428,8 +494,12 @@ def extract_text(res):
 
 
 # ---------------- LLM ----------------
-def llm_response(q: str, ctx: dict) -> str:
-    prompt = build_prompt(q, ctx)
+def llm_response(q: str, ctx: dict, lite: bool) -> str:
+    if lite:
+        prompt = build_lite_prompt(q)
+    else:
+        prompt = build_prompt(q, ctx)
+
     model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
 
     res = completion(
@@ -457,9 +527,7 @@ Try asking again with more detail.
 def generate_tts(text: str):
     try:
         speech = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
-            input=text
+            model="gpt-4o-mini-tts", voice="alloy", input=text
         )
         audio_bytes = speech.read()
         return base64.b64encode(audio_bytes).decode("utf-8")
@@ -470,7 +538,12 @@ def generate_tts(text: str):
 
 
 # ---------------- BUILD RESPONSE ----------------
-async def build_response(query: str):
+async def build_response(
+    query: str,
+    lite: bool,
+):
+    print("LITE MODE:", lite)
+
     if not query:
         return {"text": "Empty query", "score": 0}
 
@@ -493,7 +566,7 @@ async def build_response(query: str):
 
     if intent == "unknown":
         return {
-        "text": """## Insight
+            "text": """## Insight
 I can help with:
 - meals
 - glucose
@@ -506,7 +579,7 @@ Say something like:
 - "my sugar is high after meal"
 - "how to reduce BP"
 """,
-        "score": 0
+            "score": 0,
         }
 
     if SCROLL_TEST:
@@ -519,14 +592,17 @@ Say something like:
     if USE_LLM:
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(llm_response, q, ctx),
-                timeout=15
+                asyncio.to_thread(llm_response, q, ctx, lite), timeout=15
             )
             return {"text": enforce_format(result), "score": score, "intent": intent}
 
         except asyncio.TimeoutError:
             print("LLM TIMEOUT")
-            return {"text": "LLM timed out. Try again.", "score": score, "intent": intent}
+            return {
+                "text": "LLM timed out. Try again.",
+                "score": score,
+                "intent": intent,
+            }
 
         except Exception as e:
             print("LLM ERROR:", e)
@@ -534,7 +610,7 @@ Say something like:
                 "text": mock_response(intent),
                 "score": score,
                 "intent": intent,
-                "error": str(e)
+                "error": str(e),
             }
 
     return {
@@ -546,6 +622,7 @@ Try asking about lifestyle, BP, glucose, or cholesterol.""",
         "score": score,
         "intent": intent,
     }
+
 
 def correct_spelling(text: str) -> str:
     words = text.split()
@@ -560,13 +637,16 @@ def correct_spelling(text: str) -> str:
             continue
 
         # fuzzy match (optional but useful)
-        match = difflib.get_close_matches(lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85)
+        match = difflib.get_close_matches(
+            lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85
+        )
         if match:
             corrected.append(COMMON_CORRECTIONS[match[0]])
         else:
             corrected.append(w)
 
     return " ".join(corrected)
+
 
 def correct_with_llm(text: str) -> str:
     try:
@@ -575,24 +655,24 @@ def correct_with_llm(text: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "Correct spelling only. Do not change meaning. Return only corrected sentence."
+                    "content": "Correct spelling only. Do not change meaning. Return only corrected sentence.",
                 },
-                {
-                    "role": "user",
-                    "content": text
-                }
+                {"role": "user", "content": text},
             ],
         )
         return extract_text(res).strip()
     except:
         return text
 
+
 # ---------------- NORMALIZE ENDPOINT ----------------
 from pydantic import BaseModel
 from typing import List
 
+
 class NormalizeRequest(BaseModel):
     items: List[str]
+
 
 @app.post("/normalize")
 async def normalize_food_items(req: NormalizeRequest):
@@ -607,17 +687,19 @@ async def normalize_food_items(req: NormalizeRequest):
     if not original:
         return {"items": original}
 
-    prompt = "\n".join([
-        "Normalize the following food items:",
-        "- Fix spelling mistakes",
-        '- Standardize names (e.g. "chxicken" → "chicken")',
-        "- DO NOT change quantities or units",
-        "- DO NOT split or merge items",
-        "Return ONLY a JSON array of corrected items.",
-        "",
-        f"Input: {original}",
-        "Output:",
-    ])
+    prompt = "\n".join(
+        [
+            "Normalize the following food items:",
+            "- Fix spelling mistakes",
+            '- Standardize names (e.g. "chxicken" → "chicken")',
+            "- DO NOT change quantities or units",
+            "- DO NOT split or merge items",
+            "Return ONLY a JSON array of corrected items.",
+            "",
+            f"Input: {original}",
+            "Output:",
+        ]
+    )
 
     try:
         res = await asyncio.wait_for(
@@ -633,17 +715,19 @@ async def normalize_food_items(req: NormalizeRequest):
         )
         text = extract_text(res).strip()
 
-        match = re.search(r'\[[\s\S]*\]', text)
+        match = re.search(r"\[[\s\S]*\]", text)
         if not match:
             raise ValueError("No JSON array in response")
 
-        parsed = __import__('json').loads(match.group(0))
+        parsed = __import__("json").loads(match.group(0))
 
         if not isinstance(parsed, list):
             raise ValueError("Response is not a list")
 
         if len(parsed) != len(original):
-            raise ValueError(f"Length mismatch: got {len(parsed)}, expected {len(original)}")
+            raise ValueError(
+                f"Length mismatch: got {len(parsed)}, expected {len(original)}"
+            )
 
         result = [str(item) for item in parsed]
         print("NORMALIZE OUTPUT:", result)
@@ -666,12 +750,15 @@ async def handle_query(request: Request):
     Keyboard path: application/json with {query, voice: false}
                    Runs LLM only → audio is always null
     """
+
     start = time.time()
     content_type = request.headers.get("content-type", "")
 
     # ── VOICE PATH ──────────────────────────────────────────────────────────
     if "multipart/form-data" in content_type:
         form = await request.form()
+        lite = form.get("lite") == "true"
+        print("VOICE LITE:", lite)
         audio_file = form.get("audio_file")
 
         if audio_file is None:
@@ -718,11 +805,10 @@ async def handle_query(request: Request):
             transcript_obj = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: client.audio.transcriptions.create(
-                        model="gpt-4o-mini-transcribe",
-                        file=audio_io
+                        model="gpt-4o-mini-transcribe", file=audio_io
                     )
                 ),
-                timeout=10
+                timeout=10,
             )
             raw_transcript = (transcript_obj.text or "").strip()
         except asyncio.TimeoutError:
@@ -753,7 +839,7 @@ async def handle_query(request: Request):
 
         print("CLEANED QUERY:", cleaned_query)
 
-        result = await build_response(cleaned_query)
+        result = await build_response(cleaned_query, lite)
         text = result.get("text", "")
         if not text:
             text = "Something went wrong. Please try again."
@@ -763,8 +849,7 @@ async def handle_query(request: Request):
         tts_text = text
         try:
             audio = await asyncio.wait_for(
-                asyncio.to_thread(generate_tts, tts_text),
-                timeout=15
+                asyncio.to_thread(generate_tts, tts_text), timeout=15
             )
         except asyncio.TimeoutError:
             print("TTS TIMEOUT")
@@ -785,10 +870,14 @@ async def handle_query(request: Request):
     else:
         data = await request.json()
         query = (data.get("query") or "").strip()
+        lite = data.get("lite", False)
+
         voice = bool(data.get("voice", False))
 
         if voice:
-            print("WARNING: /query keyboard path received voice:true — treating as keyboard")
+            print(
+                "WARNING: /query keyboard path received voice:true — treating as keyboard"
+            )
 
         print(f"\n--- KEYBOARD REQUEST ---")
         print(f"QUERY: {query}")
@@ -823,7 +912,7 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
-        result = await build_response(query)
+        result = await build_response(query, lite)
         text = result.get("text", "")
         score = result.get("score", 0)
 
