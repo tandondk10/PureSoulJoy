@@ -25,7 +25,6 @@ import { useUser } from "@/context/UserContext";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import SectionCard from "../components/SectionCard";
 import { createTraceId, logTrace } from "../utils/trace";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
@@ -48,12 +47,13 @@ type Section = { title: string; content: string };
 
 type QueryBlock = {
   id: string;
-  query: string;
+  query?: string;
   status: "loading" | "complete" | "error";
-  source: "voice" | "text";
+  source: "voice" | "text" | "system";
   sections?: Section[];
   rawText?: string;
   errorMessage?: string;
+  nextActions?: string[];
 };
 
 // Valid state transitions per spec §4.2
@@ -65,7 +65,10 @@ const VALID_TRANSITIONS: Record<VoiceState, VoiceState[]> = {
   PLAYING: ["IDLE", "RECORDING", "PROCESSING"],
 };
 
+
 export default function HomeScreen() {
+  const [liteMode, setLiteMode] = useState<null | boolean>(null);
+  const [litePromptShown, setLitePromptShown] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("IDLE");
   const [statusText, setStatusText] = useState<string | null>(null);
   const [blocks, setBlocks] = useState<QueryBlock[]>([]);
@@ -139,20 +142,21 @@ export default function HomeScreen() {
         };
       });
   };
+  const scrollToBlock = () => { }
 
-  const scrollToBlock = (id: string) => {
-    requestAnimationFrame(() => {
-      const block = blockRefs.current[id];
-      const sv = scrollRef.current;
-      if (!block || !sv) return;
-      block.measureLayout(
-        sv as any,
-        (_x: number, y: number) =>
-          sv.scrollTo({ y: Math.max(0, y - 20), animated: true }),
-        () => { }
-      );
-    });
-  };
+  //  const scrollToBlock = (id: string) => {
+  //    requestAnimationFrame(() => {
+  //      const block = blockRefs.current[id];
+  //      const sv = scrollRef.current;
+  //      if (!block || !sv) return;
+  //      block.measureLayout(
+  //       sv as any,
+  //        (_x: number, y: number) =>
+  //          sv.scrollTo({ y: Math.max(0, y - 20), animated: true }),
+  //       () => { }
+  //      );
+  //   });
+  //  };
   // ✅ ADD THIS RIGHT BELOW
   const smoothScroll = (id: string) => {
     if (lastScrollIdRef.current === id) return; // 🔒 prevent duplicate scrolls
@@ -276,7 +280,7 @@ export default function HomeScreen() {
       ];
     });
 
-    smoothScroll(id);
+    //smoothScroll(id);
 
     const initialStatus = isMaxDuration
       ? "Recording limit reached. Transcribing..."
@@ -312,6 +316,7 @@ export default function HomeScreen() {
         type: isCAF ? "audio/x-caf" : "audio/m4a",
       } as any);
 
+      formData.append("lite", liteMode === true ? "true" : "false");
       formData.append("traceId", traceId);
       formData.append("user_profile", JSON.stringify(user ?? {}));
 
@@ -381,14 +386,14 @@ export default function HomeScreen() {
               ...b,
               query: cleanedQuery,
               status: "complete",
-              sections: sections ?? undefined,
-              rawText: sections ? undefined : text,
+              sections: liteMode ? undefined : sections ?? undefined,
+              rawText: liteMode ? text : (sections ? undefined : text),
             }
             : b
         )
       );
 
-      smoothScroll(id);
+      //smoothScroll(id);
 
       if (data.audio) {
         playAudio(data.audio);
@@ -491,6 +496,7 @@ export default function HomeScreen() {
         body: JSON.stringify({
           query,
           voice: false,
+          lite: liteMode === true,
           user_profile: user ?? {},
           traceId,
         }),
@@ -539,10 +545,10 @@ export default function HomeScreen() {
           b.id === id
             ? {
               ...b,
-              query: cleanedQuery, // ✅ FIXED
+              query: cleanedQuery,
               status: "complete",
-              sections: sections ?? undefined,
-              rawText: sections ? undefined : text,
+              sections: liteMode ? undefined : sections ?? undefined,
+              rawText: liteMode ? text : (sections ? undefined : text),
             }
             : b
         )
@@ -904,6 +910,32 @@ export default function HomeScreen() {
     }, [])
   );
 
+  useEffect(() => {
+    if (checkingUser) return;
+    if (litePromptShown) return;
+    setBlocks((prev) => [
+      ...prev,
+      {
+        id: "mode-switch",
+        status: "complete",
+        source: "system",
+        rawText: "Want simpler, voice-friendly answers?",
+        nextActions: ["Try Lite", "Stay Detailed"],
+      },
+    ]);
+    setLitePromptShown(true);
+  }, [checkingUser]);
+
+  const handleNextAction = (value: string) => {
+    if (value === "Try Lite") {
+      setLiteMode(true);
+      setBlocks([]);
+    } else if (value === "Stay Detailed") {
+      setLiteMode(false);
+      setBlocks([]);
+    }
+  };
+
   // ─── Render ───────────────────────────────────────────────────────────────
 
   const isProcessing = voiceState === "PROCESSING";
@@ -933,284 +965,328 @@ export default function HomeScreen() {
           keyboardVerticalOffset={80}
         >
           <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <View style={{ flex: 1 }}>
+            <View style={{ flex: 1 }}>
 
-            {/* 🔥 HEADER (NON-SCROLLING) */}
-            <View style={{ paddingHorizontal: 16, paddingTop: 6 }}>
-              <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
-                Lifestyle
-              </Text>
+              {/* 🔥 HEADER (NON-SCROLLING) */}
+              <View style={{ paddingHorizontal: 16, paddingTop: 6 }}>
+                <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
+                  Lifestyle
+                </Text>
 
-              <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>
-                Lifestyle Chat
-              </Text>
-            </View>
+                <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>
+                  Lifestyle Chat
+                </Text>
+              </View>
 
-            {/* 🔥 SCROLLABLE AREA */}
-            <ScrollView
-              ref={scrollRef}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode="on-drag"
-              contentContainerStyle={{
-                paddingHorizontal: 16,
-                paddingBottom: 100,
-              }}
-            >
-              {/* EMPTY STATE */}
-              {blocks.length === 0 && (
-                <View style={{ marginTop: 30 }}>
-                  <Text
-                    style={{
-                      color: C.text,
-                      fontSize: 16,
-                      textAlign: "center",
-                      marginBottom: 16,
+              {/* 🔥 SCROLLABLE AREA */}
+              <ScrollView
+                ref={scrollRef}
+                style={{ flex: 1 }}
+                keyboardShouldPersistTaps="always"
+                keyboardDismissMode="on-drag"
+                contentContainerStyle={{
+                  paddingHorizontal: 16,
+                  paddingBottom: 100,
+                }}
+              >
+                {/* EMPTY STATE */}
+                {blocks.length === 0 && (
+                  <View style={{ marginTop: 30 }}>
+                    <Text
+                      style={{
+                        color: C.text,
+                        fontSize: 16,
+                        textAlign: "center",
+                        marginBottom: 16,
+                      }}
+                    >
+                      Ask anything about your lifestyle
+                    </Text>
+
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center" }}>
+                      {[
+                        "How to control sugar spikes?",
+                        "Best post-meal walk timing?",
+                        "Healthy breakfast ideas",
+                      ].map((q, i) => (
+                        <TouchableOpacity
+                          key={i}
+                          onPress={() => handleChip(q)}
+                          style={{
+                            backgroundColor: C.surfaceAlt,
+                            paddingHorizontal: 12,
+                            paddingVertical: 8,
+                            borderRadius: 12,
+                            margin: 4,
+                          }}
+                        >
+                          <Text style={{ color: C.text, fontSize: 13 }}>{q}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+                {/* CHAT BLOCKS */}
+                {blocks.map((block) => (
+                  <View
+                    key={block.id}
+                    ref={(ref) => {
+                      if (ref) blockRefs.current[block.id] = ref;
+                      else delete blockRefs.current[block.id];
                     }}
                   >
-                    Ask anything about your lifestyle
-                  </Text>
-
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center" }}>
-                    {[
-                      "How to control sugar spikes?",
-                      "Best post-meal walk timing?",
-                      "Healthy breakfast ideas",
-                    ].map((q, i) => (
-                      <TouchableOpacity
-                        key={i}
-                        onPress={() => handleChip(q)}
+                    {/* Query bubble */}
+                    {block.query && (
+                      <View
                         style={{
-                          backgroundColor: C.surfaceAlt,
-                          paddingHorizontal: 12,
-                          paddingVertical: 8,
-                          borderRadius: 12,
-                          margin: 4,
+                          alignSelf: "flex-end",
+                          backgroundColor:
+                            block.source === "voice" ? "#CDEBCC" : C.userBubble,
+                          paddingVertical: 6,
+                          paddingHorizontal: 10,
+                          borderRadius: 14,
+                          marginVertical: 3,
+                          maxWidth: "80%",
                         }}
                       >
-                        <Text style={{ color: C.text, fontSize: 13 }}>{q}</Text>
+                        <Text style={{ color: C.textDark }}>
+                          {block.source === "voice" ? "🎤 " : ""}
+                          {block.query}
+                        </Text>
+                      </View>
+                    )}
+
+                    {block.status === "loading" && (
+                      <View style={{ padding: 10 }}>
+                        <ActivityIndicator color={C.accent} />
+                      </View>
+                    )}
+
+                    {block.status === "error" && (
+                      <Text style={{ color: C.error, paddingVertical: 4 }}>
+                        {block.errorMessage ?? "Something went wrong."}
+                      </Text>
+                    )}
+
+                    {block.status === "complete" &&
+                      block.sections?.map((s, i) => (
+                        <View key={i} style={{ padding: 10 }}>
+                          <Text style={{ color: "white" }}>{s.title}</Text>
+                          <Text style={{ color: "gray" }}>{s.content}</Text>
+                        </View>
+                      ))}
+
+                    {block.status === "complete" && block.rawText && (
+                      <View
+                        style={{
+                          backgroundColor: C.surfaceAlt,
+                          padding: 12,
+                          borderRadius: 14,
+                          marginVertical: 6,
+                        }}
+                      >
+                        <Text style={{ color: C.text }}>
+                          {block.rawText}
+                        </Text>
+                      </View>
+                    )}
+
+                    {block.nextActions && block.nextActions.length > 0 && (
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          justifyContent: "center",
+                          gap: 10,
+                          marginTop: 8,
+                          marginBottom: 4,
+                        }}
+                      >
+                        {block.nextActions.map((action) => (
+                          <TouchableOpacity
+                            key={action}
+                            onPress={() => handleNextAction(action)}
+                            style={{
+                              backgroundColor: action === "Try Lite" ? C.accent : C.surface,
+                              paddingHorizontal: 18,
+                              paddingVertical: 10,
+                              borderRadius: 10,
+                              borderWidth: 1,
+                              borderColor: action === "Try Lite" ? C.accent : C.border,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: action === "Try Lite" ? "#000" : C.text,
+                                fontWeight: "600",
+                                fontSize: 14,
+                              }}
+                            >
+                              {action}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </ScrollView>
+
+              {/* STATUS */}
+              {statusText && (
+                <View style={{ alignItems: "center", paddingVertical: 6 }}>
+                  <Text
+                    style={{
+                      color: isErrorStatus ? C.error : C.muted,
+                      fontSize: 13,
+                    }}
+                  >
+                    {statusText}
+                  </Text>
+
+                  {/* 🔥 NEW: Action buttons for routing */}
+                  {statusText === "Do you want to analyze a meal?" && (
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "center",
+                        marginTop: 8,
+                      }}
+                    >
+                      <TouchableOpacity
+                        onPress={() => {
+                          if (!pendingMeal) return;
+
+                          setStatusText(null);
+                          navigatedToMealRef.current = true;
+
+                          router.push(
+                            `/meal-main?prefill=${encodeURIComponent(pendingMeal)}`
+                          );
+                        }}
+                        style={{
+                          backgroundColor: C.accent,
+                          paddingHorizontal: 16,
+                          paddingVertical: 8,
+                          borderRadius: 10,
+                          marginRight: 8,
+                        }}
+                      >
+                        <Text style={{ color: "#000", fontWeight: "600" }}>
+                          Yes
+                        </Text>
                       </TouchableOpacity>
-                    ))}
+
+                      <TouchableOpacity
+                        onPress={() => {
+                          setStatusText(null);
+                          // input is unchanged; keep pendingMeal for Capture Meal
+                        }}
+                        style={{
+                          backgroundColor: "#1E2A38",
+                          paddingHorizontal: 16,
+                          paddingVertical: 8,
+                          borderRadius: 10
+                        }}
+                      >
+                        <Text style={{ color: "#FFFFFF", fontWeight: "500" }}>
+                          No
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              {/* CAPTURE BUTTON */}
+              {!isKeyboardVisible && (
+                <View
+                  pointerEvents="box-none"
+                  style={{ alignItems: "center", paddingHorizontal: 16, marginVertical: 10 }}
+                >
+                  <View style={{ width: 260 }} pointerEvents="box-none">
+                    <TouchableOpacity
+                      onPress={() => {
+                        navigatedToMealRef.current = true;
+                        router.push("/meal-capture");
+                      }}
+                      style={{
+                        backgroundColor: C.accent,
+                        paddingVertical: 16,
+                        paddingHorizontal: 20,
+                        borderRadius: 12,
+                        alignItems: "center",
+                        width: "100%",
+                        elevation: 2,
+                      }}
+                    >
+                      <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
+                        📸 Capture Meal
+                      </Text>
+                    </TouchableOpacity>
                   </View>
                 </View>
               )}
 
-              {/* CHAT BLOCKS */}
-              {blocks.map((block) => (
-                <View
-                  key={block.id}
-                  ref={(ref) => {
-                    if (ref) blockRefs.current[block.id] = ref;
-                    else delete blockRefs.current[block.id];
-                  }}
-                >
-                  {/* Query bubble */}
-                  {block.query && (
-                    <View
-                      style={{
-                        alignSelf: "flex-end",
-                        backgroundColor:
-                          block.source === "voice" ? "#CDEBCC" : C.userBubble,
-                        paddingVertical: 6,
-                        paddingHorizontal: 10,
-                        borderRadius: 14,
-                        marginVertical: 3,
-                        maxWidth: "80%",
-                      }}
-                    >
-                      <Text style={{ color: C.textDark }}>
-                        {block.source === "voice" ? "🎤 " : ""}
-                        {block.query}
-                      </Text>
-                    </View>
-                  )}
+              {/* INPUT BAR */}
+              <View
+                style={{
+                  flexDirection: "row",
+                  backgroundColor: C.surface,
+                  borderRadius: 14,
+                  padding: 8,
+                  margin: 10,
+                  alignItems: "center",
+                }}
+              >
+                <TextInput
+                  value={input}
+                  onChangeText={(v) => { setInput(v); if (pendingMeal) setPendingMeal(null); }}
+                  editable={!isProcessing}
+                  placeholder='Ask or speak… say “Go BuildJoy”'
+                  placeholderTextColor={C.muted}
+                  style={{ flex: 1, color: C.text }}
+                  onSubmitEditing={handleSendPress}
+                  returnKeyType="send"
+                />
 
-                  {block.status === "loading" && (
-                    <View style={{ padding: 10 }}>
-                      <ActivityIndicator color={C.accent} />
-                    </View>
-                  )}
-
-                  {block.status === "error" && (
-                    <Text style={{ color: C.error, paddingVertical: 4 }}>
-                      {block.errorMessage ?? "Something went wrong."}
-                    </Text>
-                  )}
-
-                  {block.status === "complete" &&
-                    block.sections?.map((s, i) => (
-                      <SectionCard key={i} title={s.title} content={s.content} />
-                    ))}
-
-                  {block.status === "complete" && block.rawText && (
-                    <View
-                      style={{
-                        backgroundColor: C.surfaceAlt,
-                        padding: 12,
-                        borderRadius: 14,
-                        marginVertical: 6,
-                      }}
-                    >
-                      <Text style={{ color: C.text }}>
-                        {block.rawText}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              ))}
-            </ScrollView>
-
-            {/* STATUS */}
-            {statusText && (
-              <View style={{ alignItems: "center", paddingVertical: 6 }}>
-                <Text
+                <TouchableOpacity
+                  onPress={handleMicPress}
+                  disabled={isProcessing}
                   style={{
-                    color: isErrorStatus ? C.error : C.muted,
-                    fontSize: 13,
+                    marginRight: 8,
+                    paddingHorizontal: 10,
+                    paddingVertical: 10,
+                    borderRadius: 10,
+                    backgroundColor: isRecording
+                      ? C.recordingRed
+                      : C.surfaceAlt,
+                    opacity: isProcessing ? 0.5 : 1,
                   }}
                 >
-                  {statusText}
-                </Text>
+                  <Text style={{ color: C.text }}>
+                    {voiceState === "RECORDING" || voiceState === "PLAYING"
+                      ? "⏹"
+                      : "🎤"}
+                  </Text>
+                </TouchableOpacity>
 
-                {/* 🔥 NEW: Action buttons for routing */}
-                {statusText === "Do you want to analyze a meal?" && (
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      justifyContent: "center",
-                      marginTop: 8,
-                    }}
-                  >
-                    <TouchableOpacity
-                      onPress={() => {
-                        if (!pendingMeal) return;
-
-                        setStatusText(null);
-                        navigatedToMealRef.current = true;
-
-                        router.push(
-                          `/meal-main?prefill=${encodeURIComponent(pendingMeal)}`
-                        );
-                      }}
-                      style={{
-                        backgroundColor: C.accent,
-                        paddingHorizontal: 16,
-                        paddingVertical: 8,
-                        borderRadius: 10,
-                        marginRight: 8,
-                      }}
-                    >
-                      <Text style={{ color: "#000", fontWeight: "600" }}>
-                        Yes
-                      </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      onPress={() => {
-                        setStatusText(null);
-                        // input is unchanged; keep pendingMeal for Capture Meal
-                      }}
-                      style={{
-                        backgroundColor: "#1E2A38",
-                        paddingHorizontal: 16,
-                        paddingVertical: 8,
-                        borderRadius: 10
-                      }}
-                    >
-                      <Text style={{ color: "#FFFFFF", fontWeight: "500" }}>
-                        No
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
+                <TouchableOpacity
+                  disabled={isProcessing}
+                  onPress={handleSendPress}
+                  style={{
+                    backgroundColor: C.accent,
+                    paddingHorizontal: 14,
+                    paddingVertical: 10,
+                    borderRadius: 10,
+                    opacity: isProcessing ? 0.5 : 1,
+                  }}
+                >
+                  <Text style={{ color: "#000" }}>Send</Text>
+                </TouchableOpacity>
               </View>
-            )}
 
-            {/* CAPTURE BUTTON */}
-            {!isKeyboardVisible && (
-              <View style={{ alignItems: "center", paddingHorizontal: 16, marginVertical: 10 }}>
-                <View style={{ width: 260 }}>
-                  <TouchableOpacity
-                    onPress={() => {
-                      navigatedToMealRef.current = true;
-                      router.push("/meal-capture");
-                    }}
-                    style={{
-                      backgroundColor: C.accent,
-                      paddingVertical: 16,
-                      paddingHorizontal: 20,
-                      borderRadius: 12,
-                      alignItems: "center",
-                      width: "100%",
-                      elevation: 2,
-                    }}
-                  >
-                    <Text style={{ color: "#000", fontWeight: "600", fontSize: 15 }}>
-                      📸 Capture Meal
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
-
-            {/* INPUT BAR */}
-            <View
-              style={{
-                flexDirection: "row",
-                backgroundColor: C.surface,
-                borderRadius: 14,
-                padding: 8,
-                margin: 10,
-                alignItems: "center",
-              }}
-            >
-              <TextInput
-                value={input}
-                onChangeText={(v) => { setInput(v); if (pendingMeal) setPendingMeal(null); }}
-                editable={!isProcessing}
-                placeholder='Ask or speak… say “Go BuildJoy”'
-                placeholderTextColor={C.muted}
-                style={{ flex: 1, color: C.text }}
-                onSubmitEditing={handleSendPress}
-                returnKeyType="send"
-              />
-
-              <TouchableOpacity
-                onPress={handleMicPress}
-                disabled={isProcessing}
-                style={{
-                  marginRight: 8,
-                  paddingHorizontal: 10,
-                  paddingVertical: 10,
-                  borderRadius: 10,
-                  backgroundColor: isRecording
-                    ? C.recordingRed
-                    : C.surfaceAlt,
-                  opacity: isProcessing ? 0.5 : 1,
-                }}
-              >
-                <Text style={{ color: C.text }}>
-                  {voiceState === "RECORDING" || voiceState === "PLAYING"
-                    ? "⏹"
-                    : "🎤"}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                disabled={isProcessing}
-                onPress={handleSendPress}
-                style={{
-                  backgroundColor: C.accent,
-                  paddingHorizontal: 14,
-                  paddingVertical: 10,
-                  borderRadius: 10,
-                  opacity: isProcessing ? 0.5 : 1,
-                }}
-              >
-                <Text style={{ color: "#000" }}>Send</Text>
-              </TouchableOpacity>
             </View>
-
-          </View>
           </TouchableWithoutFeedback>
         </KeyboardAvoidingView>
       </View>
