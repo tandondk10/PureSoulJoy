@@ -280,7 +280,9 @@ export default function HomeScreen() {
       ];
     });
 
-    //smoothScroll(id);
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    });
 
     const initialStatus = isMaxDuration
       ? "Recording limit reached. Transcribing..."
@@ -393,8 +395,6 @@ export default function HomeScreen() {
         )
       );
 
-      //smoothScroll(id);
-
       if (data.audio) {
         playAudio(data.audio);
       } else {
@@ -477,8 +477,10 @@ export default function HomeScreen() {
 
     setInput("");
     logTrace(traceId, "UI_UPDATE_START");
-    setBlocks((prev) => [{ id, query, status: "loading", source: "text" }, ...prev]);
-    setTimeout(() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); }, 0);
+    setBlocks((prev) => [...prev, { id, query, status: "loading", source: "text" }]);
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    });
     logTrace(traceId, "UI_UPDATE_DONE");
 
     // 🌐 API setup
@@ -909,6 +911,15 @@ export default function HomeScreen() {
       }
     }, [])
   );
+
+  useEffect(() => {
+    const last = blocks[blocks.length - 1];
+    if (last?.status === "complete") {
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      });
+    }
+  }, [blocks]);
 
   useEffect(() => {
     if (checkingUser) return;
