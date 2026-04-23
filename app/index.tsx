@@ -26,7 +26,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { createTraceId, logTrace } from "../utils/trace";
-import { cleanMealText, parseMealItems } from "./utils/mealParser";
+import { parseMealItems } from "./utils/mealParser";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
@@ -1029,8 +1029,9 @@ export default function HomeScreen() {
                     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center" }}>
                       {[
                         "How to control sugar spikes?",
-                        "Best post-meal walk timing?",
+                        "Best post meal walk timing",
                         "Healthy breakfast ideas",
+                        "What should I eat with ice cream?",
                       ].map((q, i) => (
                         <TouchableOpacity
                           key={i}
