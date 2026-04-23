@@ -202,6 +202,43 @@ def normalize(q: str) -> str:
     return q
 
 
+# ---------------- MEAL TEXT CLEANING ----------------
+_MEAL_TRIGGER = re.compile(
+    r"\b(i\s+(just\s+)?(ate|had|eaten|consumed)|my meal was"
+    r"|for\s+(breakfast|lunch|dinner)|today|this morning|just now)\b",
+    re.IGNORECASE,
+)
+
+_MEAL_FILLERS = [
+    r"\bi just had\b",
+    r"\bi just ate\b",
+    r"\bi had\b",
+    r"\bi ate\b",
+    r"\bi consumed\b",
+    r"\bmy meal was\b",
+    r"\bfor breakfast\b",
+    r"\bfor lunch\b",
+    r"\bfor dinner\b",
+    r"\btoday\b",
+    r"\bthis morning\b",
+    r"\bjust now\b",
+]
+
+
+def is_meal_sentence(q: str) -> bool:
+    return bool(_MEAL_TRIGGER.search(q))
+
+
+def clean_meal_text(q: str) -> str:
+    result = q.lower()
+    for phrase in _MEAL_FILLERS:
+        result = re.sub(phrase, "", result, flags=re.IGNORECASE)
+    result = re.sub(r"\band\b", ",", result)
+    result = re.sub(r",\s*,", ",", result)
+    result = re.sub(r"\s+", " ", result).strip(" ,")
+    return result
+
+
 # ---------------- CONTEXT ----------------
 def detect_context(q: str) -> dict:
     return {
@@ -246,7 +283,15 @@ Query: "{query}"
         return "unknown"
 
 
+def is_food_list(q: str) -> bool:
+    parts = [p.strip() for p in q.split(",") if p.strip()]
+    return len(parts) >= 2 and all(len(p) > 1 for p in parts)
+
+
 def detect_intent(q: str) -> str:
+    if is_food_list(q):
+        return "lifestyle"
+
     text = q.lower()
     scores = {}
 
@@ -562,6 +607,11 @@ def validate_lite_response(text: str) -> tuple:
 
 # ---------------- LLM ----------------
 def llm_response(q: str, ctx: dict, lite: bool) -> str:
+    print("RAW QUERY:", q)
+    if is_meal_sentence(q):
+        q = clean_meal_text(q)
+        print("CLEANED QUERY:", q)
+
     if lite:
         prompt = build_lite_prompt(q)
 
