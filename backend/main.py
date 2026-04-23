@@ -455,30 +455,60 @@ Respond ONLY in this exact format:
 
 # ---------------- LITE PROMPT ----------------
 def build_lite_prompt(q: str) -> str:
-    return f"""You are a simple, practical lifestyle coach.
+    return f"""
+You are a calm, practical health coach.
 
 User asked:
 "{q}"
 
-Give a clear and direct answer.
+Respond in EXACTLY 3 short sentences.
 
 Rules:
-- Use 2–3 short sentences
-- First sentence must directly answer the question
-- Use simple everyday language
-- No headings, no bullets, no markdown
-- No technical or medical jargon
-- Keep it natural and conversational
+- No headings
+- No markdown
+- No bullet points
+- No jargon
+- Keep it simple and natural
+- Sound like a real person guiding someone in daily life
+- Do not sound textbook or clinical
+- Keep each sentence short and clear
+- Prefer one clear action over multiple options
+- Avoid generic advice like "stay healthy" or "regular checkups"
+- Be specific and confident in what to do
+- Do not list multiple unrelated suggestions
+- Avoid soft language like "try", "consider", "you can also"
+- When suggesting an action, include a simple reason why it works in one short clause
+- Avoid repeating the same reassurance phrase; vary wording or omit reassurance if not needed
+- Prefer concrete, simple mechanisms over generic benefits (e.g., fluid release, slower absorption, using up sugar)
 
-Guidance:
-- If the question is informational → do not force action
-- If the question is about improvement → include a simple helpful action
-- Only include action if it feels natural
+Structure guidance:
+
+- If the user is asking what to do → start directly with the action
+- If the user is asking what something is → start with a simple explanation
+- If the user is worried or made a mistake → start with reassurance
+
+Then:
+- Include a simple next step if helpful
+- End with calm forward guidance
 
 Tone:
 - Calm
-- Clear
+- Supportive
+- Practical
 - Human
+
+Examples:
+
+User: What can I do quickly to reduce blood pressure?
+Answer: Take a few slow deep breaths and go for a short walk to bring it down. Blood pressure rises with stress and activity. It usually settles once your body relaxes.
+
+User: What is blood pressure?
+Answer: Blood pressure is how hard your blood pushes as it moves through your body. You can check it to see if it's in a healthy range. Keeping it steady helps protect your heart.
+
+User: I ate too many carbs, what should I do?
+Answer: Don't worry, this happens and your body can handle it. Drink some water and take a short walk to steady things. Just get back to balanced meals next time.
+
+Now answer the user's question in that style.
 """
 
 
@@ -493,21 +523,70 @@ def extract_text(res):
         return str(res)
 
 
-# ---------------- LLM ----------------
-def llm_response(q: str, ctx: dict, lite: bool) -> str:
-    if lite:
-        prompt = build_lite_prompt(q)
-    else:
-        prompt = build_prompt(q, ctx)
-
+# ---------------- CALL LLM ----------------
+def call_llm(prompt: str) -> str:
     model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
-
     res = completion(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )
-
     return extract_text(res)
+
+
+# ---------------- LITE VALIDATOR ----------------
+def validate_lite_response(text: str) -> tuple:
+    if not text:
+        return False, "empty"
+
+    # Rule 1: Sentence count
+    sentences = [s.strip() for s in text.split(".") if s.strip()]
+    if len(sentences) < 1 or len(sentences) > 4:
+        return False, "sentence_count"
+
+    # Rule 2: No structured formatting
+    forbidden = ["##", "* ", "\n- ", "\n1)", "\n2)", "\n3)"]
+    if any(f in text for f in forbidden):
+        return False, "format"
+
+    # Rule 3: Concise length
+    if len(text.strip()) > 350:
+        return False, "too_long"
+
+    # Rule 4: Basic jargon filter
+    jargon_words = ["mmhg", "glycemic"]
+    if any(j in text.lower() for j in jargon_words):
+        return False, "jargon"
+
+    return True, "ok"
+
+
+# ---------------- LLM ----------------
+def llm_response(q: str, ctx: dict, lite: bool) -> str:
+    if lite:
+        prompt = build_lite_prompt(q)
+
+        text = call_llm(prompt)
+        is_valid, reason = validate_lite_response(text)
+
+        if is_valid:
+            return text
+
+        print("VALIDATION FAILED:", reason)
+
+        retry_prompt = (
+            prompt + "\n\nRewrite the answer simpler, shorter, and more conversational."
+        )
+        text_retry = call_llm(retry_prompt)
+        is_valid_retry, _ = validate_lite_response(text_retry)
+
+        if is_valid_retry:
+            return text_retry
+
+        return text
+
+    else:
+        prompt = build_prompt(q, ctx)
+        return call_llm(prompt)
 
 
 # ---------------- FORMAT ----------------
@@ -594,7 +673,11 @@ Say something like:
             result = await asyncio.wait_for(
                 asyncio.to_thread(llm_response, q, ctx, lite), timeout=15
             )
-            return {"text": enforce_format(result), "score": score, "intent": intent}
+            return {
+                "text": result if lite else enforce_format(result),
+                "score": score,
+                "intent": intent,
+            }
 
         except asyncio.TimeoutError:
             print("LLM TIMEOUT")
