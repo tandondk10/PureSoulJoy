@@ -127,14 +127,23 @@ def validate_voice_query(raw_transcript: str) -> tuple:
     """
     raw = (raw_transcript or "").strip()
 
+<<<<<<< Updated upstream
     # Case A: null, empty, or Whisper hallucination
     if not raw or is_hallucination(raw):
         return "Could not understand. Please try again.", ""
+=======
+        # Case A: null, empty, or Whisper hallucination
+        if not raw or is_hallucination(raw):
+            result = ("Could not understand. Please try again.", "")
+            print(f"{tid} BE L3 validate_voice_query RESULT case=A error={result[0]!r}")
+            return result
+>>>>>>> Stashed changes
 
     # Trigger removal (before B/C/D checks)
     trigger_found = has_trigger(raw)
     cleaned = remove_trigger(raw)
 
+<<<<<<< Updated upstream
     # Case B: transcript contained only the trigger phrase
     if trigger_found and not cleaned:
         return "Please say your question or meal before Go ImproveMe.", ""
@@ -149,6 +158,29 @@ def validate_voice_query(raw_transcript: str) -> tuple:
         return "Could not understand. Please try again.", cleaned
 
     return None, cleaned
+=======
+        # Case B: transcript contained only the trigger phrase
+        if trigger_found and not cleaned:
+            result = ("Please say your question or meal before Go ImproveMe.", "")
+            print(f"{tid} BE L3 validate_voice_query RESULT case=B error={result[0]!r}")
+            return result
+
+        # Case C: no word with 3 or more characters
+        if len(cleaned.strip()) < 3:
+            result = ("Please say a complete question or meal.", cleaned)
+            print(f"{tid} BE L3 validate_voice_query RESULT case=C error={result[0]!r}")
+            return result
+
+        # Case D: only whitespace or punctuation
+        if not re.sub(r"[^\w]", "", cleaned).strip():
+            result = ("Could not understand. Please try again.", cleaned)
+            print(f"{tid} BE L3 validate_voice_query RESULT case=D error={result[0]!r}")
+            return result
+
+        result = (None, cleaned)
+        print(f"{tid} BE L3 validate_voice_query RESULT case=OK cleaned={cleaned!r}")
+        return result
+>>>>>>> Stashed changes
 
 
 # ---------------- KEYWORD MAP ----------------
@@ -242,12 +274,24 @@ def clean_meal_text(q: str) -> str:
 
 
 # ---------------- CONTEXT ----------------
+<<<<<<< Updated upstream
 def detect_context(q: str) -> dict:
     return {
         "after_meal": any(x in q for x in ["after meal", "post meal"]),
         "high": any(x in q for x in ["high", "spike", "elevated"]),
         "low": any(x in q for x in ["low", "drop"]),
     }
+=======
+def detect_context(tid: str, q: str) -> dict:
+    with trace_block(tid, 4, "BE"):
+        result = {
+            "after_meal": any(x in q for x in ["after meal", "post meal"]),
+            "high": any(x in q for x in ["high", "spike", "elevated"]),
+            "low": any(x in q for x in ["low", "drop"]),
+        }
+        print(f"{tid} BE L4 detect_context RESULT {result}")
+        return result
+>>>>>>> Stashed changes
 
 
 # ---------------- INTENT ----------------
@@ -271,6 +315,7 @@ Return ONLY the intent. No explanation.
 
 Query: "{query}"
 """
+<<<<<<< Updated upstream
     try:
         response = completion(
             model=model_name,
@@ -283,6 +328,23 @@ Query: "{query}"
     except Exception as e:
         print("LLM intent error:", e)
         return "unknown"
+=======
+        try:
+            response = completion(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=5,
+            )
+            result = response["choices"][0]["message"]["content"].strip().lower()
+            print(f"{tid} LLM L4 classify_intent_llm RESULT {result}")
+            return result
+        except Exception as e:
+            print(f"{tid} LLM L1 classify_intent_llm ERROR {e}")
+            result = "unknown"
+            print(f"{tid} LLM L4 classify_intent_llm RESULT {result} (fallback)")
+            return result
+>>>>>>> Stashed changes
 
 
 def is_food_list(q: str) -> bool:
@@ -367,6 +429,7 @@ def is_pairing_query(q: str) -> bool:
 
 def detect_intent(q: str) -> str:
 
+<<<<<<< Updated upstream
     s = q.lower()
 
     # 🔥 DOMAIN INTENTS FIRST
@@ -385,6 +448,73 @@ def detect_intent(q: str) -> str:
 
     if is_food_list(q) or is_single_food_phrase(q):
         return "lifestyle"
+=======
+        def _return(intent: str, method: str) -> str:
+            print(f"{tid} BE L4 detect_intent RESULT {intent} via={method}")
+            return intent
+
+        # 🔥 DOMAIN INTENTS FIRST
+        if any(x in s for x in ["statin", "metformin", "medicine", "medication", "drug"]):
+            return _return("medication", "keyword")
+
+        if "bp" in s or "blood pressure" in s:
+            return _return("bp", "keyword")
+
+        if "sugar" in s or "glucose" in s:
+            return _return("glucose", "keyword")
+
+        if any(x in s for x in ["cholesterol", "hdl", "ldl"]):
+            return _return("cholesterol", "keyword")
+
+        if is_food_list(q) or is_single_food_phrase(q):
+            return _return("lifestyle", "food_signal")
+
+        text = q.lower()
+        scores = {}
+
+        for category, groups in KEYWORD_MAP.items():
+            score = 0
+            for group_name, keywords in groups.items():
+                for kw in keywords:
+                    if re.search(rf"\b{re.escape(kw)}\b", text):
+                        if group_name == "primary":
+                            score += 3
+                        elif group_name == "medical":
+                            score += 2
+                        else:
+                            score += 1
+            if score > 0:
+                scores[category] = score
+
+        if scores:
+            return _return(max(scores, key=scores.get), "keyword_score")
+
+        q = text.lower().strip()
+
+        if any(
+            w in q
+            for w in [
+                "healthy", "breakfast", "lunch", "dinner", "food", "diet", "eat", "ideas",
+                "what is", "define", "meaning", "explain",
+                "blood sugar", "a1c",
+                "insulin", "insulin resistance", "insulin sensitivity",
+                "spike", "spikes", "crash", "response", "responder",
+                "glucotype", "glucose type", "type of glucose",
+            ]
+        ):
+            return _return("lifestyle", "extended_keyword")
+
+        if is_question(q):
+            return _return("unknown", "question_guard")
+
+        if USE_LLM:
+            intent = classify_intent_llm(tid, q)
+            if intent not in VALID_INTENTS:
+                return _return("unknown", "llm_invalid")
+            return _return(intent, "llm")
+
+        return _return("lifestyle", "default")
+>>>>>>> Stashed changes
 
     text = q.lower()
     scores = {}
@@ -465,8 +595,14 @@ def detect_intent(q: str) -> str:
 def compute_score(intent: str, q: str) -> int:
     score = 50
 
+<<<<<<< Updated upstream
     if intent == "unknown":
         return 40
+=======
+        if intent == "unknown":
+            print(f"{tid} BE L4 compute_score RESULT 40")
+            return 40
+>>>>>>> Stashed changes
 
     if intent == "glucose":
         if any(x in q for x in ["fiber", "vegetable"]):
@@ -492,7 +628,13 @@ def compute_score(intent: str, q: str) -> int:
         if any(x in q for x in ["junk", "fried"]):
             score -= 10
 
+<<<<<<< Updated upstream
     return max(0, min(score, 100))
+=======
+        result = max(0, min(score, 100))
+        print(f"{tid} BE L4 compute_score RESULT {result}")
+        return result
+>>>>>>> Stashed changes
 
 
 # ---------------- MOCK ----------------
@@ -676,6 +818,7 @@ def extract_text(res):
 
 
 # ---------------- CALL LLM ----------------
+<<<<<<< Updated upstream
 def call_llm(prompt: str) -> str:
     model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
     res = completion(
@@ -752,6 +895,90 @@ def enforce_format(text: str) -> str:
         return text
 
     return f"""## Insight
+=======
+def call_llm(tid: str, prompt: str) -> str:
+    with trace_block(tid, 4, "LLM"):
+        model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
+        res = completion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result = extract_text(res)
+        print(f"{tid} LLM L4 call_llm RESULT len={len(result)}")
+        return result
+
+
+# ---------------- LITE VALIDATOR ----------------
+def validate_lite_response(tid: str, text: str) -> tuple:
+    with trace_block(tid, 4, "BE"):
+        def _return(valid: bool, reason: str) -> tuple:
+            print(f"{tid} BE L4 validate_lite_response RESULT valid={valid} reason={reason}")
+            return valid, reason
+
+        if not text:
+            return _return(False, "empty")
+
+        sentences = [s.strip() for s in text.split(".") if s.strip()]
+        if len(sentences) < 1 or len(sentences) > 4:
+            return _return(False, "sentence_count")
+
+        forbidden = ["##", "* ", "\n- ", "\n1)", "\n2)", "\n3)"]
+        if any(f in text for f in forbidden):
+            return _return(False, "format")
+
+        if len(text.strip()) > 350:
+            return _return(False, "too_long")
+
+        jargon_words = ["mmhg", "glycemic"]
+        if any(j in text.lower() for j in jargon_words):
+            return _return(False, "jargon")
+
+        return _return(True, "ok")
+
+
+# ---------------- LLM ----------------
+def llm_response(tid: str, q: str, ctx: dict, lite: bool) -> str:
+    with trace_block(tid, 3, "BE"):
+        if is_meal_sentence(q):
+            q = clean_meal_text(q)
+            print(f"{tid} BE L3 llm_response CLEANED_QUERY {q!r}")
+
+        if lite:
+            prompt = build_lite_prompt(q)
+            text = call_llm(tid, prompt)
+            is_valid, reason = validate_lite_response(tid, text)
+
+            if is_valid:
+                print(f"{tid} BE L3 llm_response RESULT attempt=1 len={len(text)}")
+                return text
+
+            retry_prompt = prompt + "\n\nRewrite the answer simpler, shorter, and more conversational."
+            text_retry = call_llm(tid, retry_prompt)
+            is_valid_retry, _ = validate_lite_response(tid, text_retry)
+
+            if is_valid_retry:
+                print(f"{tid} BE L3 llm_response RESULT attempt=2 len={len(text_retry)}")
+                return text_retry
+
+            print(f"{tid} BE L3 llm_response RESULT attempt=1_fallback len={len(text)}")
+            return text
+
+        else:
+            prompt = build_prompt(q, ctx)
+            result = call_llm(tid, prompt)
+            print(f"{tid} BE L3 llm_response RESULT mode=detailed len={len(result)}")
+            return result
+
+
+# ---------------- FORMAT ----------------
+def enforce_format(tid: str, text: str) -> str:
+    with trace_block(tid, 4, "BE"):
+        if all(x in text for x in ["## Insight", "## What To Do", "## Expected Outcome"]):
+            print(f"{tid} BE L4 enforce_format RESULT pass")
+            return text
+
+        result = f"""## Insight
+>>>>>>> Stashed changes
 {text}
 
 ## What To Do
@@ -761,9 +988,12 @@ def enforce_format(text: str) -> str:
 ## Expected Outcome
 More accurate and useful guidance
 """
+        print(f"{tid} BE L4 enforce_format RESULT wrapped")
+        return result
 
 
 # ---------------- TTS ----------------
+<<<<<<< Updated upstream
 def generate_tts(text: str):
     try:
         speech = client.audio.speech.create(
@@ -775,6 +1005,23 @@ def generate_tts(text: str):
     except Exception as e:
         print("TTS ERROR:", e)
         return None
+=======
+def generate_tts(tid: str, text: str):
+    with trace_block(tid, 4, "BE"):
+        try:
+            speech = client.audio.speech.create(
+                model="gpt-4o-mini-tts", voice="alloy", input=text
+            )
+            audio_bytes = speech.read()
+            result = base64.b64encode(audio_bytes).decode("utf-8")
+            print(f"{tid} BE L4 generate_tts RESULT bytes={len(audio_bytes)}")
+            return result
+
+        except Exception as e:
+            print(f"{tid} BE L1 generate_tts ERROR {e}")
+            print(f"{tid} BE L4 generate_tts RESULT None")
+            return None
+>>>>>>> Stashed changes
 
 
 # ---------------- LITE FALLBACK ----------------
@@ -810,6 +1057,7 @@ Better control and reduced need for medication over time""",
 
 
 # ---------------- BUILD RESPONSE ----------------
+<<<<<<< Updated upstream
 async def build_response(query: str, lite: bool):
     print("LITE MODE:", lite)
 
@@ -852,6 +1100,45 @@ async def build_response(query: str, lite: bool):
             return lite_fallback_response()
         return {
             "text": """## Insight
+=======
+async def build_response(tid: str, query: str, lite: bool):
+    with trace_block(tid, 3, "BE"):
+        if not query:
+            print(f"{tid} BE L3 build_response RESULT empty_query")
+            return {"text": "Empty query", "score": 0}
+
+        q = correct_spelling(tid, query)
+        q = normalize(q)
+
+        if is_pairing_query(q):
+            result = {**build_pairing_response(q), "score": 50, "intent": "lifestyle"}
+            print(f"{tid} BE L3 build_response RESULT pairing")
+            return result
+
+        ctx = detect_context(tid, q)
+        intent = detect_intent(tid, q)
+        score = compute_score(tid, intent, q)
+
+        print(f"{tid} BE L3 build_response DOMAIN {intent}")
+        print(f"{tid} BE L3 build_response ENRICH {ctx}")
+
+        if intent == "unknown":
+            q = correct_with_llm(tid, q)
+            intent = detect_intent(tid, q)
+            print(f"{tid} BE L3 build_response DOMAIN_CORRECTED {intent}")
+
+        if intent == "medication":
+            print(f"{tid} BE L3 build_response RESULT medication_shortcut")
+            return medication_response()
+
+        if intent in ("unknown", "general"):
+            if lite:
+                print(f"{tid} BE L3 build_response RESULT lite_fallback")
+                return lite_fallback_response()
+            print(f"{tid} BE L3 build_response RESULT unknown_fallback")
+            return {
+                "text": """## Insight
+>>>>>>> Stashed changes
 I can help with:
 - meals
 - glucose
@@ -885,6 +1172,7 @@ Say something like:
                 "intent": intent,
             }
 
+<<<<<<< Updated upstream
         except asyncio.TimeoutError:
             print("LLM TIMEOUT")
             return {
@@ -904,6 +1192,42 @@ Say something like:
 
     return {
         "text": """## Insight
+=======
+        if SCROLL_TEST:
+            print(f"{tid} BE L3 build_response RESULT scroll_test")
+            return {"text": scroll_test_response(), "score": score, "intent": intent}
+
+        if USE_MOCK:
+            print(f"{tid} BE L3 build_response RESULT mock intent={intent}")
+            return {"text": mock_response(intent), "score": score, "intent": intent}
+
+        if USE_LLM:
+            try:
+                llm_text = await asyncio.wait_for(
+                    asyncio.to_thread(llm_response, tid, q, ctx, lite), timeout=15
+                )
+                result = {
+                    "text": llm_text if lite else enforce_format(tid, llm_text),
+                    "score": score,
+                    "intent": intent,
+                }
+                print(f"{tid} BE L3 build_response RESULT llm intent={intent} score={score}")
+                return result
+
+            except asyncio.TimeoutError:
+                print(f"{tid} BE L1 build_response ERROR llm_timeout")
+                print(f"{tid} BE L3 build_response RESULT timeout")
+                return {"text": "LLM timed out. Try again.", "score": score, "intent": intent}
+
+            except Exception as e:
+                print(f"{tid} BE L1 build_response ERROR {e}")
+                print(f"{tid} BE L3 build_response RESULT llm_error_mock")
+                return {"text": mock_response(intent), "score": score, "intent": intent, "error": str(e)}
+
+        print(f"{tid} BE L3 build_response RESULT no_llm_fallback")
+        return {
+            "text": """## Insight
+>>>>>>> Stashed changes
 Fallback response active.
 
 ## Next Step
@@ -917,6 +1241,7 @@ def correct_spelling(text: str) -> str:
     words = text.split()
     corrected = []
 
+<<<<<<< Updated upstream
     for w in words:
         lw = w.lower()
 
@@ -952,6 +1277,44 @@ def correct_with_llm(text: str) -> str:
         return extract_text(res).strip()
     except:
         return text
+=======
+        for w in words:
+            lw = w.lower()
+            if lw in COMMON_CORRECTIONS:
+                corrected.append(COMMON_CORRECTIONS[lw])
+                continue
+            match = difflib.get_close_matches(lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85)
+            if match:
+                corrected.append(COMMON_CORRECTIONS[match[0]])
+            else:
+                corrected.append(w)
+
+        result = " ".join(corrected)
+        print(f"{tid} BE L4 correct_spelling RESULT {result!r}")
+        return result
+
+
+def correct_with_llm(tid: str, text: str) -> str:
+    with trace_block(tid, 4, "LLM"):
+        try:
+            res = completion(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Correct spelling only. Do not change meaning. Return only corrected sentence.",
+                    },
+                    {"role": "user", "content": text},
+                ],
+            )
+            result = extract_text(res).strip()
+            print(f"{tid} LLM L4 correct_with_llm RESULT {result!r}")
+            return result
+        except Exception as e:
+            print(f"{tid} LLM L1 correct_with_llm ERROR {e}")
+            print(f"{tid} LLM L4 correct_with_llm RESULT {text!r} (passthrough)")
+            return text
+>>>>>>> Stashed changes
 
 
 def extract_target_food(q: str) -> str:
