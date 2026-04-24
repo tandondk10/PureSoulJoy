@@ -371,17 +371,17 @@ def detect_intent(q: str) -> str:
 
     # 🔥 DOMAIN INTENTS FIRST
 
+    if any(x in s for x in ["statin", "metformin", "medicine", "medication", "drug"]):
+        return "medication"
+
     if "bp" in s or "blood pressure" in s:
         return "bp"
 
     if "sugar" in s or "glucose" in s:
         return "glucose"
 
-    if "cholesterol" in s:
+    if any(x in s for x in ["cholesterol", "hdl", "ldl"]):
         return "cholesterol"
-
-    if is_question(q):
-        return "unknown"
 
     if is_food_list(q) or is_single_food_phrase(q):
         return "lifestyle"
@@ -426,10 +426,6 @@ def detect_intent(q: str) -> str:
             "meaning",
             "explain",
             # Metabolic health
-            "prediabetes",
-            "prediabetic",
-            "diabetes",
-            "glucose",
             "blood sugar",
             "a1c",
             # Insulin
@@ -450,6 +446,9 @@ def detect_intent(q: str) -> str:
     ):
         print("KEYWORD_MATCH:", q)
         return "lifestyle"
+
+    if is_question(q):
+        return "unknown"
 
     print("FALLING_TO_LLM:", q)
     if USE_LLM:
@@ -566,29 +565,43 @@ Context:
 - Low: {ctx["low"]}
 
 Instructions:
-- Personalize recommendations based on the profile
-- Max 3 actionable steps
-- Be specific (minutes, portions)
-- Adjust intensity:
-    * Prediabetic → moderate
-    * Diabetic → strict
-    * Healthy → flexible
+- Be practical and easy to follow
+- Use simple everyday language
+- Do NOT assume user condition unless explicitly stated in the query
+- Avoid clinical numbers (no grams, mg, frequencies)
+- Keep response readable in under 5 seconds
+- Max 3 bullets in What To Do
+- No numbered lists (use • only)
+- No long explanations
+- No Meal Score section
+- No Try This Week section
+- Use short directive phrases (not full sentences)
+- Avoid filler words (consider, try to, aim to)
+- Avoid repeating ideas across sections
+- Start Insight with direct cause (no explanation)
+- Do NOT use words like: important, helpful, beneficial
+- Do NOT mention conditions unless user explicitly states them
+- Keep Insight under 10 words if possible
 
 Respond ONLY in this exact format:
 
-## Meal Score
-...
+## Insight
+1–2 short lines summarizing the key issue or context.
 
 ## What To Do
-1) ...
-2) ...
-3) ...
-
-## Try This Week
-+ ...
+• First action (specific, short)
+• Second action (specific, short)
+• Third action (specific, short, optional)
 
 ## Expected Outcome
-...
+One short line on what improves.
+
+Rules:
+- No Meal Score section
+- No Try This Week section
+- No numbered bullets (use • only)
+- Max 3 bullets in What To Do
+- No long paragraphs
 """
 
 
@@ -735,14 +748,18 @@ def llm_response(q: str, ctx: dict, lite: bool) -> str:
 
 # ---------------- FORMAT ----------------
 def enforce_format(text: str) -> str:
-    if "## Meal Score" in text:
+    if all(x in text for x in ["## Insight", "## What To Do", "## Expected Outcome"]):
         return text
 
     return f"""## Insight
 {text}
 
-## Next Step
-Try asking again with more detail.
+## What To Do
+• Ask your question more clearly
+• Include food, symptom, or goal
+
+## Expected Outcome
+More accurate and useful guidance
 """
 
 
@@ -772,6 +789,23 @@ Try something like:
 """,
         "score": 0,
         "intent": "unknown",
+    }
+
+
+def medication_response() -> dict:
+    return {
+        "text": """## Insight
+Medication is used when lifestyle alone is not enough.
+
+## What To Do
+• Improve food quality and meal timing
+• Stay active daily
+• Track key health numbers
+
+## Expected Outcome
+Better control and reduced need for medication over time""",
+        "intent": "medication",
+        "score": 50,
     }
 
 
@@ -807,6 +841,10 @@ async def build_response(query: str, lite: bool):
     print("\n--- REQUEST ---")
     print("QUERY:", q)
     print("INTENT:", intent)
+
+    # ✅ medication shortcut
+    if intent == "medication":
+        return medication_response()
 
     # ✅ fallback (safe now)
     if intent in ("unknown", "general"):
