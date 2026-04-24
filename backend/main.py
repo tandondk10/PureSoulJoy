@@ -1,8 +1,5 @@
 from fastapi import FastAPI, Request
 from openai import OpenAI
-from contextlib import contextmanager
-from datetime import datetime
-import inspect
 import io
 import re
 import os
@@ -10,12 +7,10 @@ import time
 import asyncio
 import base64
 import difflib
-import uuid
 
 
 from litellm import completion
 from dotenv import load_dotenv
-from typing import Optional, Set
 
 load_dotenv()
 client = OpenAI()
@@ -33,66 +28,6 @@ print("LLM_MODE:", LLM_MODE)
 print("USE_LLM:", USE_LLM)
 print("USE_MOCK:", USE_MOCK)
 print("SCROLL_TEST:", SCROLL_TEST)
-
-# ---------------- TRACE CONFIG ----------------
-TRACE_LEVEL = int(os.getenv("TRACE_LEVEL", "3"))
-_raw_targets = os.getenv("TRACE_TARGETS", "BE detect_intent,BE compute_score,LLM ALL")
-
-TRACE_TARGETS: Optional[Set[str]] = (
-    set(t.strip() for t in _raw_targets.split(",") if t.strip())
-    if _raw_targets
-    else None
-)
-
-print("TRACE_LEVEL:", TRACE_LEVEL)
-print("TRACE_TARGETS:", TRACE_TARGETS)
-
-
-def should_trace(component: str, func_name: str) -> bool:
-    if TRACE_TARGETS is None:
-        return True
-    if "ALL" in TRACE_TARGETS:
-        return True
-    if f"{component} ALL" in TRACE_TARGETS:
-        return True
-    if func_name in TRACE_TARGETS:
-        return True
-    if f"{component} {func_name}" in TRACE_TARGETS:
-        return True
-    return False
-
-
-@contextmanager
-def trace_block(tid: str, level: int, component: str):
-    if TRACE_LEVEL < level:
-        yield
-        return
-
-    func_name = inspect.stack()[
-        2
-    ].function  # frame 0=trace_block, 1=__enter__, 2=caller
-
-    if TRACE_LEVEL >= 4 and not should_trace(component, func_name):
-        yield
-        return
-
-    start_time = time.time()
-    ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-    print(f"{tid} {component} L{level} {ts} {func_name} START")
-
-    try:
-        yield
-    except Exception as e:
-        ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-        print(f"{tid} {component} L1 {ts} {func_name} ERROR {str(e)}")
-        raise
-    finally:
-        duration_ms = int((time.time() - start_time) * 1000)
-        ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-        print(
-            f"{tid} {component} L{level} {ts} {func_name} END duration={duration_ms}ms"
-        )
-
 
 app = FastAPI()
 
@@ -185,36 +120,35 @@ def remove_trigger(text: str) -> str:
 
 
 # ---------------- VALIDATION ----------------
-def validate_voice_query(tid: str, raw_transcript: str) -> tuple:
+def validate_voice_query(raw_transcript: str) -> tuple:
     """
     Validates Whisper transcript. Returns (error_msg | None, cleaned_query).
     Order: A → B → C → D exactly per spec.
     """
-    with trace_block(tid, 3, "BE"):
-        raw = (raw_transcript or "").strip()
+    raw = (raw_transcript or "").strip()
 
-        # Case A: null, empty, or Whisper hallucination
-        if not raw or is_hallucination(raw):
-            return "Could not understand. Please try again.", ""
+    # Case A: null, empty, or Whisper hallucination
+    if not raw or is_hallucination(raw):
+        return "Could not understand. Please try again.", ""
 
-        # Trigger removal (before B/C/D checks)
-        trigger_found = has_trigger(raw)
-        cleaned = remove_trigger(raw)
+    # Trigger removal (before B/C/D checks)
+    trigger_found = has_trigger(raw)
+    cleaned = remove_trigger(raw)
 
-        # Case B: transcript contained only the trigger phrase
-        if trigger_found and not cleaned:
-            return "Please say your question or meal before Go ImproveMe.", ""
+    # Case B: transcript contained only the trigger phrase
+    if trigger_found and not cleaned:
+        return "Please say your question or meal before Go ImproveMe.", ""
 
-        # Case C: no word with 3 or more characters
-        words = re.findall(r"\w+", cleaned)
-        if len(cleaned.strip()) < 3:
-            return "Please say a complete question or meal.", cleaned
+    # Case C: no word with 3 or more characters
+    words = re.findall(r"\w+", cleaned)
+    if len(cleaned.strip()) < 3:
+        return "Please say a complete question or meal.", cleaned
 
-        # Case D: only whitespace or punctuation
-        if not re.sub(r"[^\w]", "", cleaned).strip():
-            return "Could not understand. Please try again.", cleaned
+    # Case D: only whitespace or punctuation
+    if not re.sub(r"[^\w]", "", cleaned).strip():
+        return "Could not understand. Please try again.", cleaned
 
-        return None, cleaned
+    return None, cleaned
 
 
 # ---------------- KEYWORD MAP ----------------
@@ -308,13 +242,12 @@ def clean_meal_text(q: str) -> str:
 
 
 # ---------------- CONTEXT ----------------
-def detect_context(tid: str, q: str) -> dict:
-    with trace_block(tid, 4, "BE"):
-        return {
-            "after_meal": any(x in q for x in ["after meal", "post meal"]),
-            "high": any(x in q for x in ["high", "spike", "elevated"]),
-            "low": any(x in q for x in ["low", "drop"]),
-        }
+def detect_context(q: str) -> dict:
+    return {
+        "after_meal": any(x in q for x in ["after meal", "post meal"]),
+        "high": any(x in q for x in ["high", "spike", "elevated"]),
+        "low": any(x in q for x in ["low", "drop"]),
+    }
 
 
 # ---------------- INTENT ----------------
@@ -324,9 +257,8 @@ VALID_INTENTS = {"lifestyle", "glucose", "cholesterol", "blood_pressure", "unkno
 model_name = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
 
 
-def classify_intent_llm(tid: str, query: str) -> str:
-    with trace_block(tid, 4, "LLM"):
-        prompt = f"""Classify the user query into ONE of these intents:
+def classify_intent_llm(query: str) -> str:
+    prompt = f"""Classify the user query into ONE of these intents:
 - lifestyle
 - glucose
 - cholesterol
@@ -339,18 +271,18 @@ Return ONLY the intent. No explanation.
 
 Query: "{query}"
 """
-        try:
-            response = completion(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=5,
-            )
-            intent = response["choices"][0]["message"]["content"].strip().lower()
-            return intent
-        except Exception as e:
-            print("LLM intent error:", e)
-            return "unknown"
+    try:
+        response = completion(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=5,
+        )
+        intent = response["choices"][0]["message"]["content"].strip().lower()
+        return intent
+    except Exception as e:
+        print("LLM intent error:", e)
+        return "unknown"
 
 
 def is_food_list(q: str) -> bool:
@@ -433,137 +365,134 @@ def is_pairing_query(q: str) -> bool:
     return is_question and bool(target)
 
 
-def detect_intent(tid: str, q: str) -> str:
-    with trace_block(tid, 4, "BE"):
-        s = q.lower()
+def detect_intent(q: str) -> str:
 
-        # 🔥 DOMAIN INTENTS FIRST
+    s = q.lower()
 
-        if any(
-            x in s for x in ["statin", "metformin", "medicine", "medication", "drug"]
-        ):
-            return "medication"
+    # 🔥 DOMAIN INTENTS FIRST
 
-        if "bp" in s or "blood pressure" in s:
-            return "bp"
+    if any(x in s for x in ["statin", "metformin", "medicine", "medication", "drug"]):
+        return "medication"
 
-        if "sugar" in s or "glucose" in s:
-            return "glucose"
+    if "bp" in s or "blood pressure" in s:
+        return "bp"
 
-        if any(x in s for x in ["cholesterol", "hdl", "ldl"]):
-            return "cholesterol"
+    if "sugar" in s or "glucose" in s:
+        return "glucose"
 
-        if is_food_list(q) or is_single_food_phrase(q):
-            return "lifestyle"
+    if any(x in s for x in ["cholesterol", "hdl", "ldl"]):
+        return "cholesterol"
 
-        text = q.lower()
-        scores = {}
-
-        for category, groups in KEYWORD_MAP.items():
-            score = 0
-            for group_name, keywords in groups.items():
-                for kw in keywords:
-                    if re.search(rf"\b{re.escape(kw)}\b", text):
-                        if group_name == "primary":
-                            score += 3
-                        elif group_name == "medical":
-                            score += 2
-                        else:
-                            score += 1
-            if score > 0:
-                scores[category] = score
-
-        if scores:
-            return max(scores, key=scores.get)
-
-        q = text.lower().strip()
-
-        if any(
-            w in q
-            for w in [
-                # General lifestyle / food
-                "healthy",
-                "breakfast",
-                "lunch",
-                "dinner",
-                "food",
-                "diet",
-                "eat",
-                "ideas",
-                # Definition / education
-                "what is",
-                "define",
-                "meaning",
-                "explain",
-                # Metabolic health
-                "blood sugar",
-                "a1c",
-                # Insulin
-                "insulin",
-                "insulin resistance",
-                "insulin sensitivity",
-                # Glucose behavior
-                "spike",
-                "spikes",
-                "crash",
-                "response",
-                "responder",
-                # Glucotype
-                "glucotype",
-                "glucose type",
-                "type of glucose",
-            ]
-        ):
-            print("KEYWORD_MATCH:", q)
-            return "lifestyle"
-
-        if is_question(q):
-            return "unknown"
-
-        print("FALLING_TO_LLM:", q)
-        if USE_LLM:
-            intent = classify_intent_llm(tid, q)
-            if intent not in VALID_INTENTS:
-                return "unknown"
-            print("LLM_INTENT_USED:", q, "→", intent)
-            return intent
-
+    if is_food_list(q) or is_single_food_phrase(q):
         return "lifestyle"
+
+    text = q.lower()
+    scores = {}
+
+    for category, groups in KEYWORD_MAP.items():
+        score = 0
+        for group_name, keywords in groups.items():
+            for kw in keywords:
+                if re.search(rf"\b{re.escape(kw)}\b", text):
+                    if group_name == "primary":
+                        score += 3
+                    elif group_name == "medical":
+                        score += 2
+                    else:
+                        score += 1
+        if score > 0:
+            scores[category] = score
+
+    if scores:
+        return max(scores, key=scores.get)
+
+    q = text.lower().strip()
+
+    if any(
+        w in q
+        for w in [
+            # General lifestyle / food
+            "healthy",
+            "breakfast",
+            "lunch",
+            "dinner",
+            "food",
+            "diet",
+            "eat",
+            "ideas",
+            # Definition / education
+            "what is",
+            "define",
+            "meaning",
+            "explain",
+            # Metabolic health
+            "blood sugar",
+            "a1c",
+            # Insulin
+            "insulin",
+            "insulin resistance",
+            "insulin sensitivity",
+            # Glucose behavior
+            "spike",
+            "spikes",
+            "crash",
+            "response",
+            "responder",
+            # Glucotype
+            "glucotype",
+            "glucose type",
+            "type of glucose",
+        ]
+    ):
+        print("KEYWORD_MATCH:", q)
+        return "lifestyle"
+
+    if is_question(q):
+        return "unknown"
+
+    print("FALLING_TO_LLM:", q)
+    if USE_LLM:
+        intent = classify_intent_llm(q)
+        if intent not in VALID_INTENTS:
+            return "unknown"
+        print("LLM_INTENT_USED:", q, "→", intent)
+        return intent
+
+    return "lifestyle"
 
 
 # ---------------- SCORE ----------------
-def compute_score(tid: str, intent: str, q: str) -> int:
-    with trace_block(tid, 4, "BE"):
-        score = 50
+def compute_score(intent: str, q: str) -> int:
+    score = 50
 
-        if intent == "unknown":
-            return 40
+    if intent == "unknown":
+        return 40
 
-        if intent == "glucose":
-            if any(x in q for x in ["fiber", "vegetable"]):
-                score += 20
-            if any(x in q for x in ["sugar", "dessert"]):
-                score -= 20
+    if intent == "glucose":
+        if any(x in q for x in ["fiber", "vegetable"]):
+            score += 20
+        if any(x in q for x in ["sugar", "dessert"]):
+            score -= 20
 
-        elif intent == "bp":
-            if "salt" in q:
-                score -= 15
-            if any(x in q for x in ["walk", "exercise"]):
-                score += 15
+    elif intent == "bp":
+        if "salt" in q:
+            score -= 15
+        if any(x in q for x in ["walk", "exercise"]):
+            score += 15
 
-        elif intent == "cholesterol":
-            if any(x in q for x in ["fiber", "oats"]):
-                score += 20
-            if "fat" in q:
-                score -= 10
+    elif intent == "cholesterol":
+        if any(x in q for x in ["fiber", "oats"]):
+            score += 20
+        if "fat" in q:
+            score -= 10
 
-        elif intent == "lifestyle":
-            if any(x in q for x in ["exercise", "walk"]):
-                score += 10
-            if any(x in q for x in ["junk", "fried"]):
-                score -= 10
+    elif intent == "lifestyle":
+        if any(x in q for x in ["exercise", "walk"]):
+            score += 10
+        if any(x in q for x in ["junk", "fried"]):
+            score -= 10
 
-        return max(0, min(score, 100))
+    return max(0, min(score, 100))
 
 
 # ---------------- MOCK ----------------
@@ -747,89 +676,82 @@ def extract_text(res):
 
 
 # ---------------- CALL LLM ----------------
-def call_llm(tid: str, prompt: str) -> str:
-    with trace_block(tid, 4, "LLM"):
-        model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
-        res = completion(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return extract_text(res)
+def call_llm(prompt: str) -> str:
+    model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
+    res = completion(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return extract_text(res)
 
 
 # ---------------- LITE VALIDATOR ----------------
-def validate_lite_response(tid: str, text: str) -> tuple:
-    with trace_block(tid, 4, "BE"):
-        if not text:
-            return False, "empty"
+def validate_lite_response(text: str) -> tuple:
+    if not text:
+        return False, "empty"
 
-        # Rule 1: Sentence count
-        sentences = [s.strip() for s in text.split(".") if s.strip()]
-        if len(sentences) < 1 or len(sentences) > 4:
-            return False, "sentence_count"
+    # Rule 1: Sentence count
+    sentences = [s.strip() for s in text.split(".") if s.strip()]
+    if len(sentences) < 1 or len(sentences) > 4:
+        return False, "sentence_count"
 
-        # Rule 2: No structured formatting
-        forbidden = ["##", "* ", "\n- ", "\n1)", "\n2)", "\n3)"]
-        if any(f in text for f in forbidden):
-            return False, "format"
+    # Rule 2: No structured formatting
+    forbidden = ["##", "* ", "\n- ", "\n1)", "\n2)", "\n3)"]
+    if any(f in text for f in forbidden):
+        return False, "format"
 
-        # Rule 3: Concise length
-        if len(text.strip()) > 350:
-            return False, "too_long"
+    # Rule 3: Concise length
+    if len(text.strip()) > 350:
+        return False, "too_long"
 
-        # Rule 4: Basic jargon filter
-        jargon_words = ["mmhg", "glycemic"]
-        if any(j in text.lower() for j in jargon_words):
-            return False, "jargon"
+    # Rule 4: Basic jargon filter
+    jargon_words = ["mmhg", "glycemic"]
+    if any(j in text.lower() for j in jargon_words):
+        return False, "jargon"
 
-        return True, "ok"
+    return True, "ok"
 
 
 # ---------------- LLM ----------------
-def llm_response(tid: str, q: str, ctx: dict, lite: bool) -> str:
-    with trace_block(tid, 3, "BE"):
-        print("RAW QUERY:", q)
-        if is_meal_sentence(q):
-            q = clean_meal_text(q)
-            print("CLEANED QUERY:", q)
+def llm_response(q: str, ctx: dict, lite: bool) -> str:
+    print("RAW QUERY:", q)
+    if is_meal_sentence(q):
+        q = clean_meal_text(q)
+        print("CLEANED QUERY:", q)
 
-        if lite:
-            prompt = build_lite_prompt(q)
+    if lite:
+        prompt = build_lite_prompt(q)
 
-            text = call_llm(tid, prompt)
-            is_valid, reason = validate_lite_response(tid, text)
+        text = call_llm(prompt)
+        is_valid, reason = validate_lite_response(text)
 
-            if is_valid:
-                return text
-
-            print("VALIDATION FAILED:", reason)
-
-            retry_prompt = (
-                prompt
-                + "\n\nRewrite the answer simpler, shorter, and more conversational."
-            )
-            text_retry = call_llm(tid, retry_prompt)
-            is_valid_retry, _ = validate_lite_response(tid, text_retry)
-
-            if is_valid_retry:
-                return text_retry
-
+        if is_valid:
             return text
 
-        else:
-            prompt = build_prompt(q, ctx)
-            return call_llm(tid, prompt)
+        print("VALIDATION FAILED:", reason)
+
+        retry_prompt = (
+            prompt + "\n\nRewrite the answer simpler, shorter, and more conversational."
+        )
+        text_retry = call_llm(retry_prompt)
+        is_valid_retry, _ = validate_lite_response(text_retry)
+
+        if is_valid_retry:
+            return text_retry
+
+        return text
+
+    else:
+        prompt = build_prompt(q, ctx)
+        return call_llm(prompt)
 
 
 # ---------------- FORMAT ----------------
-def enforce_format(tid: str, text: str) -> str:
-    with trace_block(tid, 4, "BE"):
-        if all(
-            x in text for x in ["## Insight", "## What To Do", "## Expected Outcome"]
-        ):
-            return text
+def enforce_format(text: str) -> str:
+    if all(x in text for x in ["## Insight", "## What To Do", "## Expected Outcome"]):
+        return text
 
-        return f"""## Insight
+    return f"""## Insight
 {text}
 
 ## What To Do
@@ -842,18 +764,17 @@ More accurate and useful guidance
 
 
 # ---------------- TTS ----------------
-def generate_tts(tid: str, text: str):
-    with trace_block(tid, 4, "BE"):
-        try:
-            speech = client.audio.speech.create(
-                model="gpt-4o-mini-tts", voice="alloy", input=text
-            )
-            audio_bytes = speech.read()
-            return base64.b64encode(audio_bytes).decode("utf-8")
+def generate_tts(text: str):
+    try:
+        speech = client.audio.speech.create(
+            model="gpt-4o-mini-tts", voice="alloy", input=text
+        )
+        audio_bytes = speech.read()
+        return base64.b64encode(audio_bytes).decode("utf-8")
 
-        except Exception as e:
-            print("TTS ERROR:", e)
-            return None
+    except Exception as e:
+        print("TTS ERROR:", e)
+        return None
 
 
 # ---------------- LITE FALLBACK ----------------
@@ -889,49 +810,48 @@ Better control and reduced need for medication over time""",
 
 
 # ---------------- BUILD RESPONSE ----------------
-async def build_response(tid: str, query: str, lite: bool):
-    with trace_block(tid, 3, "BE"):
-        print("LITE MODE:", lite)
+async def build_response(query: str, lite: bool):
+    print("LITE MODE:", lite)
 
-        if not query:
-            return {"text": "Empty query", "score": 0}
+    if not query:
+        return {"text": "Empty query", "score": 0}
 
-        # ✅ normalize FIRST
-        q = correct_spelling(tid, query)
-        q = normalize(q)
+    # ✅ normalize FIRST
+    q = correct_spelling(query)
+    q = normalize(q)
 
-        # ✅ pairing override
-        if is_pairing_query(q):
-            return {
-                **build_pairing_response(q),
-                "score": 50,
-                "intent": "lifestyle",
-            }
+    # ✅ pairing override
+    if is_pairing_query(q):
+        return {
+            **build_pairing_response(q),
+            "score": 50,
+            "intent": "lifestyle",
+        }
 
-        ctx = detect_context(tid, q)
-        intent = detect_intent(tid, q)
+    ctx = detect_context(q)
+    intent = detect_intent(q)
 
-        score = compute_score(tid, intent, q)
-        print("SCORE:", score)
+    score = compute_score(intent, q)
+    print("SCORE:", score)
 
-        if intent == "unknown":
-            q = correct_with_llm(tid, q)
-            intent = detect_intent(tid, q)
+    if intent == "unknown":
+        q = correct_with_llm(q)
+        intent = detect_intent(q)
 
-        print("\n--- REQUEST ---")
-        print("QUERY:", q)
-        print("INTENT:", intent)
+    print("\n--- REQUEST ---")
+    print("QUERY:", q)
+    print("INTENT:", intent)
 
-        # ✅ medication shortcut
-        if intent == "medication":
-            return medication_response()
+    # ✅ medication shortcut
+    if intent == "medication":
+        return medication_response()
 
-        # ✅ fallback (safe now)
-        if intent in ("unknown", "general"):
-            if lite:
-                return lite_fallback_response()
-            return {
-                "text": """## Insight
+    # ✅ fallback (safe now)
+    if intent in ("unknown", "general"):
+        if lite:
+            return lite_fallback_response()
+        return {
+            "text": """## Insight
 I can help with:
 - meals
 - glucose
@@ -944,96 +864,94 @@ Say something like:
 - "my sugar is high after meal"
 - "how to reduce BP"
 """,
-                "score": 0,
+            "score": 0,
+        }
+
+    if SCROLL_TEST:
+        print("🔥 SCROLL TEST MODE")
+        return {"text": scroll_test_response(), "score": score, "intent": intent}
+
+    if USE_MOCK:
+        return {"text": mock_response(intent), "score": score, "intent": intent}
+
+    if USE_LLM:
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(llm_response, q, ctx, lite), timeout=15
+            )
+            return {
+                "text": result if lite else enforce_format(result),
+                "score": score,
+                "intent": intent,
             }
 
-        if SCROLL_TEST:
-            print("🔥 SCROLL TEST MODE")
-            return {"text": scroll_test_response(), "score": score, "intent": intent}
+        except asyncio.TimeoutError:
+            print("LLM TIMEOUT")
+            return {
+                "text": "LLM timed out. Try again.",
+                "score": score,
+                "intent": intent,
+            }
 
-        if USE_MOCK:
-            return {"text": mock_response(intent), "score": score, "intent": intent}
+        except Exception as e:
+            print("LLM ERROR:", e)
+            return {
+                "text": mock_response(intent),
+                "score": score,
+                "intent": intent,
+                "error": str(e),
+            }
 
-        if USE_LLM:
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(llm_response, tid, q, ctx, lite), timeout=15
-                )
-                return {
-                    "text": result if lite else enforce_format(tid, result),
-                    "score": score,
-                    "intent": intent,
-                }
-
-            except asyncio.TimeoutError:
-                print("LLM TIMEOUT")
-                return {
-                    "text": "LLM timed out. Try again.",
-                    "score": score,
-                    "intent": intent,
-                }
-
-            except Exception as e:
-                print("LLM ERROR:", e)
-                return {
-                    "text": mock_response(intent),
-                    "score": score,
-                    "intent": intent,
-                    "error": str(e),
-                }
-
-        return {
-            "text": """## Insight
+    return {
+        "text": """## Insight
 Fallback response active.
 
 ## Next Step
 Try asking about lifestyle, BP, glucose, or cholesterol.""",
-            "score": score,
-            "intent": intent,
-        }
+        "score": score,
+        "intent": intent,
+    }
 
 
-def correct_spelling(tid: str, text: str) -> str:
-    with trace_block(tid, 4, "BE"):
-        words = text.split()
-        corrected = []
+def correct_spelling(text: str) -> str:
+    words = text.split()
+    corrected = []
 
-        for w in words:
-            lw = w.lower()
+    for w in words:
+        lw = w.lower()
 
-            # direct correction
-            if lw in COMMON_CORRECTIONS:
-                corrected.append(COMMON_CORRECTIONS[lw])
-                continue
+        # direct correction
+        if lw in COMMON_CORRECTIONS:
+            corrected.append(COMMON_CORRECTIONS[lw])
+            continue
 
-            # fuzzy match (optional but useful)
-            match = difflib.get_close_matches(
-                lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85
-            )
-            if match:
-                corrected.append(COMMON_CORRECTIONS[match[0]])
-            else:
-                corrected.append(w)
+        # fuzzy match (optional but useful)
+        match = difflib.get_close_matches(
+            lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85
+        )
+        if match:
+            corrected.append(COMMON_CORRECTIONS[match[0]])
+        else:
+            corrected.append(w)
 
-        return " ".join(corrected)
+    return " ".join(corrected)
 
 
-def correct_with_llm(tid: str, text: str) -> str:
-    with trace_block(tid, 4, "LLM"):
-        try:
-            res = completion(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Correct spelling only. Do not change meaning. Return only corrected sentence.",
-                    },
-                    {"role": "user", "content": text},
-                ],
-            )
-            return extract_text(res).strip()
-        except:
-            return text
+def correct_with_llm(text: str) -> str:
+    try:
+        res = completion(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Correct spelling only. Do not change meaning. Return only corrected sentence.",
+                },
+                {"role": "user", "content": text},
+            ],
+        )
+        return extract_text(res).strip()
+    except:
+        return text
 
 
 def extract_target_food(q: str) -> str:
@@ -1106,13 +1024,12 @@ class NormalizeRequest(BaseModel):
 
 
 @app.post("/normalize")
-async def normalize_food_items(req: NormalizeRequest, request: Request):
+async def normalize_food_items(req: NormalizeRequest):
     """
     Normalize food item names: fix spelling, standardize names.
     Quantities and units are preserved. Items are not split or merged.
     Falls back to original items on any failure.
     """
-    tid = request.headers.get("X-Trace-Id") or f"TRACE_{uuid.uuid4().hex[:8].upper()}"
     original = req.items
     print("NORMALIZE RAW:", original)
 
@@ -1183,11 +1100,8 @@ async def handle_query(request: Request):
                    Runs LLM only → audio is always null
     """
 
-    tid = request.headers.get("X-Trace-Id") or f"TRACE_{uuid.uuid4().hex[:8].upper()}"
     start = time.time()
     content_type = request.headers.get("content-type", "")
-    ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-    print(f"{tid} BE L3 {ts} handle_query START")
 
     # ── VOICE PATH ──────────────────────────────────────────────────────────
     if "multipart/form-data" in content_type:
@@ -1259,7 +1173,7 @@ async def handle_query(request: Request):
 
         print("WHISPER RAW:", raw_transcript)
 
-        error_msg, cleaned_query = validate_voice_query(tid, raw_transcript)
+        error_msg, cleaned_query = validate_voice_query(raw_transcript)
 
         if error_msg:
             print("VALIDATION FAILED:", error_msg)
@@ -1274,7 +1188,7 @@ async def handle_query(request: Request):
 
         print("CLEANED QUERY:", cleaned_query)
 
-        result = await build_response(tid, cleaned_query, lite)
+        result = await build_response(cleaned_query, lite)
         text = result.get("text", "")
         if not text:
             text = "Something went wrong. Please try again."
@@ -1284,15 +1198,12 @@ async def handle_query(request: Request):
         tts_text = text
         try:
             audio = await asyncio.wait_for(
-                asyncio.to_thread(generate_tts, tid, tts_text), timeout=15
+                asyncio.to_thread(generate_tts, tts_text), timeout=15
             )
         except asyncio.TimeoutError:
             print("TTS TIMEOUT")
             audio = None
 
-        duration_ms = int((time.time() - start) * 1000)
-        ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-        print(f"{tid} BE L3 {ts} handle_query END duration={duration_ms}ms")
         print("⏱️", round(time.time() - start, 2), "sec\n")
 
         return {
@@ -1350,13 +1261,10 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
-        result = await build_response(tid, query, lite)
+        result = await build_response(query, lite)
         text = result.get("text", "")
         score = result.get("score", 0)
 
-        duration_ms = int((time.time() - start) * 1000)
-        ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-        print(f"{tid} BE L3 {ts} handle_query END duration={duration_ms}ms")
         print("⏱️", round(time.time() - start, 2), "sec\n")
 
         # audio is always null for keyboard — spec constraint

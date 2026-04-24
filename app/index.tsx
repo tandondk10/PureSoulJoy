@@ -46,11 +46,12 @@ type VoiceState = "IDLE" | "RECORDING" | "PROCESSING" | "PLAYING";
 
 type Section = { title: string; content: string };
 
-type QueryBlock = {
+type Message = {
   id: string;
-  query?: string;
-  status: "loading" | "complete" | "error";
-  source: "voice" | "text" | "system";
+  role: "user" | "assistant" | "system";
+  text: string;
+  status?: "loading" | "complete" | "error";
+  source?: "voice" | "text";
   sections?: Section[];
   rawText?: string;
   errorMessage?: string;
@@ -72,7 +73,7 @@ export default function HomeScreen() {
   const [litePromptShown, setLitePromptShown] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("IDLE");
   const [statusText, setStatusText] = useState<string | null>(null);
-  const [blocks, setBlocks] = useState<QueryBlock[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
 
   const router = useRouter();
@@ -270,19 +271,17 @@ export default function HomeScreen() {
 
     discardResponseRef.current = false;
 
-    const id = traceId;
+    const userMsgId = `${traceId}-user`;
+    const assistantMsgId = `${traceId}-assistant`;
     lastScrollIdRef.current = null;
 
-    setBlocks((prev) => {
-      if (prev.find((b) => b.id === id)) return prev;
+    setMessages((prev) => {
+      if (prev.find((m) => m.id === userMsgId)) return prev;
       return [
         ...prev,
-        { id, query: "Voice input...", status: "loading", source: "voice" },
+        { id: userMsgId, role: "user", text: "🎤 Voice input...", source: "voice", status: "complete" },
+        { id: assistantMsgId, role: "assistant", text: "", source: "voice", status: "loading" },
       ];
-    });
-
-    requestAnimationFrame(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
     });
 
     const initialStatus = isMaxDuration
@@ -363,15 +362,11 @@ export default function HomeScreen() {
           : "No response received.";
 
       if (data.status === "error") {
-        setBlocks((prev) =>
-          prev.map((b) =>
-            b.id === id
-              ? {
-                ...b,
-                status: "error",
-                errorMessage: "🎤 Didn’t catch that. Try again.",
-              }
-              : b
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? { ...m, status: "error", errorMessage: "🎤 Didn’t catch that. Try again." }
+              : m
           )
         );
 
@@ -382,18 +377,18 @@ export default function HomeScreen() {
 
       const sections = parseSections(text);
 
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
-            ? {
-              ...b,
-              query: cleanedQuery,
-              status: "complete",
-              sections: liteMode ? undefined : sections ?? undefined,
-              rawText: liteMode ? text : (sections ? undefined : text),
-            }
-            : b
-        )
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id === userMsgId) return { ...m, text: cleanedQuery || m.text };
+          if (m.id === assistantMsgId) return {
+            ...m,
+            status: "complete",
+            text,
+            sections: liteMode ? undefined : sections ?? undefined,
+            rawText: liteMode ? text : (sections ? undefined : text),
+          };
+          return m;
+        })
       );
 
       if (data.audio) {
@@ -420,15 +415,9 @@ export default function HomeScreen() {
           ? "Connection timed out. Please try again."
           : "Connection issue. Please try again.";
 
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
-            ? {
-              ...b,
-              status: "error",
-              errorMessage: message,
-            }
-            : b
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMsgId ? { ...m, status: "error", errorMessage: message } : m
         )
       );
 
@@ -472,17 +461,18 @@ export default function HomeScreen() {
     discardResponseRef.current = false;
     startThinkingTimer("Almost there...", 1500);
 
-    // ✅ Use traceId as stable id
-    const id = traceId;
+    const userMsgId = `${traceId}-user`;
+    const assistantMsgId = `${traceId}-assistant`;
 
     lastScrollIdRef.current = null;
 
     setInput("");
     logTrace(traceId, "UI_UPDATE_START");
-    setBlocks((prev) => [...prev, { id, query: displayText, status: "loading", source: "text" }]);
-    requestAnimationFrame(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    });
+    setMessages((prev) => [
+      ...prev,
+      { id: userMsgId, role: "user", text: displayText, source: "text", status: "complete" },
+      { id: assistantMsgId, role: "assistant", text: "", source: "text", status: "loading" },
+    ]);
     logTrace(traceId, "UI_UPDATE_DONE");
 
     // 🌐 API setup
@@ -544,16 +534,17 @@ export default function HomeScreen() {
 
       logTrace(traceId, "UI_UPDATE_START");
 
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMsgId
             ? {
-              ...b,
+              ...m,
               status: "complete",
+              text,
               sections: liteMode ? undefined : sections ?? undefined,
               rawText: liteMode ? text : (sections ? undefined : text),
             }
-            : b
+            : m
         )
       );
 
@@ -579,16 +570,11 @@ export default function HomeScreen() {
           ? "Connection timed out. Please try again."
           : "Connection issue. Please try again.";
 
-      setBlocks((prev) =>
-        prev.map((b) =>
-          b.id === id
-            ? {
-              ...b,
-              query: b.query || query, // ✅ preserve
-              status: "error",
-              errorMessage: message,
-            }
-            : b
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMsgId
+            ? { ...m, status: "error", errorMessage: message }
+            : m
         )
       );
 
@@ -925,37 +911,30 @@ export default function HomeScreen() {
   );
 
   useEffect(() => {
-    const last = blocks[blocks.length - 1];
-    if (last?.status === "complete") {
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollToEnd({ animated: true });
-      });
-    }
-  }, [blocks]);
+    if (messages.length === 0) return;
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    });
+  }, [messages]);
+
+  const [showModePrompt, setShowModePrompt] = useState(false);
 
   useEffect(() => {
     if (checkingUser) return;
     if (litePromptShown) return;
-    setBlocks((prev) => [
-      ...prev,
-      {
-        id: "mode-switch",
-        status: "complete",
-        source: "system",
-        rawText: "Want simpler, voice-friendly answers?",
-        nextActions: ["Try Lite", "Stay Detailed"],
-      },
-    ]);
+    setShowModePrompt(true);
     setLitePromptShown(true);
   }, [checkingUser]);
 
   const handleNextAction = (value: string) => {
     if (value === "Try Lite") {
       setLiteMode(true);
-      setBlocks([]);
+      setMessages([]);
+      setShowModePrompt(false);
     } else if (value === "Stay Detailed") {
       setLiteMode(false);
-      setBlocks([]);
+      setMessages([]);
+      setShowModePrompt(false);
     }
   };
 
@@ -1012,38 +991,77 @@ export default function HomeScreen() {
                   paddingBottom: 100,
                 }}
               >
-                {/* EMPTY STATE */}
-                {blocks.length === 0 && (
+                {/* DISCOVERY MODE — no messages yet */}
+                {messages.length === 0 && (
                   <View style={{ marginTop: 30 }}>
-                    <Text
-                      style={{
-                        color: C.text,
-                        fontSize: 16,
-                        textAlign: "center",
-                        marginBottom: 16,
-                      }}
-                    >
+                    <Text style={{ color: C.text, fontSize: 16, textAlign: "center", marginBottom: 16 }}>
                       Ask anything about your lifestyle
                     </Text>
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center" }}>
+                      {[
+                        "How to control sugar spikes?",
+                        "Best post meal walk timing",
+                        "Healthy breakfast ideas",
+                        "What should I eat with ice cream?",
+                      ].map((q, i) => (
+                        <TouchableOpacity
+                          key={i}
+                          onPress={() => handleChip(q)}
+                          style={{
+                            backgroundColor: C.surfaceAlt,
+                            paddingHorizontal: 12,
+                            paddingVertical: 8,
+                            borderRadius: 12,
+                            margin: 4,
+                          }}
+                        >
+                          <Text style={{ color: C.text, fontSize: 13 }}>{q}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+
+                    {/* Mode prompt — shown before first query */}
+                    {showModePrompt && (
+                      <View style={{ marginTop: 24, alignItems: "center" }}>
+                        <Text style={{ color: C.muted, fontSize: 14, marginBottom: 12 }}>
+                          Want simpler, voice-friendly answers?
+                        </Text>
+                        <View style={{ flexDirection: "row", gap: 10 }}>
+                          {["Try Lite", "Stay Detailed"].map((action) => (
+                            <TouchableOpacity
+                              key={action}
+                              onPress={() => handleNextAction(action)}
+                              style={{
+                                backgroundColor: action === "Try Lite" ? C.accent : C.surface,
+                                paddingHorizontal: 18,
+                                paddingVertical: 10,
+                                borderRadius: 10,
+                                borderWidth: 1,
+                                borderColor: action === "Try Lite" ? C.accent : C.border,
+                              }}
+                            >
+                              <Text style={{ color: action === "Try Lite" ? "#000" : C.text, fontWeight: "600", fontSize: 14 }}>
+                                {action}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </View>
+                    )}
                   </View>
                 )}
 
-                {/* CHAT BLOCKS */}
-                {blocks.map((block) => (
+                {/* CONVERSATION MODE — messages exist */}
+                {messages.map((msg) => (
                   <View
-                    key={block.id}
-                    ref={(ref) => {
-                      if (ref) blockRefs.current[block.id] = ref;
-                      else delete blockRefs.current[block.id];
-                    }}
+                    key={msg.id}
                   >
-                    {/* Query bubble */}
-                    {block.query && (
+                    {/* User bubble */}
+                    {msg.role === "user" && (
                       <View
                         style={{
                           alignSelf: "flex-end",
-                          backgroundColor:
-                            block.source === "voice" ? "#CDEBCC" : C.userBubble,
+                          backgroundColor: msg.source === "voice" ? "#CDEBCC" : C.userBubble,
                           paddingVertical: 6,
                           paddingHorizontal: 10,
                           borderRadius: 14,
@@ -1051,27 +1069,27 @@ export default function HomeScreen() {
                           maxWidth: "80%",
                         }}
                       >
-                        <Text style={{ color: C.textDark }}>
-                          {block.source === "voice" ? "🎤 " : ""}
-                          {block.query}
-                        </Text>
+                        <Text style={{ color: C.textDark }}>{msg.text}</Text>
                       </View>
                     )}
 
-                    {block.status === "loading" && (
+                    {/* Assistant loading */}
+                    {msg.role === "assistant" && msg.status === "loading" && (
                       <View style={{ padding: 10 }}>
                         <ActivityIndicator color={C.accent} />
                       </View>
                     )}
 
-                    {block.status === "error" && (
+                    {/* Assistant error */}
+                    {msg.role === "assistant" && msg.status === "error" && (
                       <Text style={{ color: C.error, paddingVertical: 4 }}>
-                        {block.errorMessage ?? "Something went wrong."}
+                        {msg.errorMessage ?? "Something went wrong."}
                       </Text>
                     )}
 
-                    {block.status === "complete" &&
-                      block.sections?.map((s, i) => (
+                    {/* Assistant sections (structured response) */}
+                    {msg.role === "assistant" && msg.status === "complete" &&
+                      msg.sections?.map((s, i) => (
                         <View key={i} style={{ padding: 10 }}>
                           <Text style={{ color: "white" }}>{s.title}</Text>
                           <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
@@ -1080,7 +1098,8 @@ export default function HomeScreen() {
                         </View>
                       ))}
 
-                    {block.status === "complete" && block.rawText && (
+                    {/* Assistant raw text (lite mode) */}
+                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText && (
                       <View
                         style={{
                           backgroundColor: C.surfaceAlt,
@@ -1090,73 +1109,12 @@ export default function HomeScreen() {
                         }}
                       >
                         <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-                          {block.rawText}
+                          {msg.rawText}
                         </Text>
-                      </View>
-                    )}
-
-                    {block.nextActions && block.nextActions.length > 0 && (
-                      <View
-                        style={{
-                          flexDirection: "row",
-                          justifyContent: "center",
-                          gap: 10,
-                          marginTop: 8,
-                          marginBottom: 4,
-                        }}
-                      >
-                        {block.nextActions.map((action) => (
-                          <TouchableOpacity
-                            key={action}
-                            onPress={() => handleNextAction(action)}
-                            style={{
-                              backgroundColor: action === "Try Lite" ? C.accent : C.surface,
-                              paddingHorizontal: 18,
-                              paddingVertical: 10,
-                              borderRadius: 10,
-                              borderWidth: 1,
-                              borderColor: action === "Try Lite" ? C.accent : C.border,
-                            }}
-                          >
-                            <Text
-                              style={{
-                                color: action === "Try Lite" ? "#000" : C.text,
-                                fontWeight: "600",
-                                fontSize: 14,
-                              }}
-                            >
-                              {action}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
                       </View>
                     )}
                   </View>
                 ))}
-
-                {/* SUGGESTION CHIPS — always below responses */}
-                <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center", marginTop: 16 }}>
-                  {[
-                    "How to control sugar spikes?",
-                    "Best post meal walk timing",
-                    "Healthy breakfast ideas",
-                    "What should I eat with ice cream?",
-                  ].map((q, i) => (
-                    <TouchableOpacity
-                      key={i}
-                      onPress={() => handleChip(q)}
-                      style={{
-                        backgroundColor: C.surfaceAlt,
-                        paddingHorizontal: 12,
-                        paddingVertical: 8,
-                        borderRadius: 12,
-                        margin: 4,
-                      }}
-                    >
-                      <Text style={{ color: C.text, fontSize: 13 }}>{q}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
               </ScrollView>
 
               {/* STATUS */}
