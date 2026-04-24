@@ -1025,29 +1025,6 @@ export default function HomeScreen() {
                     >
                       Ask anything about your lifestyle
                     </Text>
-
-                    <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center" }}>
-                      {[
-                        "How to control sugar spikes?",
-                        "Best post meal walk timing",
-                        "Healthy breakfast ideas",
-                        "What should I eat with ice cream?",
-                      ].map((q, i) => (
-                        <TouchableOpacity
-                          key={i}
-                          onPress={() => handleChip(q)}
-                          style={{
-                            backgroundColor: C.surfaceAlt,
-                            paddingHorizontal: 12,
-                            paddingVertical: 8,
-                            borderRadius: 12,
-                            margin: 4,
-                          }}
-                        >
-                          <Text style={{ color: C.text, fontSize: 13 }}>{q}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
                   </View>
                 )}
 
@@ -1097,7 +1074,9 @@ export default function HomeScreen() {
                       block.sections?.map((s, i) => (
                         <View key={i} style={{ padding: 10 }}>
                           <Text style={{ color: "white" }}>{s.title}</Text>
-                          <Text style={{ color: "gray" }}>{s.content}</Text>
+                          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
+                            {s.content}
+                          </Text>
                         </View>
                       ))}
 
@@ -1110,7 +1089,7 @@ export default function HomeScreen() {
                           marginVertical: 6,
                         }}
                       >
-                        <Text style={{ color: C.text }}>
+                        <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
                           {block.rawText}
                         </Text>
                       </View>
@@ -1154,6 +1133,30 @@ export default function HomeScreen() {
                     )}
                   </View>
                 ))}
+
+                {/* SUGGESTION CHIPS — always below responses */}
+                <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center", marginTop: 16 }}>
+                  {[
+                    "How to control sugar spikes?",
+                    "Best post meal walk timing",
+                    "Healthy breakfast ideas",
+                    "What should I eat with ice cream?",
+                  ].map((q, i) => (
+                    <TouchableOpacity
+                      key={i}
+                      onPress={() => handleChip(q)}
+                      style={{
+                        backgroundColor: C.surfaceAlt,
+                        paddingHorizontal: 12,
+                        paddingVertical: 8,
+                        borderRadius: 12,
+                        margin: 4,
+                      }}
+                    >
+                      <Text style={{ color: C.text, fontSize: 13 }}>{q}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
               </ScrollView>
 
               {/* STATUS */}
