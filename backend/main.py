@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Request
 from openai import OpenAI
+from datetime import datetime
+from contextvars import ContextVar
 import io
 import re
 import os
@@ -24,14 +26,29 @@ SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"
 MODEL_OPENAI = os.getenv("MODEL_OPENAI", "gpt-4o-mini")
 MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
 
-print("LLM_MODE:", LLM_MODE)
-print("USE_LLM:", USE_LLM)
-print("USE_MOCK:", USE_MOCK)
-print("SCROLL_TEST:", SCROLL_TEST)
+TRACE_LEVEL = int(os.getenv("TRACE_LEVEL", "1"))
+
+
+def now_iso():
+    return datetime.utcnow().isoformat() + "Z"
+
+
+trace_id_var: ContextVar[str] = ContextVar("trace_id", default="unknown")
+
+
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] LLM_MODE:", LLM_MODE)
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] USE_LLM:", USE_LLM)
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] USE_MOCK:", USE_MOCK)
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] SCROLL_TEST:", SCROLL_TEST)
 
 app = FastAPI()
 
-print("🚨 LLM BACKEND RUNNING")
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] 🚨 LLM BACKEND RUNNING")
 
 
 # ---------------- USER PROFILE ----------------
@@ -281,7 +298,8 @@ Query: "{query}"
         intent = response["choices"][0]["message"]["content"].strip().lower()
         return intent
     except Exception as e:
-        print("LLM intent error:", e)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] LLM intent error:", e)
         return "unknown"
 
 
@@ -444,18 +462,23 @@ def detect_intent(q: str) -> str:
             "type of glucose",
         ]
     ):
-        print("KEYWORD_MATCH:", q)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] KEYWORD_MATCH:", q)
         return "lifestyle"
 
     if is_question(q):
         return "unknown"
 
-    print("FALLING_TO_LLM:", q)
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] FALLING_TO_LLM:", q)
     if USE_LLM:
         intent = classify_intent_llm(q)
         if intent not in VALID_INTENTS:
             return "unknown"
-        print("LLM_INTENT_USED:", q, "→", intent)
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] LLM_INTENT_USED:", q, "→", intent
+            )
         return intent
 
     return "lifestyle"
@@ -671,7 +694,8 @@ def extract_text(res):
             return res["choices"][0]["message"]["content"]
         return res.choices[0].message.content
     except Exception as e:
-        print("EXTRACT ERROR:", e)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] EXTRACT ERROR:", e)
         return str(res)
 
 
@@ -714,26 +738,41 @@ def validate_lite_response(text: str) -> tuple:
 
 # ---------------- LLM ----------------
 def llm_response(q: str, ctx: dict, lite: bool) -> str:
-    print("RAW QUERY:", q)
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] RAW QUERY:", q)
     if is_meal_sentence(q):
         q = clean_meal_text(q)
-        print("CLEANED QUERY:", q)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", q)
 
     if lite:
         prompt = build_lite_prompt(q)
 
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
+        t0 = time.time()
         text = call_llm(prompt)
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm {(time.time()-t0)*1000:.0f}ms")
+
         is_valid, reason = validate_lite_response(text)
 
         if is_valid:
             return text
 
-        print("VALIDATION FAILED:", reason)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] VALIDATION FAILED:", reason)
 
         retry_prompt = (
             prompt + "\n\nRewrite the answer simpler, shorter, and more conversational."
         )
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm retry")
+        t0 = time.time()
         text_retry = call_llm(retry_prompt)
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm retry {(time.time()-t0)*1000:.0f}ms")
+
         is_valid_retry, _ = validate_lite_response(text_retry)
 
         if is_valid_retry:
@@ -743,7 +782,13 @@ def llm_response(q: str, ctx: dict, lite: bool) -> str:
 
     else:
         prompt = build_prompt(q, ctx)
-        return call_llm(prompt)
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
+        t0 = time.time()
+        result = call_llm(prompt)
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm {(time.time()-t0)*1000:.0f}ms")
+        return result
 
 
 # ---------------- FORMAT ----------------
@@ -773,7 +818,8 @@ def generate_tts(text: str):
         return base64.b64encode(audio_bytes).decode("utf-8")
 
     except Exception as e:
-        print("TTS ERROR:", e)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] TTS ERROR:", e)
         return None
 
 
@@ -811,7 +857,8 @@ Better control and reduced need for medication over time""",
 
 # ---------------- BUILD RESPONSE ----------------
 async def build_response(query: str, lite: bool):
-    print("LITE MODE:", lite)
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] LITE MODE:", lite)
 
     if not query:
         return {"text": "Empty query", "score": 0}
@@ -832,15 +879,19 @@ async def build_response(query: str, lite: bool):
     intent = detect_intent(q)
 
     score = compute_score(intent, q)
-    print("SCORE:", score)
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] SCORE:", score)
 
     if intent == "unknown":
         q = correct_with_llm(q)
         intent = detect_intent(q)
 
-    print("\n--- REQUEST ---")
-    print("QUERY:", q)
-    print("INTENT:", intent)
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] --- REQUEST ---")
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] QUERY:", q)
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] INTENT:", intent)
 
     # ✅ medication shortcut
     if intent == "medication":
@@ -868,7 +919,8 @@ Say something like:
         }
 
     if SCROLL_TEST:
-        print("🔥 SCROLL TEST MODE")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] 🔥 SCROLL TEST MODE")
         return {"text": scroll_test_response(), "score": score, "intent": intent}
 
     if USE_MOCK:
@@ -886,7 +938,8 @@ Say something like:
             }
 
         except asyncio.TimeoutError:
-            print("LLM TIMEOUT")
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] LLM TIMEOUT")
             return {
                 "text": "LLM timed out. Try again.",
                 "score": score,
@@ -894,7 +947,8 @@ Say something like:
             }
 
         except Exception as e:
-            print("LLM ERROR:", e)
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] LLM ERROR:", e)
             return {
                 "text": mock_response(intent),
                 "score": score,
@@ -1031,7 +1085,8 @@ async def normalize_food_items(req: NormalizeRequest):
     Falls back to original items on any failure.
     """
     original = req.items
-    print("NORMALIZE RAW:", original)
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] NORMALIZE RAW:", original)
 
     if not original:
         return {"items": original}
@@ -1079,11 +1134,13 @@ async def normalize_food_items(req: NormalizeRequest):
             )
 
         result = [str(item) for item in parsed]
-        print("NORMALIZE OUTPUT:", result)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] NORMALIZE OUTPUT:", result)
         return {"items": result}
 
     except Exception as e:
-        print("NORMALIZE ERROR:", e)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] NORMALIZE ERROR:", e)
         return {"items": original}
 
 
@@ -1101,13 +1158,19 @@ async def handle_query(request: Request):
     """
 
     start = time.time()
+    trace_id = request.headers.get("x-trace-id", "unknown")
+    trace_id_var.set(trace_id)
     content_type = request.headers.get("content-type", "")
+
+    if TRACE_LEVEL >= 2:
+        print(f"[{now_iso()}][BE][API][{trace_id}] → /query")
 
     # ── VOICE PATH ──────────────────────────────────────────────────────────
     if "multipart/form-data" in content_type:
         form = await request.form()
         lite = form.get("lite") == "true"
-        print("VOICE LITE:", lite)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] VOICE LITE:", lite)
         audio_file = form.get("audio_file")
 
         if audio_file is None:
@@ -1121,8 +1184,12 @@ async def handle_query(request: Request):
             }
 
         audio_bytes = await audio_file.read()
-        print(f"\n--- VOICE REQUEST ---")
-        print(f"File: {audio_file.filename}, Size: {len(audio_bytes)} bytes")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] --- VOICE REQUEST ---")
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] File: {audio_file.filename}, Size: {len(audio_bytes)} bytes"
+            )
 
         if len(audio_bytes) == 0:
             return {
@@ -1161,7 +1228,8 @@ async def handle_query(request: Request):
             )
             raw_transcript = (transcript_obj.text or "").strip()
         except asyncio.TimeoutError:
-            print("WHISPER TIMEOUT")
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] WHISPER TIMEOUT")
             return {
                 "status": "error",
                 "message": "Could not understand. Please try again.",
@@ -1171,12 +1239,16 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
-        print("WHISPER RAW:", raw_transcript)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] WHISPER RAW:", raw_transcript)
 
         error_msg, cleaned_query = validate_voice_query(raw_transcript)
 
         if error_msg:
-            print("VALIDATION FAILED:", error_msg)
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] VALIDATION FAILED:", error_msg
+                )
             return {
                 "status": "error",
                 "message": error_msg,
@@ -1186,7 +1258,8 @@ async def handle_query(request: Request):
                 "score": 0,
             }
 
-        print("CLEANED QUERY:", cleaned_query)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", cleaned_query)
 
         result = await build_response(cleaned_query, lite)
         text = result.get("text", "")
@@ -1201,10 +1274,13 @@ async def handle_query(request: Request):
                 asyncio.to_thread(generate_tts, tts_text), timeout=15
             )
         except asyncio.TimeoutError:
-            print("TTS TIMEOUT")
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] TTS TIMEOUT")
             audio = None
 
-        print("⏱️", round(time.time() - start, 2), "sec\n")
+        duration_ms = (time.time() - start) * 1000
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][API][{trace_id}] ← /query {duration_ms:.0f}ms")
 
         return {
             "status": "success",
@@ -1224,12 +1300,15 @@ async def handle_query(request: Request):
         voice = bool(data.get("voice", False))
 
         if voice:
-            print(
-                "WARNING: /query keyboard path received voice:true — treating as keyboard"
-            )
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] WARNING: /query keyboard path received voice:true — treating as keyboard"
+                )
 
-        print(f"\n--- KEYBOARD REQUEST ---")
-        print(f"QUERY: {query}")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] --- KEYBOARD REQUEST ---")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] QUERY: {query}")
 
         if not query:
             return {
@@ -1265,7 +1344,9 @@ async def handle_query(request: Request):
         text = result.get("text", "")
         score = result.get("score", 0)
 
-        print("⏱️", round(time.time() - start, 2), "sec\n")
+        duration_ms = (time.time() - start) * 1000
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][API][{trace_id}] ← /query {duration_ms:.0f}ms")
 
         # audio is always null for keyboard — spec constraint
         return {
