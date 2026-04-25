@@ -25,7 +25,7 @@ import { useUser } from "@/context/UserContext";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { createTraceId, logTrace } from "../utils/trace";
+import { createTraceId, logTrace, nowISO } from "../utils/trace";
 import { parseMealItems } from "./utils/mealParser";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
@@ -38,8 +38,9 @@ const FINAL_PAUSE_MS = 4000;      // 4s — stop and send
 const MAX_RECORDING_MS = 20000;   // 20s — hard stop failsafe
 const REQUEST_TIMEOUT_MS = 40000; // from 20s tp 40s — backend request timeout
 const UX_RUNMODE = process.env.EXPO_PUBLIC_UX_RUNMODE || "screen";
+const TRACE_LEVEL = parseInt(process.env.EXPO_PUBLIC_TRACE_LEVEL || "1", 10);
 
-console.log("UX_RUNMODE:", UX_RUNMODE);
+if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] UX_RUNMODE:`, UX_RUNMODE);
 
 
 type VoiceState = "IDLE" | "RECORDING" | "PROCESSING" | "PLAYING";
@@ -108,16 +109,16 @@ export default function HomeScreen() {
     const current = voiceStateRef.current;
     const allowed = VALID_TRANSITIONS[current];
     if (!allowed.includes(next)) {
-      console.warn(`[VoiceState] Invalid transition: ${current} → ${next} — ignored`);
+      if (TRACE_LEVEL >= 1) console.warn(`[${nowISO()}][no-trace] [VoiceState] Invalid transition: ${current} → ${next} — ignored`);
       return;
     }
-    console.log(`[VoiceState] ${current} → ${next}`);
+    if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] [VoiceState] ${current} → ${next}`);
     voiceStateRef.current = next;
     setVoiceState(next);
   };
 
   const handleIntentRouting = (intent: string, data: any) => {
-    console.log("🧠 Routing intent:", intent);
+    if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 🧠 Routing intent:`, intent);
 
     if (intent === "glucose") {
       setStatusText("Do you want to analyze a meal?");
@@ -215,7 +216,7 @@ export default function HomeScreen() {
       });
 
       if (!base64 || typeof base64 !== "string" || base64.length < 50) {
-        console.warn("[playAudio] invalid base64 — text-only fallback");
+        if (TRACE_LEVEL >= 1) console.warn(`[${nowISO()}][no-trace] [playAudio] invalid base64 — text-only fallback`);
         updateVoiceState("IDLE");
         setStatusText(null);
         return;
@@ -242,7 +243,7 @@ export default function HomeScreen() {
 
       await sound.playAsync();
     } catch (err) {
-      console.error("[playAudio] load/play error:", err);
+      if (TRACE_LEVEL >= 1) console.error(`[${nowISO()}][no-trace] [playAudio] load/play error:`, err);
 
       const s = activeSoundRef.current;
       activeSoundRef.current = null;
@@ -322,13 +323,16 @@ export default function HomeScreen() {
       formData.append("traceId", traceId);
       formData.append("user_profile", JSON.stringify(user ?? {}));
 
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query voice`);
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
+        headers: { "x-trace-id": traceId },
         body: formData,
         signal: controller.signal,
       });
 
       const latency = Date.now() - startTime;
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] ← /query ${latency}ms`);
       logTrace(traceId, "API_LATENCY_MS", latency);
 
       clearTimeout(processingTimer);
@@ -484,9 +488,10 @@ export default function HomeScreen() {
     const startTime = Date.now();
 
     try {
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query keyboard`);
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-trace-id": traceId },
         body: JSON.stringify({
           query,
           voice: false,
@@ -498,6 +503,7 @@ export default function HomeScreen() {
       });
 
       const latency = Date.now() - startTime;
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] ← /query ${latency}ms`);
       logTrace(traceId, "API_LATENCY_MS", latency);
 
       clearTimeout(timeoutId);
@@ -623,11 +629,11 @@ export default function HomeScreen() {
 
   const stopRecordingAndSend = async (isMaxDuration: boolean) => {
     try {
-      console.log("⏱ AUTO STOP triggered");
+      if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] ⏱ AUTO STOP triggered`);
 
       const rec = activeRecordingRef.current;
       if (!rec) {
-        console.log("❌ No active recording");
+        if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] ❌ No active recording`);
         return;
       }
 
@@ -636,14 +642,14 @@ export default function HomeScreen() {
       await rec.stopAndUnloadAsync();
 
       const uri = rec.getURI();
-      console.log("📁 Audio URI:", uri);
+      if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 📁 Audio URI:`, uri);
 
       updateVoiceState("PROCESSING");
 
       await sendVoiceQuery(uri!, isMaxDuration);
 
     } catch (e) {
-      console.log("❌ Auto stop error:", e);
+      if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] ❌ Auto stop error:`, e);
       updateVoiceState("IDLE");
     }
   };
@@ -658,7 +664,7 @@ export default function HomeScreen() {
         try {
           await dangling.stopAndUnloadAsync();
         } catch (e) {
-          console.log("cleanup error", e);
+          if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] cleanup error`, e);
         }
       }
     };
@@ -676,7 +682,7 @@ export default function HomeScreen() {
         playsInSilentModeIOS: true,
       });
     } catch (e) {
-      console.log(e);
+      if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] initAudio error:`, e);
     }
   };
 
@@ -685,11 +691,11 @@ export default function HomeScreen() {
   // isMeteringEnabled: true required for silence detection — spec §13.1
   const startRecording = async () => {
     try {
-      console.log("🎤 START pressed");
+      if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 🎤 START pressed`);
 
       const permission = await Audio.requestPermissionsAsync();
       if (!permission.granted) {
-        console.log("❌ Permission denied");
+        if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] ❌ Permission denied`);
         return;
       }
 
@@ -744,7 +750,7 @@ export default function HomeScreen() {
       }, MAX_RECORDING_MS);
 
     } catch (err) {
-      console.error("[startRecording] error:", err);
+      if (TRACE_LEVEL >= 1) console.error(`[${nowISO()}][no-trace] [startRecording] error:`, err);
       clearThinkingTimer();
       activeRecordingRef.current = null;
       updateVoiceState("IDLE");
@@ -755,7 +761,7 @@ export default function HomeScreen() {
   // ─── Input handlers ───────────────────────────────────────────────────────
 
   const handleMicPress = async () => {
-    console.log("🎤 MIC PRESSED, state:", voiceStateRef.current);
+    if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 🎤 MIC PRESSED, state:`, voiceStateRef.current);
 
     const state = voiceStateRef.current;
 
@@ -839,7 +845,7 @@ export default function HomeScreen() {
     const initUser = async () => {
       //await saveUser("");   // 🔥 TEMP ONLY
       const id = await loadUser();
-      console.log("LOADED USER:", id);
+      if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] LOADED USER:`, id);
 
       if (!id || !profiles[id]) {
         setUser(null);
