@@ -230,29 +230,64 @@ KEYWORD_MAP = {
             "sugar",
             "blood sugar",
             "bg",
+            "glycemia",
             "diabetes",
+            "diabetic",
+            "prediabetes",
+            "prediabetic",
+            "pre-diabetic",
+            "pre diabetes",
         ],
         "medical": [
             "a1c",
             "hba1c",
+            "hemoglobin a1c",
             "insulin",
             "glycemic",
-            "hypoglycemia",
             "hyperglycemia",
+            "hypoglycemia",
+            "hypo",
         ],
         "food": ["carb", "carbs", "dessert", "sweet", "juice", "soda"],
-        "context": ["fasting", "postprandial", "after meal", "post meal"],
+        "timing": [
+            "fasting",
+            "postprandial",
+            "post-prandial",
+            "after meal",
+            "post meal",
+        ],
     },
     "bp": {
-        "primary": ["blood pressure", "bp", "pressure", "hypertension", "hypotension"],
-        "medical": ["systolic", "diastolic"],
+        "primary": [
+            "blood pressure",
+            "bp",
+            "pressure",
+            "hypertension",
+            "hypertensive",
+            "hypotension",
+        ],
+        "medical": ["systolic", "diastolic", "pulse pressure"],
         "lifestyle": ["salt", "sodium"],
         "symptoms": ["dizziness", "headache"],
     },
     "cholesterol": {
-        "primary": ["cholesterol", "chol", "ldl", "hdl", "lipid", "triglyceride", "tg"],
-        "medical": ["statin", "plaque"],
-        "food": ["fat", "saturated", "trans fat"],
+        "primary": [
+            "cholesterol",
+            "chol",
+            "ldl",
+            "hdl",
+            "lipid",
+            "lipids",
+            "triglyceride",
+            "triglycerides",
+            "tg",
+        ],
+        "medical": [
+            "statin",
+            "plaque",
+            "lipid variability",
+        ],
+        "food": ["fat", "saturated", "saturated fat", "trans fat"],
     },
     "lifestyle": {
         "diet": ["diet", "food", "meal", "eat", "nutrition"],
@@ -263,6 +298,149 @@ KEYWORD_MAP = {
     },
 }
 
+# ---------------- CONTEXT MAP ----------------
+CONTEXT_MAP = {
+    "after_meal": [
+        "after meal",
+        "post meal",
+        "after lunch",
+        "after dinner",
+        "after breakfast",
+        "post lunch",
+        "post dinner",
+        "post breakfast",
+        "after eating",
+        "after food",
+        "just ate",
+        "had lunch",
+        "had dinner",
+        "had breakfast",
+        "postprandial",
+        "post-prandial",
+    ],
+    "high": [
+        "high",
+        "spike",
+        "spikes",
+        "surge",
+        "surges",
+        "up",
+        "went up",
+        "shot up",
+        "elevated",
+        "increase",
+        "increased",
+        "rising",
+        "hyperglycemia",
+        "hypertensive",
+        "hypertension",
+        "uncontrolled",
+    ],
+    "low": [
+        "low",
+        "drop",
+        "drops",
+        "dropped",
+        "crash",
+        "crashes",
+        "dip",
+        "dips",
+        "valley",
+        "valleys",
+        "hypo",
+        "hypoglycemia",
+        "hypotension",
+        "decrease",
+        "decreased",
+        "reduced",
+    ],
+    "unstable": [
+        "fluctuating",
+        "fluctuation",
+        "variability",
+        "volatile",
+        "yo-yo",
+        "yo yo",
+        "yoyo",
+        "swing",
+        "swings",
+        "labile",
+        "erratic",
+        "brittle",
+        "unstable",
+        "reactive",
+        "reactivity",
+        "paroxysmal",
+    ],
+}
+
+STATE_MAP = {
+    "prediabetic": ("glucose", "education"),
+    "diabetic": ("glucose", "education"),
+    "hyperglycemia": ("glucose", "intervention"),
+    "hypoglycemia": ("glucose", "intervention"),
+    "hypo": ("glucose", "intervention"),
+    "hypertension": ("bp", "education"),
+    "hypotension": ("bp", "intervention"),
+    "high ldl": ("cholesterol", "intervention"),
+    "low hdl": ("cholesterol", "intervention"),
+}
+
+
+def has_any(s: str, words: list) -> bool:
+    return any(w in s for w in words)
+
+
+def flatten_keyword_groups(groups: dict) -> list:
+    words = []
+    for values in groups.values():
+        words.extend(values)
+    return words
+
+
+# ---------------- INTENT MAP ----------------
+INTENT_MAP = {
+    "question": [
+        "what",
+        "why",
+        "how",
+        "when",
+        "where",
+        "does",
+        "do",
+        "is",
+        "are",
+        "can",
+        "should",
+        "could",
+        "would",
+        "will",
+    ],
+    "guidance": [
+        "how to",
+        "ways to",
+        "help me",
+        "guide",
+        "recommend",
+        "suggest",
+    ],
+    "medication": [
+        "statin",
+        "metformin",
+        "medicine",
+        "medication",
+        "drug",
+    ],
+}
+
+# ---------------- DOMAIN CONSTANTS ----------------
+DOMAINS = {
+    "GLUCOSE": "glucose",
+    "BP": "bp",
+    "CHOLESTEROL": "cholesterol",
+    "LIFESTYLE": "lifestyle",
+}
+
 
 # ---------------- NORMALIZE ----------------
 def normalize(q: str) -> str:
@@ -271,7 +449,7 @@ def normalize(q: str) -> str:
         q = q.lower().strip()
         q = q.replace("-", " ")
         q = re.sub(r"\bbp\b", "blood pressure", q)
-        q = re.sub(r"\bbg\b", "blood glucose", q)
+        q = re.sub(r"\bbg\b", "glucose", q)
         q = re.sub(r"\bblood sugar\b", "glucose", q)
         return q
     finally:
@@ -323,20 +501,12 @@ def clean_meal_text(q: str) -> str:
 def detect_context(q: str) -> dict:
     t0 = trace_start("detect_context")
     try:
-        s = q.lower()
+        s = q.lower().strip()
         return {
-            "after_meal": any(
-                x in s
-                for x in [
-                    "after meal",
-                    "post meal",
-                    "after lunch",
-                    "after dinner",
-                    "after breakfast",
-                ]
-            ),
-            "high": any(x in s for x in ["high", "spike", "elevated", "up"]),
-            "low": any(x in s for x in ["low", "drop"]),
+            "after_meal": has_any(s, CONTEXT_MAP["after_meal"]),
+            "high": has_any(s, CONTEXT_MAP["high"]),
+            "low": has_any(s, CONTEXT_MAP["low"]),
+            "unstable": has_any(s, CONTEXT_MAP["unstable"]),
         }
     finally:
         trace_end("detect_context", t0)
@@ -455,114 +625,6 @@ def is_pairing_query(q: str) -> bool:
         trace_end("is_pairing_query", t0)
 
 
-def detect_intent(q: str) -> str:
-    t0 = trace_start("detect_intent")
-    try:
-        s = q.lower()
-
-        # 🔥 DOMAIN INTENTS FIRST
-        if any(
-            x in s for x in ["statin", "metformin", "medicine", "medication", "drug"]
-        ):
-            return "medication"
-
-        if "bp" in s or "blood pressure" in s:
-            return "bp"
-
-        if "sugar" in s or "glucose" in s:
-            return "glucose"
-
-        if any(x in s for x in ["cholesterol", "hdl", "ldl"]):
-            return "cholesterol"
-
-        if is_food_list(q) or is_single_food_phrase(q):
-            return "lifestyle"
-
-        text = q.lower()
-        scores = {}
-
-        for category, groups in KEYWORD_MAP.items():
-            score = 0
-            for group_name, keywords in groups.items():
-                for kw in keywords:
-                    if re.search(rf"\b{re.escape(kw)}\b", text):
-                        if group_name == "primary":
-                            score += 3
-                        elif group_name == "medical":
-                            score += 2
-                        else:
-                            score += 1
-            if score > 0:
-                scores[category] = score
-
-        if scores:
-            return max(scores, key=scores.get)
-
-        q = text.lower().strip()
-
-        if any(
-            w in q
-            for w in [
-                # General lifestyle / food
-                "healthy",
-                "breakfast",
-                "lunch",
-                "dinner",
-                "food",
-                "diet",
-                "eat",
-                "ideas",
-                # Definition / education
-                "what is",
-                "define",
-                "meaning",
-                "explain",
-                # Metabolic health
-                "blood sugar",
-                "a1c",
-                # Insulin
-                "insulin",
-                "insulin resistance",
-                "insulin sensitivity",
-                # Glucose behavior
-                "spike",
-                "spikes",
-                "crash",
-                "response",
-                "responder",
-                # Glucotype
-                "glucotype",
-                "glucose type",
-                "type of glucose",
-            ]
-        ):
-            if TRACE_LEVEL >= 1:
-                print(f"[{now_iso()}][{trace_id_var.get()}] KEYWORD_MATCH:", q)
-            return "lifestyle"
-
-        if is_question(q):
-            return "unknown"
-
-        if TRACE_LEVEL >= 1:
-            print(f"[{now_iso()}][{trace_id_var.get()}] FALLING_TO_LLM:", q)
-        if USE_LLM:
-            intent = classify_intent_llm(q)
-            if intent not in VALID_INTENTS:
-                return "unknown"
-            if TRACE_LEVEL >= 1:
-                print(
-                    f"[{now_iso()}][{trace_id_var.get()}] LLM_INTENT_USED:",
-                    q,
-                    "→",
-                    intent,
-                )
-            return intent
-
-        return "lifestyle"
-    finally:
-        trace_end("detect_intent", t0)
-
-
 # ---------------- SCORE ----------------
 def compute_score(intent: str, q: str) -> int:
     t0 = trace_start("compute_score")
@@ -572,25 +634,25 @@ def compute_score(intent: str, q: str) -> int:
         if intent == "unknown":
             return 40
 
-        if intent == "glucose":
+        if intent == DOMAINS["GLUCOSE"]:
             if any(x in q for x in ["fiber", "vegetable"]):
                 score += 20
             if any(x in q for x in ["sugar", "dessert"]):
                 score -= 20
 
-        elif intent == "bp":
+        elif intent == DOMAINS["BP"]:
             if "salt" in q:
                 score -= 15
             if any(x in q for x in ["walk", "exercise"]):
                 score += 15
 
-        elif intent == "cholesterol":
+        elif intent == DOMAINS["CHOLESTEROL"]:
             if any(x in q for x in ["fiber", "oats"]):
                 score += 20
             if "fat" in q:
                 score -= 10
 
-        elif intent == "lifestyle":
+        elif intent == DOMAINS["LIFESTYLE"]:
             if any(x in q for x in ["exercise", "walk"]):
                 score += 10
             if any(x in q for x in ["junk", "fried"]):
@@ -602,77 +664,80 @@ def compute_score(intent: str, q: str) -> int:
 
 
 # ---------------- INTENT ROUTING ----------------
-def detect_need(q: str) -> str:
-    s = q.lower()
-
-    # --- 1. STATE / PROBLEM → INTERVENTION (highest priority)
-    if any(
-        x in s
-        for x in [
-            "is high",
-            "is low",
-            "too high",
-            "too low",
-            "high",
-            "low",
-            "spike",
-            "crash",
-        ]
-    ):
-        return "intervention"
-
-    # numeric + condition = intervention
-    if any(ch.isdigit() for ch in s) and any(
-        w in s for w in ["bp", "blood pressure", "glucose", "sugar"]
-    ):
-        return "intervention"
-
-    # --- 2. ACTION / IMPROVEMENT → GUIDANCE
-    if any(
-        w in s
-        for w in [
-            "reduce",
-            "lower",
-            "control",
-            "improve",
-            "stabilize",
-            "avoid",
-            "prevent",
-            "manage",
-        ]
-    ):
-        return "guidance"
-
-    # --- 3. QUESTIONS → EDUCATION
-    if any(p in s for p in ["what is", "why", "define", "meaning"]):
-        return "education"
-
-    # --- DEFAULT
-    return "education"
+def _compute_intent_flags(q: str) -> dict:
+    s = q.lower().strip()
+    first_word = s.split()[0].rstrip("?.,!") if s.split() else ""
+    return {
+        "guidance": has_any(s, INTENT_MAP["guidance"]),
+        "question": (first_word in INTENT_MAP["question"]) or ("?" in q),
+    }
 
 
-def detect_condition(q: str) -> dict:
-    s = q.lower()
-    values = []
-    if any(
-        x in s
-        for x in ["glucose", "sugar", "a1c", "diabetes", "spike", "blood sugar", "bg"]
-    ):
-        values.append("glucose")
-    if any(
-        x in s
-        for x in ["blood pressure", "bp", "hypertension", "systolic", "diastolic"]
-    ):
-        values.append("bp")
-    if any(x in s for x in ["cholesterol", "ldl", "hdl", "lipid", "triglyceride"]):
-        values.append("cholesterol")
-    ctype = "none" if not values else ("single" if len(values) == 1 else "multi")
-    return {"type": ctype, "values": values}
+def detect_condition(q: str) -> str:
+    s = q.lower().strip()
+
+    best_domain = None
+    best_score = 0
+
+    for domain, groups in KEYWORD_MAP.items():
+        score = 0
+
+        for group_name, group in groups.items():
+            for kw in group:
+                if re.search(rf"\b{re.escape(kw)}\b", s):
+                    if group_name == "primary":
+                        score += 3
+                    elif group_name == "medical":
+                        score += 2
+                    else:
+                        score += 1
+
+        if score > best_score:
+            best_score = score
+            best_domain = domain
+
+    # ✅ valid match
+    if best_score >= 1 and best_domain:
+        return best_domain
+
+    # ✅ single-word fallback (safe)
+    if len(s.split()) == 1:
+        for domain, groups in KEYWORD_MAP.items():
+            for group in groups.values():
+                for kw in group:
+                    if s == kw:
+                        return domain
+
+    # ✅ never return None
+    return DOMAINS["LIFESTYLE"]
 
 
 def classify_need(context: dict) -> str:
-    if context.get("high") or context.get("low"):
+    if context.get("high") or context.get("low") or context.get("unstable"):
         return "intervention"
+    return "education"
+
+
+HEALTH_DOMAINS = {DOMAINS["GLUCOSE"], DOMAINS["BP"], DOMAINS["CHOLESTEROL"]}
+
+
+def detect_need_v2(q: str, context: dict, intent: dict, domain: str) -> str:
+    """
+    Pure decision layer: depends only on intent flags, context signals, and domain.
+    No keyword lists. Replaces detect_need once validated.
+    intent must contain: {"question": bool, "guidance": bool}
+    """
+    if intent.get("guidance"):
+        return "guidance"
+
+    if intent.get("question"):
+        return "education"
+
+    if domain in HEALTH_DOMAINS and (
+        context.get("high") or context.get("low") or context.get("unstable")
+    ):
+        return "intervention"
+
     return "education"
 
 
@@ -686,54 +751,51 @@ def map_tool(need: str, lite: bool) -> str:
     return "llm_lite" if lite else "llm_full"
 
 
-def build_intent(q: str, lite: bool) -> dict:
-    need = detect_need(q)
-    condition = detect_condition(q)
-    intervention = detect_intervention(need)
-    tool = map_tool(need, lite)
+def build_intent(q: str, lite: bool, context: dict) -> dict:
+    domain = detect_condition(q)
+    flags = _compute_intent_flags(q)
+    need = detect_need_v2(q, context, flags, domain)
+    print("DEBUG detect_condition:", q, "→", detect_condition(q))
+
+    # 🔥 HARD GUARANTEE
+    if domain not in DOMAINS.values():
+        domain = DOMAINS["LIFESTYLE"]
+
+    if need not in ["education", "guidance", "intervention"]:
+        need = "education"
+
     return {
-        "condition": condition,
+        "domain": domain,
         "need": need,
-        "intervention": intervention,
-        "tool": tool,
+        "intervention": detect_intervention(need),
+        "tool": map_tool(need, lite),
     }
 
 
-def is_meaningful_query(q: str) -> bool:
-    t0 = trace_start("is_meaningful_query")
-    try:
-        words = q.strip().lower().split()
-
-        contains_number = any(ch.isdigit() for ch in q)
-        contains_marker = any(
-            w in q.lower() for w in ["bp", "ldl", "hdl", "sugar", "glucose"]
-        )
-
-        if len(words) < 3 and not (contains_number or contains_marker):
-            return False
-
-        if not any(ch in q for ch in "aeiou"):
-            return False
-
-        if not any(len(w) >= 3 for w in words):
-            return False
-
+def is_meaningful_query(q: str, domain: str, need: str) -> bool:
+    # ✅ If we understood intent → it's meaningful
+    if domain != DOMAINS["LIFESTYLE"]:
         return True
-    finally:
-        trace_end("is_meaningful_query", t0)
+
+    if need != "unknown":
+        return True
+
+    # fallback: reject obvious junk only
+    words = q.strip().split()
+    return len(words) >= 2
 
 
 def unclear_query_response() -> dict:
     return {
         "text": "Please ask a clear question like 'How do I reduce blood sugar after meals?'",
         "score": 0,
-        "intent": "unclear",
+        "intent": {"domain": "lifestyle", "need": "education"},
     }
 
 
 # ---------------- MOCK ----------------
 def mock_response(intent: str) -> str:
-    if intent == "glucose":
+    if intent == DOMAINS["GLUCOSE"]:
         return """## Likely Cause
 Glucose spike likely due to high carbs without fiber.
 
@@ -743,7 +805,7 @@ Walk for 10–15 minutes and hydrate.
 ## Next Step
 Lead meals with fiber, then protein, then carbs."""
 
-    if intent == "bp":
+    if intent == DOMAINS["BP"]:
         return """## Likely Cause
 Elevated blood pressure may be driven by sodium or low activity.
 
@@ -753,7 +815,7 @@ Take a short walk and reduce salt intake.
 ## Next Step
 Increase potassium-rich foods and hydration."""
 
-    if intent == "cholesterol":
+    if intent == DOMAINS["CHOLESTEROL"]:
         return """## Likely Cause
 Cholesterol imbalance may be linked to low soluble fiber.
 
@@ -763,7 +825,7 @@ Add oats, vegetables, and healthy fats.
 ## Next Step
 Maintain consistent fiber intake daily."""
 
-    if intent == "lifestyle":
+    if intent == DOMAINS["LIFESTYLE"]:
         return """## Likely Cause
 Lifestyle habits may not be aligned with optimal health.
 
@@ -1089,7 +1151,7 @@ Try something like:
 • Best post meal walk timing
 """,
         "score": 0,
-        "intent": "unknown",
+        "intent": {"domain": "lifestyle", "need": "education"},
     }
 
 
@@ -1105,7 +1167,7 @@ Medication is used when lifestyle alone is not enough.
 
 ## Expected Outcome
 Better control and reduced need for medication over time""",
-        "intent": "medication",
+        "intent": {"domain": "lifestyle", "need": "education"},
         "score": 50,
     }
 
@@ -1124,35 +1186,103 @@ async def build_response(query: str, lite: bool):
         q = correct_spelling(query)
         q = normalize(q)
 
-        # pairing fast-path — before intent
+        # pairing fast-path
         if is_pairing_query(q):
-            return {**build_pairing_response(q), "score": 50, "intent": "lifestyle"}
+            return {
+                **build_pairing_response(q),
+                "score": 50,
+                "intent": {
+                    "domain": DOMAINS["LIFESTYLE"],
+                    "need": "education",
+                    "tool": "llm_lite",
+                },
+            }
 
-        if not is_meaningful_query(q):
+        # ✅ normalization for matching
+        q_norm = q.lower().replace("-", " ")
+
+        # ✅ STATE SYNONYMS (real-world language)
+        STATE_SYNONYMS = {
+            "prediabetes": "prediabetic",
+            "diabetes": "diabetic",
+            "high sugar": "hyperglycemia",
+            "low sugar": "hypoglycemia",
+        }
+
+        for k, v in STATE_SYNONYMS.items():
+            if k in q_norm:
+                q_norm = q_norm.replace(k, v)
+
+        tokens = set(q_norm.split())
+        ctx = detect_context(q)
+
+        # ✅ STATE DETECTION
+        state_hit = None
+        for key in STATE_MAP:
+            key_tokens = set(key.split())
+            if key_tokens.issubset(tokens):
+                state_hit = STATE_MAP[key]
+                break
+
+        # ✅ INTENT BUILD
+        if state_hit:
+            domain, need = state_hit
+            intent = {
+                "domain": domain,
+                "need": need,
+                "tool": "llm_lite" if lite else "llm_full",
+                "source": "state_map",
+            }
+            confidence = 0.95
+        else:
+            intent = build_intent(q, lite, ctx)
+            domain = intent.get("domain")
+            need = intent.get("need")
+
+            # ✅ basic confidence scoring
+            if len(tokens) <= 2:
+                confidence = 0.6
+            elif "?" in q:
+                confidence = 0.9
+            else:
+                confidence = 0.8
+
+            # boost for identified health domain — short queries like "sugar crash" are valid
+            if domain in HEALTH_DOMAINS:
+                confidence = max(confidence, 0.8)
+
+        # ✅ FALLBACK SAFETY
+        if not domain or not need:
             if TRACE_LEVEL >= 1:
-                print(f"[{now_iso()}][{trace_id_var.get()}] UNCLEAR_QUERY: {q}")
+                print(f"[{now_iso()}][{trace_id_var.get()}] INTENT_FALLBACK → unclear")
             return unclear_query_response()
 
-        ctx = detect_context(q)
-        intent = build_intent(q, lite)
+        # ✅ LOW CONFIDENCE → clarify (not reject)
+        if confidence < 0.7:
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] LOW_CONFIDENCE: {q!r} conf={confidence:.2f}"
+                )
+            return {
+                "text": "Do you want to understand this or improve it?",
+                "score": 0,
+                "intent": intent,
+            }
 
-        need = intent["need"]
-        domain = (
-            intent["condition"]["values"][0] if intent["condition"]["values"] else None
-        )
-        domain = domain or "lifestyle"
-        condition_key = domain if domain else need
+        # ✅ MEANINGFUL CHECK
+        if not is_meaningful_query(q, domain, need):
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] UNCLEAR_QUERY: {q}")
+            return {
+                "text": "Can you clarify what you want to know? (understand / manage / foods / numbers)",
+                "score": 0,
+                "intent": intent,
+            }
 
-        # Pipeline: question override → classify_need context upgrade
-        q_lower = q.lower()
-        if any(
-            p in q_lower for p in ["what is", "what are", "why", "define", "meaning"]
-        ):
-            need = "education"
-        elif classify_need(ctx) == "intervention":
-            need = "intervention"
+        condition_key = domain
+        q_lower = q.lower().strip()
 
-        # context label for tracing
+        # context label
         if "after" in q_lower and any(
             x in q_lower for x in ["lunch", "dinner", "breakfast", "meal"]
         ):
@@ -1164,68 +1294,53 @@ async def build_response(query: str, lite: bool):
         else:
             context_label = "general"
 
-        # 1. classify
-        _acc = trace_obj_var.get(None)
-        if _acc:
-            _acc.log(
-                "classify", {"domain": domain, "need": need, "context": context_label}
-            )
         if TRACE_LEVEL >= 1:
             print(
                 f"[{now_iso()}][{trace_id_var.get()}] CLASSIFY: domain={domain} need={need} context={context_label}"
             )
 
-        # 2. intervention_select
+        # interventions
         interventions = get_intervention(domain, need, ctx)
+        intent["interventions"] = interventions
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] INTERVENTIONS:", interventions)
-        _acc = trace_obj_var.get(None)
-        if _acc:
-            _acc.log(
-                "intervention_select",
-                {"domain": domain, "need": need, "interventions": interventions},
-            )
 
         score = compute_score(condition_key, q)
+
         _exec_path = (
             "scroll_test"
             if SCROLL_TEST
             else "mock" if USE_MOCK else "llm" if USE_LLM else "fallback"
         )
 
-        # 3. lever_select
         _acc = trace_obj_var.get(None)
         if _acc:
-            _acc.log("lever_select", {"path": _exec_path, "tool": intent["tool"]})
+            _acc.log(
+                "lever_select",
+                {"path": _exec_path, "tool": intent.get("tool", "llm_full")},
+            )
 
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] SCORE:", score)
-        if TRACE_LEVEL >= 1:
-            print(f"[{now_iso()}][{trace_id_var.get()}] --- REQUEST ---")
-        if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] QUERY:", q)
-        if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] INTENT:", intent)
 
+        # SCROLL TEST
         if SCROLL_TEST:
-            if TRACE_LEVEL >= 1:
-                print(f"[{now_iso()}][{trace_id_var.get()}] 🔥 SCROLL TEST MODE")
-            return {"text": scroll_test_response(), "score": score, "intent": need}
+            return {"text": scroll_test_response(), "score": score, "intent": intent}
 
+        # MOCK
         if USE_MOCK:
+            _health = (DOMAINS["GLUCOSE"], DOMAINS["BP"], DOMAINS["CHOLESTEROL"])
             mock_key = (
-                condition_key
-                if condition_key in ("glucose", "bp", "cholesterol")
-                else "lifestyle"
+                condition_key if condition_key in _health else DOMAINS["LIFESTYLE"]
             )
-            return {"text": mock_response(mock_key), "score": score, "intent": need}
+            return {"text": mock_response(mock_key), "score": score, "intent": intent}
 
+        # LLM
         if USE_LLM:
-            use_lite = intent["tool"] == "llm_lite"
-            # 4. response_format
-            _acc = trace_obj_var.get(None)
-            if _acc:
-                _acc.log("response_format", {"format": "lite" if use_lite else "full"})
+            use_lite = intent.get("tool") == "llm_lite"
+
             try:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(llm_response, q, ctx, use_lite, interventions),
@@ -1234,33 +1349,31 @@ async def build_response(query: str, lite: bool):
                 return {
                     "text": result if use_lite else enforce_format(result),
                     "score": score,
-                    "intent": need,
+                    "intent": intent,
                 }
 
             except asyncio.TimeoutError:
-                if TRACE_LEVEL >= 1:
-                    print(f"[{now_iso()}][{trace_id_var.get()}] LLM TIMEOUT")
                 return {
                     "text": "LLM timed out. Try again.",
                     "score": score,
-                    "intent": need,
+                    "intent": intent,
                 }
 
             except Exception as e:
-                if TRACE_LEVEL >= 1:
-                    print(f"[{now_iso()}][{trace_id_var.get()}] LLM ERROR:", e)
                 mock_key = (
                     condition_key
-                    if condition_key in ("glucose", "bp", "cholesterol")
-                    else "lifestyle"
+                    if condition_key
+                    in (DOMAINS["GLUCOSE"], DOMAINS["BP"], DOMAINS["CHOLESTEROL"])
+                    else DOMAINS["LIFESTYLE"]
                 )
                 return {
                     "text": mock_response(mock_key),
                     "score": score,
-                    "intent": need,
+                    "intent": intent,
                     "error": str(e),
                 }
 
+        # fallback
         return {
             "text": """## Insight
 Fallback response active.
@@ -1268,8 +1381,9 @@ Fallback response active.
 ## Next Step
 Try asking about lifestyle, BP, glucose, or cholesterol.""",
             "score": score,
-            "intent": intent_type,
+            "intent": intent,
         }
+
     finally:
         trace_end("build_response", t0_func)
 
@@ -1341,7 +1455,7 @@ def build_pairing_response(q: str) -> dict:
 
         return {
             "text": get_pairing_advice(food),
-            "intent": "lifestyle",
+            "intent": {"domain": DOMAINS["LIFESTYLE"], "need": "education"},
             "score": 0,
         }
     finally:
@@ -1674,17 +1788,36 @@ async def handle_query(request: Request):
                 }
             )
 
+        # Allow valid single-word health terms like "prediabetic", "diabetes", "ldl", "hdl", "bp"
         if len(query.split()) <= 1:
-            return _inject_trace(
-                {
-                    "status": "success",
-                    "message": "Please say a full sentence like 'my sugar is high after meal'",
-                    "cleaned_query": None,
-                    "tts_text": None,
-                    "audio": None,
-                    "score": 0,
-                }
-            )
+            q_check = normalize(correct_spelling(query)).lower().strip()
+
+            single_word_allowed = False
+
+            # Check STATE_MAP
+            if q_check in STATE_MAP:
+                single_word_allowed = True
+
+            # Check KEYWORD_MAP
+            for domain, groups in KEYWORD_MAP.items():
+                for group in groups.values():
+                    if q_check in group:
+                        single_word_allowed = True
+                        break
+                if single_word_allowed:
+                    break
+
+            if not single_word_allowed:
+                return _inject_trace(
+                    {
+                        "status": "success",
+                        "message": "Please say a full sentence like 'my sugar is high after meal'",
+                        "cleaned_query": None,
+                        "tts_text": None,
+                        "audio": None,
+                        "score": 0,
+                    }
+                )
 
         try:
             result = await build_response(query, lite)
@@ -1700,6 +1833,15 @@ async def handle_query(request: Request):
             print(f"[{now_iso()}][BE][API][{trace_id}] ← /query {duration_ms:.0f}ms")
 
         # audio is always null for keyboard — spec constraint
+        intent = result.get("intent")
+
+        if not isinstance(intent, dict):
+            print(f"[WARN] Invalid intent structure: {intent}")
+            intent = {
+                "domain": "lifestyle",
+                "need": "education",
+            }
+
         return _inject_trace(
             {
                 "status": "success",
@@ -1708,6 +1850,6 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": score,
-                "intent": result.get("intent", "general"),
+                "intent": intent,
             }
         )
