@@ -13,7 +13,9 @@ import difflib
 
 from litellm import completion
 from dotenv import load_dotenv
+
 from intervention_engine import get_intervention
+from typing import Optional
 
 load_dotenv()
 client = OpenAI()
@@ -433,6 +435,127 @@ INTENT_MAP = {
     ],
 }
 
+# ---------------- LEVER KEYWORDS ----------------
+LEVER_KEYWORDS = {
+    "food": ["eat", "meal", "diet", "carbs", "carb", "fiber", "protein", "food"],
+    "movement": ["walk", "exercise", "move", "movement", "activity", "active", "steps"],
+    "timing": ["after", "before", "when", "timing", "fasting", "gap", "delay"],
+    "recovery": ["stress", "sleep", "rest", "breathing", "relax"],
+    "monitoring": ["check", "measure", "track", "monitor", "reading", "level"],
+    "enhancers": ["vinegar", "cinnamon", "garlic", "turmeric"],
+}
+
+# ---------------- SUB-LEVER KEYWORDS ----------------
+# IMPORTANT: Order = most specific → least specific
+SUB_LEVER_KEYWORDS = {
+    # --- FOOD (specific first) ---
+    "pairing": [
+        "pair carbs with",
+        "carbs with nuts",
+        "combine carbs with",
+        "add nuts to carbs",
+        "pairing",
+    ],
+    "fiber_first": [
+        "fiber first",
+        "eat fiber",
+        "salad before",
+        "chia",
+        "flax",
+        "fiber",
+    ],
+    "protein_first": [
+        "protein first",
+        "eat protein first",
+        "egg first",
+        "chicken first",
+        "protein",
+    ],
+    "carb_control": ["reduce carbs", "low carb", "high carb", "carbs", "carb"],
+    # --- MOVEMENT ---
+    "post_meal_walk": [
+        "walk after meal",
+        "walk after meals",
+        "after meal walk",
+        "walk after eating",
+        "after eating walk",
+    ],
+    "brisk_walk": ["brisk walk", "fast walk", "walk fast"],
+    "light_activity": ["light activity", "gentle movement", "stretch", "move lightly"],
+    # --- TIMING ---
+    "delay_meal": [
+        "delay next meal",
+        "delay my next meal",  # ← ADD THIS
+        "delay meal",
+        "wait before eating",
+        "postpone meal",
+        "skip meal",
+    ],
+    "meal_spacing": [
+        "gap between meals",
+        "meal gap",
+        "spacing between meals",
+        "how long between meals",
+    ],
+    "early_dinner": [
+        "early dinner",
+        "eat dinner early",
+        "dinner early",
+        "when should i eat dinner",
+        "dinner time",
+    ],
+    # --- RECOVERY ---
+    "breathing": ["deep breathing", "breathing exercise", "deep breath", "breathing"],
+    "sleep": ["sleep", "sleep quality"],
+    "stress_control": ["stress", "anxiety", "anxious", "stress control"],
+    # --- MONITORING ---
+    "check_again": [
+        "check again",
+        "check sugar again",
+        "recheck",
+        "measure again",
+        r"check.*again",
+    ],
+    "track_pattern": [
+        "track glucose",
+        "track pattern",
+        "log glucose",
+        "pattern",
+        "track",
+    ],
+    "pre_post_compare": [
+        "before and after meal",
+        "pre and post meal",
+        "compare before after",
+        "compare",
+    ],
+    # --- ENHANCERS ---
+    "vinegar": ["vinegar", "apple cider vinegar"],
+    "cinnamon": ["cinnamon"],
+}
+
+# ---------------- SUB-LEVER → LEVER MAP ----------------
+_SUB_LEVER_TO_LEVER = {
+    "pairing": "food",
+    "fiber_first": "food",
+    "protein_first": "food",
+    "carb_control": "food",
+    "post_meal_walk": "movement",
+    "brisk_walk": "movement",
+    "light_activity": "movement",
+    "delay_meal": "timing",
+    "meal_spacing": "timing",
+    "early_dinner": "timing",
+    "breathing": "recovery",
+    "sleep": "recovery",
+    "stress_control": "recovery",
+    "check_again": "monitoring",
+    "track_pattern": "monitoring",
+    "pre_post_compare": "monitoring",
+    "vinegar": "enhancers",
+    "cinnamon": "enhancers",
+}
+
 # ---------------- DOMAIN CONSTANTS ----------------
 DOMAINS = {
     "GLUCOSE": "glucose",
@@ -673,6 +796,28 @@ def _compute_intent_flags(q: str) -> dict:
     }
 
 
+def detect_sub_lever(q: str) -> Optional[str]:
+    s = q.lower()
+    for sub, phrases in SUB_LEVER_KEYWORDS.items():
+        for phrase in phrases:
+            if "*" in phrase:
+                if re.search(phrase, s):
+                    return sub
+            elif phrase in s:
+                return sub
+    return None
+
+
+def detect_lever(q: str, sub_lever: Optional[str]) -> str:
+    if sub_lever:
+        return _SUB_LEVER_TO_LEVER[sub_lever]
+    s = q.lower()
+    for lever, keywords in LEVER_KEYWORDS.items():
+        if has_any(s, keywords):
+            return lever
+    return "lifestyle"  # safe fallback
+
+
 def detect_condition(q: str) -> str:
     s = q.lower().strip()
 
@@ -755,9 +900,19 @@ def build_intent(q: str, lite: bool, context: dict) -> dict:
     domain = detect_condition(q)
     flags = _compute_intent_flags(q)
     need = detect_need_v2(q, context, flags, domain)
-    print("DEBUG detect_condition:", q, "→", detect_condition(q))
 
-    # 🔥 HARD GUARANTEE
+    sub_lever = detect_sub_lever(q)
+    lever = detect_lever(q, sub_lever)
+
+    # 🔥 FIX 1: fallback lever from keywords
+    if lever is None:
+        lever = fallback_lever_from_query(q)
+
+    # 🔥 FIX 2: default to lifestyle (never None)
+    if lever is None:
+        lever = "lifestyle"
+
+    # 🔥 HARD GUARANTEES
     if domain not in DOMAINS.values():
         domain = DOMAINS["LIFESTYLE"]
 
@@ -767,9 +922,35 @@ def build_intent(q: str, lite: bool, context: dict) -> dict:
     return {
         "domain": domain,
         "need": need,
+        "lever": lever,
+        "sub_lever": sub_lever,
         "intervention": detect_intervention(need),
         "tool": map_tool(need, lite),
     }
+
+
+def fallback_lever_from_query(q: str) -> str:
+    q = q.lower()
+
+    if any(x in q for x in ["fiber", "fibre", "protein", "carb", "fat", "eat"]):
+        return "food"
+
+    if any(x in q for x in ["walk", "exercise", "movement", "steps"]):
+        return "movement"
+
+    if any(x in q for x in ["meal", "dinner", "fasting", "gap", "timing"]):
+        return "timing"
+
+    if any(x in q for x in ["stress", "sleep", "breathing", "recovery"]):
+        return "recovery"
+
+    if any(x in q for x in ["check", "track", "monitor", "pattern"]):
+        return "monitoring"
+
+    if any(x in q for x in ["vinegar", "cinnamon", "supplement"]):
+        return "enhancers"
+
+    return None
 
 
 def is_meaningful_query(q: str, domain: str, need: str) -> bool:
@@ -1840,6 +2021,8 @@ async def handle_query(request: Request):
             intent = {
                 "domain": "lifestyle",
                 "need": "education",
+                "lever": None,
+                "sub_lever": None,
             }
 
         return _inject_trace(
@@ -1850,6 +2033,12 @@ async def handle_query(request: Request):
                 "tts_text": None,
                 "audio": None,
                 "score": score,
+                # 🔥 ADD THESE (top-level exposure)
+                "domain": intent.get("domain"),
+                "need": intent.get("need"),
+                "lever": intent.get("lever"),
+                "sub_lever": intent.get("sub_lever"),
+                # keep original (optional but recommended)
                 "intent": intent,
             }
         )
