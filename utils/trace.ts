@@ -11,3 +11,16 @@ export const logTrace = (traceId: string, step: string, data?: any) => {
     console.log(`[${nowISO()}][${traceId}] ${step}`);
   }
 };
+
+export const traceStart = (traceId: string, name: string, traceLevel: number): number => {
+  if (traceLevel >= 4) {
+    console.log(`[${nowISO()}][FE][FUNC][${traceId}] → ${name}`);
+  }
+  return Date.now();
+};
+
+export const traceEnd = (traceId: string, name: string, start: number, traceLevel: number): void => {
+  if (traceLevel >= 4) {
+    console.log(`[${nowISO()}][FE][FUNC][${traceId}] ← ${name} ${Date.now() - start}ms`);
+  }
+};

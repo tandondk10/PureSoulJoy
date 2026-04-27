@@ -25,7 +25,7 @@ import { useUser } from "@/context/UserContext";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { createTraceId, logTrace, nowISO } from "../utils/trace";
+import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
 import { parseMealItems } from "./utils/mealParser";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
@@ -264,6 +264,7 @@ export default function HomeScreen() {
 
   const sendVoiceQuery = async (uri: string, isMaxDuration: boolean) => {
     const traceId = createTraceId();
+    const t0 = traceStart(traceId, "sendVoiceQuery", TRACE_LEVEL);
     logTrace(traceId, "VOICE_START");
 
     if (voiceStateRef.current !== "PROCESSING") {
@@ -427,12 +428,15 @@ export default function HomeScreen() {
 
       setStatusText(message);
       updateVoiceState("IDLE");
+    } finally {
+      traceEnd(traceId, "sendVoiceQuery", t0, TRACE_LEVEL);
     }
   };
 
   // ─── Keyboard query ───────────────────────────────────────────────────────
 
   const sendKeyboardQuery = async (query: string, traceId: string, raw?: string) => {
+    const t0 = traceStart(traceId, "sendKeyboardQuery", TRACE_LEVEL);
     const displayText = raw ?? query;
     // 🔒 Debounce (FIRST)
     const now = Date.now();
@@ -522,7 +526,18 @@ export default function HomeScreen() {
       }
 
       const data = await res.json();
-      logTrace(traceId, "RESPONSE_PARSED", data);
+
+      logTrace(
+        traceId,
+        "RESPONSE_PARSED",
+        {
+          ...data,
+          _trace: data._trace
+            ? JSON.stringify(data._trace, null, 2)
+            : null,
+        }
+      );
+
       logTrace(traceId, "API_STATUS_SUCCESS");
 
       const cleanedQuery =
@@ -590,6 +605,8 @@ export default function HomeScreen() {
       setTimeout(() => {
         setStatusText((cur) => (cur === message ? null : cur));
       }, 4000);
+    } finally {
+      traceEnd(traceId, "sendKeyboardQuery", t0, TRACE_LEVEL);
     }
   };
 

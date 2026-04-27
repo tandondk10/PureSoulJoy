@@ -13,6 +13,7 @@ import difflib
 
 from litellm import completion
 from dotenv import load_dotenv
+from intervention_engine import get_intervention
 
 load_dotenv()
 client = OpenAI()
@@ -28,8 +29,11 @@ MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
 
 TRACE_LEVEL = int(os.getenv("TRACE_LEVEL", "1"))
 TRACE_TARGETS = os.getenv("TRACE_TARGETS", "").split(",")
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
 print("TRACE_LEVEL:", TRACE_LEVEL)
 print("TRACE_TARGETS:", TRACE_TARGETS)
+print("DEBUGE:", DEBUG)
 
 
 def now_iso():
@@ -37,6 +41,30 @@ def now_iso():
 
 
 trace_id_var: ContextVar[str] = ContextVar("trace_id", default="unknown")
+
+
+class TraceAccumulator:
+    def __init__(self, trace_id: str):
+        self.trace_id = trace_id
+        self.steps: list = []
+
+    def log(self, stage: str, data: dict):
+        self.steps.append({"stage": stage, "ts": now_iso(), "data": data})
+
+    def to_dict(self) -> dict:
+        return {"trace_id": self.trace_id, "steps": self.steps}
+
+
+trace_obj_var: ContextVar = ContextVar("trace_obj", default=None)
+
+
+def _inject_trace(resp: dict) -> dict:
+    if not DEBUG:
+        return resp
+    acc = trace_obj_var.get(None)
+    if acc:
+        resp["_trace"] = acc.to_dict()
+    return resp
 
 
 def trace_start(func_name: str):
@@ -295,10 +323,20 @@ def clean_meal_text(q: str) -> str:
 def detect_context(q: str) -> dict:
     t0 = trace_start("detect_context")
     try:
+        s = q.lower()
         return {
-            "after_meal": any(x in q for x in ["after meal", "post meal"]),
-            "high": any(x in q for x in ["high", "spike", "elevated"]),
-            "low": any(x in q for x in ["low", "drop"]),
+            "after_meal": any(
+                x in s
+                for x in [
+                    "after meal",
+                    "post meal",
+                    "after lunch",
+                    "after dinner",
+                    "after breakfast",
+                ]
+            ),
+            "high": any(x in s for x in ["high", "spike", "elevated", "up"]),
+            "low": any(x in s for x in ["low", "drop"]),
         }
     finally:
         trace_end("detect_context", t0)
@@ -563,6 +601,136 @@ def compute_score(intent: str, q: str) -> int:
         trace_end("compute_score", t0)
 
 
+# ---------------- INTENT ROUTING ----------------
+def detect_need(q: str) -> str:
+    s = q.lower()
+
+    # --- 1. STATE / PROBLEM → INTERVENTION (highest priority)
+    if any(
+        x in s
+        for x in [
+            "is high",
+            "is low",
+            "too high",
+            "too low",
+            "high",
+            "low",
+            "spike",
+            "crash",
+        ]
+    ):
+        return "intervention"
+
+    # numeric + condition = intervention
+    if any(ch.isdigit() for ch in s) and any(
+        w in s for w in ["bp", "blood pressure", "glucose", "sugar"]
+    ):
+        return "intervention"
+
+    # --- 2. ACTION / IMPROVEMENT → GUIDANCE
+    if any(
+        w in s
+        for w in [
+            "reduce",
+            "lower",
+            "control",
+            "improve",
+            "stabilize",
+            "avoid",
+            "prevent",
+            "manage",
+        ]
+    ):
+        return "guidance"
+
+    # --- 3. QUESTIONS → EDUCATION
+    if any(p in s for p in ["what is", "why", "define", "meaning"]):
+        return "education"
+
+    # --- DEFAULT
+    return "education"
+
+
+def detect_condition(q: str) -> dict:
+    s = q.lower()
+    values = []
+    if any(
+        x in s
+        for x in ["glucose", "sugar", "a1c", "diabetes", "spike", "blood sugar", "bg"]
+    ):
+        values.append("glucose")
+    if any(
+        x in s
+        for x in ["blood pressure", "bp", "hypertension", "systolic", "diastolic"]
+    ):
+        values.append("bp")
+    if any(x in s for x in ["cholesterol", "ldl", "hdl", "lipid", "triglyceride"]):
+        values.append("cholesterol")
+    ctype = "none" if not values else ("single" if len(values) == 1 else "multi")
+    return {"type": ctype, "values": values}
+
+
+def classify_need(context: dict) -> str:
+    if context.get("high") or context.get("low"):
+        return "intervention"
+    return "education"
+
+
+def detect_intervention(need: str) -> list:
+    if need == "prevention":
+        return ["nutrition", "exercise"]
+    return [need]
+
+
+def map_tool(need: str, lite: bool) -> str:
+    return "llm_lite" if lite else "llm_full"
+
+
+def build_intent(q: str, lite: bool) -> dict:
+    need = detect_need(q)
+    condition = detect_condition(q)
+    intervention = detect_intervention(need)
+    tool = map_tool(need, lite)
+    return {
+        "condition": condition,
+        "need": need,
+        "intervention": intervention,
+        "tool": tool,
+    }
+
+
+def is_meaningful_query(q: str) -> bool:
+    t0 = trace_start("is_meaningful_query")
+    try:
+        words = q.strip().lower().split()
+
+        contains_number = any(ch.isdigit() for ch in q)
+        contains_marker = any(
+            w in q.lower() for w in ["bp", "ldl", "hdl", "sugar", "glucose"]
+        )
+
+        if len(words) < 3 and not (contains_number or contains_marker):
+            return False
+
+        if not any(ch in q for ch in "aeiou"):
+            return False
+
+        if not any(len(w) >= 3 for w in words):
+            return False
+
+        return True
+    finally:
+        trace_end("is_meaningful_query", t0)
+
+
+def unclear_query_response() -> dict:
+    return {
+        "text": "Please ask a clear question like 'How do I reduce blood sugar after meals?'",
+        "score": 0,
+        "intent": "unclear",
+    }
+
+
 # ---------------- MOCK ----------------
 def mock_response(intent: str) -> str:
     if intent == "glucose":
@@ -613,9 +781,13 @@ Try asking about food, exercise, or health markers."""
 
 
 # ---------------- PROMPT ----------------
-def build_prompt(q: str, ctx: dict) -> str:
+def build_prompt(q: str, ctx: dict, interventions: list = None) -> str:
     t0 = trace_start("build_prompt")
     try:
+        intervention_block = ""
+        if interventions:
+            lines = "\n".join(f"- {i.replace('_', ' ')}" for i in interventions)
+            intervention_block = f"\nRequired interventions — follow exactly, in order, do not add or skip any:\n{lines}\n"
         result = f"""
 You are a lifestyle health assistant.
 
@@ -633,7 +805,7 @@ Context:
 - After meal: {ctx["after_meal"]}
 - High: {ctx["high"]}
 - Low: {ctx["low"]}
-
+{intervention_block}
 Instructions:
 - Be practical and easy to follow
 - Use simple everyday language
@@ -679,12 +851,16 @@ Rules:
 
 
 # ---------------- LITE PROMPT ----------------
-def build_lite_prompt(q: str) -> str:
+def build_lite_prompt(q: str, interventions: list = None) -> str:
     t0 = trace_start("build_lite_prompt")
     try:
+        intervention_block = ""
+        if interventions:
+            actions = ", ".join(i.replace("_", " ") for i in interventions)
+            intervention_block = f"\nYou MUST follow these actions exactly and in this order. Do not add new actions. Do not skip any: {actions}.\n"
         result = f"""
 You are a calm, practical health coach.
-
+{intervention_block}
 User asked:
 "{q}"
 
@@ -796,7 +972,7 @@ def validate_lite_response(text: str) -> tuple:
 
 
 # ---------------- LLM ----------------
-def llm_response(q: str, ctx: dict, lite: bool) -> str:
+def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> str:
     t0_func = trace_start("llm_response")
     try:
         if TRACE_LEVEL >= 1:
@@ -807,7 +983,7 @@ def llm_response(q: str, ctx: dict, lite: bool) -> str:
                 print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", q)
 
         if lite:
-            prompt = build_lite_prompt(q)
+            prompt = build_lite_prompt(q, interventions)
 
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
@@ -847,7 +1023,7 @@ def llm_response(q: str, ctx: dict, lite: bool) -> str:
             return text
 
         else:
-            prompt = build_prompt(q, ctx)
+            prompt = build_prompt(q, ctx, interventions)
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
             t0 = time.time()
@@ -948,21 +1124,82 @@ async def build_response(query: str, lite: bool):
         q = correct_spelling(query)
         q = normalize(q)
 
-        # ✅ pairing override
+        # pairing fast-path — before intent
         if is_pairing_query(q):
             return {**build_pairing_response(q), "score": 50, "intent": "lifestyle"}
 
-        ctx = detect_context(q)
-        intent = detect_intent(q)
+        if not is_meaningful_query(q):
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] UNCLEAR_QUERY: {q}")
+            return unclear_query_response()
 
-        score = compute_score(intent, q)
+        ctx = detect_context(q)
+        intent = build_intent(q, lite)
+
+        need = intent["need"]
+        domain = (
+            intent["condition"]["values"][0] if intent["condition"]["values"] else None
+        )
+        domain = domain or "lifestyle"
+        condition_key = domain if domain else need
+
+        # Pipeline: question override → classify_need context upgrade
+        q_lower = q.lower()
+        if any(
+            p in q_lower for p in ["what is", "what are", "why", "define", "meaning"]
+        ):
+            need = "education"
+        elif classify_need(ctx) == "intervention":
+            need = "intervention"
+
+        # context label for tracing
+        if "after" in q_lower and any(
+            x in q_lower for x in ["lunch", "dinner", "breakfast", "meal"]
+        ):
+            context_label = "post_meal"
+        elif any(x in q_lower for x in ["fasting", "morning"]):
+            context_label = "fasting"
+        elif any(x in q_lower for x in ["high", "190", "180", "200"]):
+            context_label = "high_reading"
+        else:
+            context_label = "general"
+
+        # 1. classify
+        _acc = trace_obj_var.get(None)
+        if _acc:
+            _acc.log(
+                "classify", {"domain": domain, "need": need, "context": context_label}
+            )
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] CLASSIFY: domain={domain} need={need} context={context_label}"
+            )
+
+        # 2. intervention_select
+        interventions = get_intervention(domain, need, ctx)
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] INTERVENTIONS:", interventions)
+        _acc = trace_obj_var.get(None)
+        if _acc:
+            _acc.log(
+                "intervention_select",
+                {"domain": domain, "need": need, "interventions": interventions},
+            )
+
+        score = compute_score(condition_key, q)
+        _exec_path = (
+            "scroll_test"
+            if SCROLL_TEST
+            else "mock" if USE_MOCK else "llm" if USE_LLM else "fallback"
+        )
+
+        # 3. lever_select
+        _acc = trace_obj_var.get(None)
+        if _acc:
+            _acc.log("lever_select", {"path": _exec_path, "tool": intent["tool"]})
+
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] SCORE:", score)
-
-        if intent == "unknown":
-            q = correct_with_llm(q)
-            intent = detect_intent(q)
-
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] --- REQUEST ---")
         if TRACE_LEVEL >= 1:
@@ -970,48 +1207,34 @@ async def build_response(query: str, lite: bool):
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] INTENT:", intent)
 
-        # ✅ medication shortcut
-        if intent == "medication":
-            return medication_response()
-
-        # ✅ fallback (safe now)
-        if intent in ("unknown", "general"):
-            if lite:
-                return lite_fallback_response()
-            return {
-                "text": """## Insight
-I can help with:
-- meals
-- glucose
-- blood pressure
-- cholesterol
-
-## Try This
-Say something like:
-- "rice dal paneer"
-- "my sugar is high after meal"
-- "how to reduce BP"
-""",
-                "score": 0,
-            }
-
         if SCROLL_TEST:
             if TRACE_LEVEL >= 1:
                 print(f"[{now_iso()}][{trace_id_var.get()}] 🔥 SCROLL TEST MODE")
-            return {"text": scroll_test_response(), "score": score, "intent": intent}
+            return {"text": scroll_test_response(), "score": score, "intent": need}
 
         if USE_MOCK:
-            return {"text": mock_response(intent), "score": score, "intent": intent}
+            mock_key = (
+                condition_key
+                if condition_key in ("glucose", "bp", "cholesterol")
+                else "lifestyle"
+            )
+            return {"text": mock_response(mock_key), "score": score, "intent": need}
 
         if USE_LLM:
+            use_lite = intent["tool"] == "llm_lite"
+            # 4. response_format
+            _acc = trace_obj_var.get(None)
+            if _acc:
+                _acc.log("response_format", {"format": "lite" if use_lite else "full"})
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(llm_response, q, ctx, lite), timeout=15
+                    asyncio.to_thread(llm_response, q, ctx, use_lite, interventions),
+                    timeout=15,
                 )
                 return {
-                    "text": result if lite else enforce_format(result),
+                    "text": result if use_lite else enforce_format(result),
                     "score": score,
-                    "intent": intent,
+                    "intent": need,
                 }
 
             except asyncio.TimeoutError:
@@ -1020,16 +1243,21 @@ Say something like:
                 return {
                     "text": "LLM timed out. Try again.",
                     "score": score,
-                    "intent": intent,
+                    "intent": need,
                 }
 
             except Exception as e:
                 if TRACE_LEVEL >= 1:
                     print(f"[{now_iso()}][{trace_id_var.get()}] LLM ERROR:", e)
+                mock_key = (
+                    condition_key
+                    if condition_key in ("glucose", "bp", "cholesterol")
+                    else "lifestyle"
+                )
                 return {
-                    "text": mock_response(intent),
+                    "text": mock_response(mock_key),
                     "score": score,
-                    "intent": intent,
+                    "intent": need,
                     "error": str(e),
                 }
 
@@ -1040,7 +1268,7 @@ Fallback response active.
 ## Next Step
 Try asking about lifestyle, BP, glucose, or cholesterol.""",
             "score": score,
-            "intent": intent,
+            "intent": intent_type,
         }
     finally:
         trace_end("build_response", t0_func)
@@ -1257,6 +1485,11 @@ async def handle_query(request: Request):
     trace_id_var.set(trace_id)
     content_type = request.headers.get("content-type", "")
 
+    if DEBUG:
+        _acc = TraceAccumulator(trace_id)
+        trace_obj_var.set(_acc)
+        _acc.log("api_entry", {"content_type": content_type.split(";")[0].strip()})
+
     if TRACE_LEVEL >= 2:
         print(f"[{now_iso()}][BE][API][{trace_id}] → /query")
 
@@ -1269,14 +1502,16 @@ async def handle_query(request: Request):
         audio_file = form.get("audio_file")
 
         if audio_file is None:
-            return {
-                "status": "error",
-                "message": "Could not understand. Please try again.",
-                "cleaned_query": "",
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Could not understand. Please try again.",
+                    "cleaned_query": "",
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
         audio_bytes = await audio_file.read()
         if TRACE_LEVEL >= 1:
@@ -1287,24 +1522,28 @@ async def handle_query(request: Request):
             )
 
         if len(audio_bytes) == 0:
-            return {
-                "status": "error",
-                "message": "Could not understand. Please try again.",
-                "cleaned_query": "",
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Could not understand. Please try again.",
+                    "cleaned_query": "",
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
         if len(audio_bytes) > 25 * 1024 * 1024:
-            return {
-                "status": "error",
-                "message": "Audio file too large.",
-                "cleaned_query": "",
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Audio file too large.",
+                    "cleaned_query": "",
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
         # Whisper transcription
         audio_io = io.BytesIO(audio_bytes)
@@ -1325,14 +1564,16 @@ async def handle_query(request: Request):
         except asyncio.TimeoutError:
             if TRACE_LEVEL >= 1:
                 print(f"[{now_iso()}][{trace_id_var.get()}] WHISPER TIMEOUT")
-            return {
-                "status": "error",
-                "message": "Could not understand. Please try again.",
-                "cleaned_query": "",
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Could not understand. Please try again.",
+                    "cleaned_query": "",
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] WHISPER RAW:", raw_transcript)
@@ -1344,14 +1585,16 @@ async def handle_query(request: Request):
                 print(
                     f"[{now_iso()}][{trace_id_var.get()}] VALIDATION FAILED:", error_msg
                 )
-            return {
-                "status": "error",
-                "message": error_msg,
-                "cleaned_query": cleaned_query,
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": error_msg,
+                    "cleaned_query": cleaned_query,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", cleaned_query)
@@ -1377,14 +1620,16 @@ async def handle_query(request: Request):
         if TRACE_LEVEL >= 2:
             print(f"[{now_iso()}][BE][API][{trace_id}] ← /query {duration_ms:.0f}ms")
 
-        return {
-            "status": "success",
-            "message": text,
-            "cleaned_query": cleaned_query,
-            "tts_text": tts_text if audio else None,
-            "audio": audio,
-            "score": score,
-        }
+        return _inject_trace(
+            {
+                "status": "success",
+                "message": text,
+                "cleaned_query": cleaned_query,
+                "tts_text": tts_text if audio else None,
+                "audio": audio,
+                "score": score,
+            }
+        )
 
     # ── KEYBOARD PATH ────────────────────────────────────────────────────────
     else:
@@ -1406,36 +1651,47 @@ async def handle_query(request: Request):
             print(f"[{now_iso()}][{trace_id_var.get()}] QUERY: {query}")
 
         if not query:
-            return {
-                "status": "error",
-                "message": "Please enter a question.",
-                "cleaned_query": None,
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Please enter a question.",
+                    "cleaned_query": None,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
         if len(query) > 500:
-            return {
-                "status": "error",
-                "message": "Query too long.",
-                "cleaned_query": None,
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Query too long.",
+                    "cleaned_query": None,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
         if len(query.split()) <= 1:
-            return {
-                "status": "success",
-                "message": "Please say a full sentence like 'my sugar is high after meal'",
-                "cleaned_query": None,
-                "tts_text": None,
-                "audio": None,
-                "score": 0,
-            }
+            return _inject_trace(
+                {
+                    "status": "success",
+                    "message": "Please say a full sentence like 'my sugar is high after meal'",
+                    "cleaned_query": None,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
 
-        result = await build_response(query, lite)
+        try:
+            result = await build_response(query, lite)
+        except Exception as e:
+            print(f"[FATAL][{trace_id_var.get()}] {str(e)}")
+            raise
+
         text = result.get("text", "")
         score = result.get("score", 0)
 
@@ -1444,12 +1700,14 @@ async def handle_query(request: Request):
             print(f"[{now_iso()}][BE][API][{trace_id}] ← /query {duration_ms:.0f}ms")
 
         # audio is always null for keyboard — spec constraint
-        return {
-            "status": "success",
-            "message": text,
-            "cleaned_query": None,
-            "tts_text": None,
-            "audio": None,
-            "score": score,
-            "intent": result.get("intent", "general"),
-        }
+        return _inject_trace(
+            {
+                "status": "success",
+                "message": text,
+                "cleaned_query": None,
+                "tts_text": None,
+                "audio": None,
+                "score": score,
+                "intent": result.get("intent", "general"),
+            }
+        )
