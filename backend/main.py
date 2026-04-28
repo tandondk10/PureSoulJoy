@@ -9,6 +9,7 @@ import time
 import asyncio
 import base64
 import difflib
+import sqlite3
 
 
 from litellm import completion
@@ -17,7 +18,11 @@ from dotenv import load_dotenv
 from intervention_engine import get_intervention
 from context_patterns import detect_context_pattern
 from lever_mapping import CONTEXT_LEVERS, LEVER_ACTIONS, DEFAULT_LEVERS
-from typing import Optional
+from utils.trace import create_trace_id
+from typing import Optional, List
+from pydantic import BaseModel
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "feedback.db")
 
 load_dotenv()
 client = OpenAI()
@@ -63,11 +68,15 @@ trace_obj_var: ContextVar = ContextVar("trace_obj", default=None)
 
 
 def _inject_trace(resp: dict) -> dict:
-    if not DEBUG:
-        return resp
-    acc = trace_obj_var.get(None)
-    if acc:
-        resp["_trace"] = acc.to_dict()
+    trace_id = trace_id_var.get("unknown")
+    if DEBUG:
+        acc = trace_obj_var.get(None)
+        if acc:
+            full = acc.to_dict()
+            full["trace_id"] = trace_id
+            resp["_trace"] = full
+            return resp
+    resp["_trace"] = {"trace_id": trace_id}
     return resp
 
 
@@ -98,7 +107,37 @@ if TRACE_LEVEL >= 1:
 if TRACE_LEVEL >= 1:
     print(f"[{now_iso()}][{trace_id_var.get()}] SCROLL_TEST:", SCROLL_TEST)
 
+DB_PATH = os.path.join(os.path.dirname(__file__), "feedback.db")
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trace_id TEXT,
+        query TEXT,
+        context_name TEXT,
+        action TEXT,
+        feedback TEXT,
+        action_taken TEXT,
+        timestamp TEXT
+    )
+    """
+    )
+    for col in ("action_taken TEXT", "raw_query TEXT", "normalized_query TEXT"):
+        try:
+            cursor.execute(f"ALTER TABLE feedback ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
+    conn.close()
+
+
 app = FastAPI()
+init_db()
 
 if TRACE_LEVEL >= 1:
     print(f"[{now_iso()}][{trace_id_var.get()}] 🚨 LLM BACKEND RUNNING")
@@ -1106,7 +1145,9 @@ def build_lite_prompt(q: str, context_name: str = None, top_action: str = None) 
     t0 = trace_start("build_lite_prompt")
     try:
         if context_name == "behavior_gap":
-            action_line = f'The one action to take right now: {top_action}.' if top_action else ""
+            action_line = (
+                f"The one action to take right now: {top_action}." if top_action else ""
+            )
             result = f"""
 You are a decisive health coach speaking to someone who knows what to do but is not doing it.
 
@@ -1216,22 +1257,22 @@ def call_llm(prompt: str) -> str:
 def strip_actions_from_text(text: str) -> str:
     """Remove bullet lines, numbered action lists, and 'Do this now' blocks."""
     # Remove "Do this now:" and everything after it
-    text = re.sub(r'Do this now:.*', '', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"Do this now:.*", "", text, flags=re.IGNORECASE | re.DOTALL)
     # Remove bullet lines (•, -, *) at start of any line
-    text = re.sub(r'^\s*[-•*]\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-•*]\s+", "", text, flags=re.MULTILINE)
     # Remove bullet lines (•, -, *) after a newline (belt-and-suspenders)
-    text = re.sub(r'(?:^|\n)\s*[-•*]\s+[^\n]*', '', text, flags=re.MULTILINE)
+    text = re.sub(r"(?:^|\n)\s*[-•*]\s+[^\n]*", "", text, flags=re.MULTILINE)
     # Remove numbered list lines (1. 2. 3.)
-    text = re.sub(r'(?:^|\n)\s*\d+\.\s+[^\n]*', '', text, flags=re.MULTILINE)
+    text = re.sub(r"(?:^|\n)\s*\d+\.\s+[^\n]*", "", text, flags=re.MULTILINE)
     # Collapse excess blank lines
-    text = re.sub(r'\n{2,}', '\n', text)
+    text = re.sub(r"\n{2,}", "\n", text)
     return text.strip()
 
 
 def limit_sentences(text: str, max_sentences: int = 3) -> str:
     """Cap text to max_sentences by splitting on sentence-ending punctuation."""
-    sentences = re.split(r'(?<=[.!?]) +', text.strip())
-    return ' '.join(sentences[:max_sentences]).strip()
+    sentences = re.split(r"(?<=[.!?]) +", text.strip())
+    return " ".join(sentences[:max_sentences]).strip()
 
 
 # ---------------- LITE VALIDATOR ----------------
@@ -1266,7 +1307,9 @@ def validate_lite_response(text: str) -> tuple:
 
 
 # ---------------- LLM ----------------
-def llm_response(q: str, ctx: dict, lite: bool, context_name: str = None, top_action: str = None) -> str:
+def llm_response(
+    q: str, ctx: dict, lite: bool, context_name: str = None, top_action: str = None
+) -> str:
     t0_func = trace_start("llm_response")
     try:
         if TRACE_LEVEL >= 1:
@@ -1277,7 +1320,9 @@ def llm_response(q: str, ctx: dict, lite: bool, context_name: str = None, top_ac
                 print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", q)
 
         if lite:
-            prompt = build_lite_prompt(q, context_name=context_name, top_action=top_action)
+            prompt = build_lite_prompt(
+                q, context_name=context_name, top_action=top_action
+            )
 
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
@@ -1740,7 +1785,9 @@ async def build_response(query: str, lite: bool):
             intent["context_name"] = "behavior_gap"
             context_name = "behavior_gap"
             if TRACE_LEVEL >= 1:
-                print(f"[{now_iso()}][{trace_id_var.get()}] BEHAVIOR_GAP detected → need=intervention context=behavior_gap")
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] BEHAVIOR_GAP detected → need=intervention context=behavior_gap"
+                )
 
         # ✅ FALLBACK SAFETY
         if not domain or not need:
@@ -1851,11 +1898,15 @@ async def build_response(query: str, lite: bool):
                     f" context_name={context_name!r} interventions={interventions}"
                 )
 
-            top_action_label = _action_label(interventions[0]) if interventions else None
+            top_action_label = (
+                _action_label(interventions[0]) if interventions else None
+            )
 
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(llm_response, q, ctx, use_lite, context_name, top_action_label),
+                    asyncio.to_thread(
+                        llm_response, q, ctx, use_lite, context_name, top_action_label
+                    ),
                     timeout=15,
                 )
                 text = result if use_lite else enforce_format(result)
@@ -2006,9 +2057,67 @@ Add protein and fiber to balance it.
 A short walk after eating also helps."""
 
 
+# ---------------- FEEDBACK ----------------
+def normalize_query(query: str) -> str:
+    items = re.split(r",|\band\b", query.lower())
+    items = [i.strip() for i in items if i.strip()]
+    items = sorted(set(items))
+    return ", ".join(items)
+
+
+class FeedbackRequest(BaseModel):
+    trace_id: str
+    action: str
+    raw_query: Optional[str] = None
+    normalized_query: Optional[str] = None
+    feedback: Optional[str] = None
+    context_name: Optional[str] = None
+    action_taken: Optional[str] = None
+
+
+@app.post("/feedback")
+async def capture_feedback(req: FeedbackRequest):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    norm = req.normalized_query or (normalize_query(req.raw_query) if req.raw_query else None)
+    cursor.execute(
+        """
+        INSERT INTO feedback (trace_id, raw_query, normalized_query, context_name, action, feedback, action_taken, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            req.trace_id,
+            req.raw_query,
+            norm,
+            req.context_name,
+            req.action,
+            req.feedback,
+            req.action_taken,
+            now_iso(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[{now_iso()}][{req.trace_id}] FEEDBACK: {req.feedback!r} action={req.action!r}"
+        )
+    return {"status": "ok"}
+
+
+@app.get("/debug/feedback")
+def get_feedback():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM feedback ORDER BY id DESC LIMIT 50")
+    columns = [col[0] for col in cursor.description]
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(zip(columns, row)) for row in rows]
+
+
 # ---------------- NORMALIZE ENDPOINT ----------------
-from pydantic import BaseModel
-from typing import List
 
 
 class NormalizeRequest(BaseModel):
@@ -2099,9 +2208,10 @@ async def handle_query(request: Request):
                    Runs LLM only → audio is always null
     """
 
-    start = time.time()
-    trace_id = request.headers.get("x-trace-id", "unknown")
+    incoming_trace_id = request.headers.get("x-trace-id")
+    trace_id = incoming_trace_id if incoming_trace_id else create_trace_id()
     trace_id_var.set(trace_id)
+    start = time.time()
     content_type = request.headers.get("content-type", "")
 
     if DEBUG:
