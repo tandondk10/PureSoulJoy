@@ -14,6 +14,7 @@ CONTEXT_LEVERS = {
     "high_salt":          ["food", "recovery"],
     "late_eating":        ["timing", "food"],
     "low_movement":       ["movement"],
+    "behavior_gap":       ["movement", "recovery"],
     "low_energy":         ["food", "recovery", "movement"],
 }
 

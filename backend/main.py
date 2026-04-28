@@ -1102,9 +1102,34 @@ Rules:
 
 
 # ---------------- LITE PROMPT ----------------
-def build_lite_prompt(q: str) -> str:
+def build_lite_prompt(q: str, context_name: str = None, top_action: str = None) -> str:
     t0 = trace_start("build_lite_prompt")
     try:
+        if context_name == "behavior_gap":
+            action_line = f'The one action to take right now: {top_action}.' if top_action else ""
+            result = f"""
+You are a decisive health coach speaking to someone who knows what to do but is not doing it.
+
+User said:
+"{q}"
+
+{action_line}
+
+Respond in EXACTLY 1–2 sentences.
+
+Rules:
+- Be direct, not gentle
+- State the action explicitly — do not suggest or imply it
+- No soft language: no "try", "start by", "consider", "you might want to"
+- No explanation of why — just what to do and a short sharp reason
+- No headings, no bullets, no markdown
+- End the response after the second sentence
+
+Example tone:
+"Take a 10-minute walk right now — your body clears sugar fastest with movement. That's your one move."
+"""
+            return result
+
         result = f"""
 You are a calm, practical health coach. Your ONLY job is to explain the situation in plain language — actions are shown separately to the user by the system.
 
@@ -1241,7 +1266,7 @@ def validate_lite_response(text: str) -> tuple:
 
 
 # ---------------- LLM ----------------
-def llm_response(q: str, ctx: dict, lite: bool) -> str:
+def llm_response(q: str, ctx: dict, lite: bool, context_name: str = None, top_action: str = None) -> str:
     t0_func = trace_start("llm_response")
     try:
         if TRACE_LEVEL >= 1:
@@ -1252,7 +1277,7 @@ def llm_response(q: str, ctx: dict, lite: bool) -> str:
                 print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", q)
 
         if lite:
-            prompt = build_lite_prompt(q)
+            prompt = build_lite_prompt(q, context_name=context_name, top_action=top_action)
 
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
@@ -1517,6 +1542,11 @@ def build_structured_response(intent: dict, ctx: dict) -> dict:
             if len(top_actions) == 3:
                 break
 
+    # Lite mode: single high-impact action to reduce cognitive load
+    if intent.get("tool") == "llm_lite":
+        top_actions = top_actions[:1]
+        levers_used = levers_used[:1]
+
     return {
         "domain": domain,
         "need": need,
@@ -1704,6 +1734,14 @@ async def build_response(query: str, lite: bool):
         # Lock context_name — single assignment, never modified after this point
         intent["context_name"] = context_name
 
+        # ── Behavior gap override: user knows but isn't acting → force intervention ──
+        if re.search(r"\b(i know|should).*(but i (don'?t|do not))\b", q, re.I):
+            intent["need"] = "intervention"
+            intent["context_name"] = "behavior_gap"
+            context_name = "behavior_gap"
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] BEHAVIOR_GAP detected → need=intervention context=behavior_gap")
+
         # ✅ FALLBACK SAFETY
         if not domain or not need:
             if TRACE_LEVEL >= 1:
@@ -1813,9 +1851,11 @@ async def build_response(query: str, lite: bool):
                     f" context_name={context_name!r} interventions={interventions}"
                 )
 
+            top_action_label = _action_label(interventions[0]) if interventions else None
+
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(llm_response, q, ctx, use_lite),
+                    asyncio.to_thread(llm_response, q, ctx, use_lite, context_name, top_action_label),
                     timeout=15,
                 )
                 text = result if use_lite else enforce_format(result)
