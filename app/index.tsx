@@ -26,7 +26,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
-import { parseMealItems } from "./utils/mealParser";
+import { parseMealItems, normalizeQuery } from "./utils/mealParser";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
@@ -58,6 +58,10 @@ type Message = {
   errorMessage?: string;
   nextActions?: string[];
   topActions?: string[];
+  topActionCodes?: string[];
+  traceId?: string;
+  feedbackSent?: "helpful" | "not_helpful";
+  actionTaken?: boolean;
 };
 
 // Valid state transitions per spec §4.2
@@ -401,6 +405,14 @@ export default function HomeScreen() {
         data.screen?.top_actions ||
         data.structured?.top_actions ||
         [];
+      const topActionCodes: string[] =
+        data.screen?.top_actions ||
+        data.structured?.top_actions ||
+        [];
+
+      // TODO: remove after validation
+      console.log("[VOICE] ACTION CODES:", topActionCodes);
+      console.log("[VOICE] DISPLAY ACTIONS:", topActions);
 
       setMessages((prev) =>
         prev.map((m) => {
@@ -412,6 +424,8 @@ export default function HomeScreen() {
             sections: liteMode === true ? undefined : sections ?? undefined,
             rawText: liteMode === true ? text : (sections ? undefined : text),
             topActions,
+            topActionCodes,
+            traceId,
           };
           return m;
         })
@@ -592,6 +606,14 @@ export default function HomeScreen() {
         data.screen?.top_actions ||
         data.structured?.top_actions ||
         [];
+      const topActionCodes: string[] =
+        data.screen?.top_actions ||
+        data.structured?.top_actions ||
+        [];
+
+      // TODO: remove after validation
+      console.log("[KB] ACTION CODES:", topActionCodes);
+      console.log("[KB] DISPLAY ACTIONS:", topActions);
 
       logTrace(traceId, "UI_UPDATE_START");
 
@@ -605,6 +627,8 @@ export default function HomeScreen() {
               sections: liteMode ? undefined : sections ?? undefined,
               rawText: liteMode ? text : (sections ? undefined : text),
               topActions,
+              topActionCodes,
+              traceId,
             }
             : m
         )
@@ -990,6 +1014,52 @@ export default function HomeScreen() {
     setLitePromptShown(true);
   }, [checkingUser]);
 
+  const sendFeedback = async (msg: Message, feedback: "helpful" | "not_helpful") => {
+    if (!msg.traceId || !msg.topActionCodes?.length) return;
+    setMessages(prev => prev.map(m =>
+      m.id === msg.id ? { ...m, feedbackSent: feedback } : m
+    ));
+    const rawQuery = messages.find(m => m.role === "user" && m.id === `${msg.traceId}-user`)?.text;
+    try {
+      await fetch(`${BACKEND_URL}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          trace_id: msg.traceId,
+          action: msg.topActionCodes![0],
+          feedback,
+          raw_query: rawQuery,
+          normalized_query: rawQuery ? normalizeQuery(rawQuery) : undefined,
+        }),
+      });
+    } catch (e) {
+      if (TRACE_LEVEL >= 1) console.warn("[FE] feedback POST failed:", e);
+    }
+  };
+
+  const sendActionTaken = async (msg: Message) => {
+    if (!msg.traceId || !msg.topActionCodes?.length) return;
+    setMessages(prev => prev.map(m =>
+      m.id === msg.id ? { ...m, actionTaken: true } : m
+    ));
+    const rawQuery = messages.find(m => m.role === "user" && m.id === `${msg.traceId}-user`)?.text;
+    try {
+      await fetch(`${BACKEND_URL}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-trace-id": msg.traceId },
+        body: JSON.stringify({
+          trace_id: msg.traceId,
+          action: msg.topActionCodes![0],
+          action_taken: "yes",
+          raw_query: rawQuery,
+          normalized_query: rawQuery ? normalizeQuery(rawQuery) : undefined,
+        }),
+      });
+    } catch (e) {
+      if (TRACE_LEVEL >= 1) console.warn("[FE] action_taken POST failed:", e);
+    }
+  };
+
   const handleNextAction = (value: string) => {
     // Cancel any in-flight request before switching modes
     if (abortControllerRef.current) {
@@ -1208,6 +1278,54 @@ export default function HomeScreen() {
                           {msg.topActions.join("\n")}
                         </Text>
                       </View>
+                    )}
+
+                    {/* Feedback buttons */}
+                    {msg.role === "assistant" && msg.status === "complete" &&
+                      msg.topActions && msg.topActions.length > 0 && (
+                      <View style={{ flexDirection: "row", marginTop: 8, gap: 8 }}>
+                        {msg.feedbackSent ? (
+                          <Text style={{ color: C.muted, fontSize: 13 }}>
+                            {msg.feedbackSent === "helpful" ? "Thanks for the feedback!" : "Got it, we'll improve."}
+                          </Text>
+                        ) : (
+                          <>
+                            <TouchableOpacity
+                              onPress={() => sendFeedback(msg, "helpful")}
+                              style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
+                            >
+                              <Text style={{ color: C.text, fontSize: 14 }}>👍 Helpful</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => sendFeedback(msg, "not_helpful")}
+                              style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
+                            >
+                              <Text style={{ color: C.text, fontSize: 14 }}>👎 Not helpful</Text>
+                            </TouchableOpacity>
+                          </>
+                        )}
+                      </View>
+                    )}
+
+                    {/* Action commitment button */}
+                    {msg.role === "assistant" && msg.status === "complete" &&
+                      msg.topActionCodes && msg.topActionCodes.length > 0 && (
+                      <TouchableOpacity
+                        onPress={() => sendActionTaken(msg)}
+                        disabled={msg.actionTaken}
+                        style={{
+                          marginTop: 8,
+                          paddingHorizontal: 16,
+                          paddingVertical: 8,
+                          borderRadius: 20,
+                          backgroundColor: msg.actionTaken ? "#1A2A1A" : "#1A3A1A",
+                          alignSelf: "flex-start",
+                        }}
+                      >
+                        <Text style={{ color: msg.actionTaken ? C.muted : "#4ADE80", fontSize: 14, fontWeight: "600" }}>
+                          {msg.actionTaken ? "✔ You committed — start now" : "⚡ I'll do this"}
+                        </Text>
+                      </TouchableOpacity>
                     )}
                   </View>
                 ))}
