@@ -15,6 +15,8 @@ from litellm import completion
 from dotenv import load_dotenv
 
 from intervention_engine import get_intervention
+from context_patterns import detect_context_pattern
+from lever_mapping import CONTEXT_LEVERS, LEVER_ACTIONS, DEFAULT_LEVERS
 from typing import Optional
 
 load_dotenv()
@@ -386,6 +388,39 @@ STATE_MAP = {
     "hypotension": ("bp", "intervention"),
     "high ldl": ("cholesterol", "intervention"),
     "low hdl": ("cholesterol", "intervention"),
+}
+
+ACTION_REGISTRY = {
+    "walk_10min_now": {
+        "display": "Take a 10-minute walk now",
+        "keywords": ["walk", "10", "minute"],
+        "priority": 1,
+    },
+    "avoid_simple_carbs_now": {
+        "display": "Avoid simple carbs right now",
+        "keywords": ["avoid", "carbs"],
+        "priority": 1,
+    },
+    "add_protein_next_meal": {
+        "display": "Add protein to your next meal",
+        "keywords": ["protein", "meal"],
+        "priority": 2,
+    },
+    "eat_earlier_today": {
+        "display": "Eat earlier today",
+        "keywords": ["eat", "earlier"],
+        "priority": 2,
+    },
+    "do_breathing_5min": {
+        "display": "Do 5 minutes of deep breathing",
+        "keywords": ["breathing", "minutes"],
+        "priority": 1,
+    },
+    "check_glucose_again": {
+        "display": "Check your glucose again",
+        "keywords": ["check", "glucose"],
+        "priority": 1,
+    },
 }
 
 
@@ -977,44 +1012,32 @@ def unclear_query_response() -> dict:
 # ---------------- MOCK ----------------
 def mock_response(intent: str) -> str:
     if intent == DOMAINS["GLUCOSE"]:
-        return """## Likely Cause
-Glucose spike likely due to high carbs without fiber.
+        return """## Insight
+Glucose spike likely due to high carbs without fiber or a post-meal activity gap.
 
-## What To Do
-Walk for 10–15 minutes and hydrate.
-
-## Next Step
-Lead meals with fiber, then protein, then carbs."""
+## Expected Outcome
+Steady glucose within 1–2 hours with movement and fiber-led meals."""
 
     if intent == DOMAINS["BP"]:
-        return """## Likely Cause
-Elevated blood pressure may be driven by sodium or low activity.
+        return """## Insight
+Elevated blood pressure is often driven by sodium intake, stress, or low activity.
 
-## What To Do
-Take a short walk and reduce salt intake.
-
-## Next Step
-Increase potassium-rich foods and hydration."""
+## Expected Outcome
+Readings improve with consistent movement, lower salt, and stress reduction."""
 
     if intent == DOMAINS["CHOLESTEROL"]:
-        return """## Likely Cause
-Cholesterol imbalance may be linked to low soluble fiber.
+        return """## Insight
+Cholesterol imbalance is commonly linked to low soluble fiber and saturated fat intake.
 
-## What To Do
-Add oats, vegetables, and healthy fats.
-
-## Next Step
-Maintain consistent fiber intake daily."""
+## Expected Outcome
+LDL levels improve with consistent fiber, healthy fats, and regular activity."""
 
     if intent == DOMAINS["LIFESTYLE"]:
-        return """## Likely Cause
-Lifestyle habits may not be aligned with optimal health.
+        return """## Insight
+Lifestyle habits may not be aligned with your current health goals.
 
-## What To Do
-Focus on balanced meals, movement, and recovery.
-
-## Next Step
-Improve one habit today: meal, walk, or sleep."""
+## Expected Outcome
+One consistent habit change — meals, movement, or sleep — creates measurable progress."""
 
     return """## Insight
 I can help with lifestyle, glucose, BP, and cholesterol.
@@ -1024,15 +1047,11 @@ Try asking about food, exercise, or health markers."""
 
 
 # ---------------- PROMPT ----------------
-def build_prompt(q: str, ctx: dict, interventions: list = None) -> str:
+def build_prompt(q: str, ctx: dict) -> str:
     t0 = trace_start("build_prompt")
     try:
-        intervention_block = ""
-        if interventions:
-            lines = "\n".join(f"- {i.replace('_', ' ')}" for i in interventions)
-            intervention_block = f"\nRequired interventions — follow exactly, in order, do not add or skip any:\n{lines}\n"
         result = f"""
-You are a lifestyle health assistant.
+You are a lifestyle health assistant. Your ONLY job is to explain the situation — actions are handled separately by the system and will be shown to the user automatically.
 
 User Profile:
 - Age: {USER_PROFILE['age']}
@@ -1048,24 +1067,19 @@ Context:
 - After meal: {ctx["after_meal"]}
 - High: {ctx["high"]}
 - Low: {ctx["low"]}
-{intervention_block}
+
 Instructions:
-- Be practical and easy to follow
+- Explain the situation and expected outcome ONLY
+- DO NOT list actions, bullets, or tell the user what to do — that is shown separately
+- DO NOT use "Do this now", "What To Do", or any action bullets
 - Use simple everyday language
-- Do NOT assume user condition unless explicitly stated in the query
+- Do NOT assume user condition unless explicitly stated
 - Avoid clinical numbers (no grams, mg, frequencies)
 - Keep response readable in under 5 seconds
-- Max 3 bullets in What To Do
-- No numbered lists (use • only)
-- No long explanations
-- No Meal Score section
-- No Try This Week section
-- Use short directive phrases (not full sentences)
+- No Meal Score section, No Try This Week section
 - Avoid filler words (consider, try to, aim to)
-- Avoid repeating ideas across sections
 - Start Insight with direct cause (no explanation)
 - Do NOT use words like: important, helpful, beneficial
-- Do NOT mention conditions unless user explicitly states them
 - Keep Insight under 10 words if possible
 
 Respond ONLY in this exact format:
@@ -1073,19 +1087,13 @@ Respond ONLY in this exact format:
 ## Insight
 1–2 short lines summarizing the key issue or context.
 
-## What To Do
-• First action (specific, short)
-• Second action (specific, short)
-• Third action (specific, short, optional)
-
 ## Expected Outcome
 One short line on what improves.
 
 Rules:
-- No Meal Score section
-- No Try This Week section
-- No numbered bullets (use • only)
-- Max 3 bullets in What To Do
+- No What To Do section
+- No bullet points for actions
+- No numbered lists
 - No long paragraphs
 """
         return result
@@ -1094,20 +1102,16 @@ Rules:
 
 
 # ---------------- LITE PROMPT ----------------
-def build_lite_prompt(q: str, interventions: list = None) -> str:
+def build_lite_prompt(q: str) -> str:
     t0 = trace_start("build_lite_prompt")
     try:
-        intervention_block = ""
-        if interventions:
-            actions = ", ".join(i.replace("_", " ") for i in interventions)
-            intervention_block = f"\nYou MUST follow these actions exactly and in this order. Do not add new actions. Do not skip any: {actions}.\n"
         result = f"""
-You are a calm, practical health coach.
-{intervention_block}
+You are a calm, practical health coach. Your ONLY job is to explain the situation in plain language — actions are shown separately to the user by the system.
+
 User asked:
 "{q}"
 
-Respond in EXACTLY 3 short sentences.
+Respond in EXACTLY 2–3 short sentences explaining the situation.
 
 Rules:
 - No headings
@@ -1183,6 +1187,28 @@ def call_llm(prompt: str) -> str:
     return extract_text(res)
 
 
+# ---------------- LITE ENFORCEMENT ----------------
+def strip_actions_from_text(text: str) -> str:
+    """Remove bullet lines, numbered action lists, and 'Do this now' blocks."""
+    # Remove "Do this now:" and everything after it
+    text = re.sub(r'Do this now:.*', '', text, flags=re.IGNORECASE | re.DOTALL)
+    # Remove bullet lines (•, -, *) at start of any line
+    text = re.sub(r'^\s*[-•*]\s+', '', text, flags=re.MULTILINE)
+    # Remove bullet lines (•, -, *) after a newline (belt-and-suspenders)
+    text = re.sub(r'(?:^|\n)\s*[-•*]\s+[^\n]*', '', text, flags=re.MULTILINE)
+    # Remove numbered list lines (1. 2. 3.)
+    text = re.sub(r'(?:^|\n)\s*\d+\.\s+[^\n]*', '', text, flags=re.MULTILINE)
+    # Collapse excess blank lines
+    text = re.sub(r'\n{2,}', '\n', text)
+    return text.strip()
+
+
+def limit_sentences(text: str, max_sentences: int = 3) -> str:
+    """Cap text to max_sentences by splitting on sentence-ending punctuation."""
+    sentences = re.split(r'(?<=[.!?]) +', text.strip())
+    return ' '.join(sentences[:max_sentences]).strip()
+
+
 # ---------------- LITE VALIDATOR ----------------
 def validate_lite_response(text: str) -> tuple:
     t0 = trace_start("validate_lite_response")
@@ -1195,8 +1221,8 @@ def validate_lite_response(text: str) -> tuple:
         if len(sentences) < 1 or len(sentences) > 4:
             return False, "sentence_count"
 
-        # Rule 2: No structured formatting
-        forbidden = ["##", "* ", "\n- ", "\n1)", "\n2)", "\n3)"]
+        # Rule 2: No structured formatting or action content
+        forbidden = ["##", "* ", "\n- ", "\n1)", "\n2)", "\n3)", "• ", "Do this now"]
         if any(f in text for f in forbidden):
             return False, "format"
 
@@ -1215,7 +1241,7 @@ def validate_lite_response(text: str) -> tuple:
 
 
 # ---------------- LLM ----------------
-def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> str:
+def llm_response(q: str, ctx: dict, lite: bool) -> str:
     t0_func = trace_start("llm_response")
     try:
         if TRACE_LEVEL >= 1:
@@ -1226,7 +1252,7 @@ def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> s
                 print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", q)
 
         if lite:
-            prompt = build_lite_prompt(q, interventions)
+            prompt = build_lite_prompt(q)
 
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
@@ -1236,6 +1262,10 @@ def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> s
                 print(
                     f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm {(time.time()-t0)*1000:.0f}ms"
                 )
+
+            # Deterministic enforcement — strip actions regardless of LLM output
+            text = strip_actions_from_text(text)
+            text = limit_sentences(text, max_sentences=3)
 
             is_valid, reason = validate_lite_response(text)
 
@@ -1247,7 +1277,7 @@ def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> s
 
             retry_prompt = (
                 prompt
-                + "\n\nRewrite the answer simpler, shorter, and more conversational."
+                + "\n\nRewrite the answer simpler, shorter, and more conversational. No bullets or lists."
             )
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm retry")
@@ -1258,6 +1288,10 @@ def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> s
                     f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm retry {(time.time()-t0)*1000:.0f}ms"
                 )
 
+            # Enforce on retry too
+            text_retry = strip_actions_from_text(text_retry)
+            text_retry = limit_sentences(text_retry, max_sentences=3)
+
             is_valid_retry, _ = validate_lite_response(text_retry)
 
             if is_valid_retry:
@@ -1266,7 +1300,7 @@ def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> s
             return text
 
         else:
-            prompt = build_prompt(q, ctx, interventions)
+            prompt = build_prompt(q, ctx)
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
             t0 = time.time()
@@ -1284,20 +1318,14 @@ def llm_response(q: str, ctx: dict, lite: bool, interventions: list = None) -> s
 def enforce_format(text: str) -> str:
     t0 = trace_start("enforce_format")
     try:
-        if all(
-            x in text for x in ["## Insight", "## What To Do", "## Expected Outcome"]
-        ):
+        if "## Insight" in text and "## Expected Outcome" in text:
             return text
 
         return f"""## Insight
 {text}
 
-## What To Do
-• Ask your question more clearly
-• Include food, symptom, or goal
-
 ## Expected Outcome
-More accurate and useful guidance
+Try rephrasing your question for more specific guidance.
 """
     finally:
         trace_end("enforce_format", t0)
@@ -1353,6 +1381,236 @@ Better control and reduced need for medication over time""",
     }
 
 
+# ---------------- STRUCTURED RESPONSE ----------------
+
+# Maps each intervention action ID to its lever category
+_ACTION_LEVER = {
+    "walk_10min_now": "movement",
+    "take_a_10min_walk": "movement",
+    "take_a_brisk_walk": "movement",
+    "walk_after_meals": "movement",
+    "walk_30min_daily": "movement",
+    "consistent_activity": "movement",
+    "consistent_light_activity": "movement",
+    "light_resistance_training": "movement",
+    "avoid_heavy_lifting": "movement",
+    "light_movement": "movement",
+    "regular_exercise": "movement",
+    "drink_water_now": "recovery",
+    "slow_deep_breathing": "recovery",
+    "sit_and_rest_now": "recovery",
+    "sit_quietly_5min": "recovery",
+    "avoid_stimulants": "recovery",
+    "stress_management": "recovery",
+    "manage_stress": "recovery",
+    "fiber_first": "food",
+    "next_meal_add_protein_and_fiber": "food",
+    "avoid_simple_carbs_now": "food",
+    "reduce_refined_carbs": "food",
+    "reduce_sodium_now": "food",
+    "reduce_sodium": "food",
+    "reduce_salt_today": "food",
+    "potassium_rich_foods": "food",
+    "avoid_processed_food": "food",
+    "avoid_saturated_fat_today": "food",
+    "add_soluble_fiber_to_meal": "food",
+    "soluble_fiber_daily": "food",
+    "limit_saturated_fat": "food",
+    "oats_daily": "food",
+    "healthy_fats": "food",
+    "increase_vegetables": "food",
+    "low_gi_foods": "food",
+    "balanced_plate": "food",
+    "balanced_diet": "food",
+    "fiber_protein_meal": "food",
+    "reduce_simple_carbs": "food",
+    "whole_foods": "food",
+    "portion_control": "food",
+    "next_meal_add_protein_and_fiber": "food",
+    "avoid_heavy_food_now": "food",
+    "check_your_last_meal": "monitoring",
+    "check_bp_in_30min": "monitoring",
+    "check_bp_again_in_30min": "monitoring",
+    "track_bg_pattern": "monitoring",
+    "track_bp_daily": "monitoring",
+    "track_cgm_patterns": "monitoring",
+    "correlate_with_meals": "monitoring",
+    "share_with_doctor": "monitoring",
+    "track_lipids": "monitoring",
+    "track_response": "monitoring",
+    "pre_post_compare": "monitoring",
+    "understand_glucose_spikes": "education",
+    "learn_glycemic_index": "education",
+    "understand_bp_range": "education",
+    "identify_triggers": "education",
+    "understand_ldl_hdl": "education",
+    "lifestyle_vs_medication": "education",
+    "understand_condition": "education",
+    "track_metrics": "education",
+    "lifestyle_focus": "education",
+    "consult_doctor": "education",
+    "lifestyle_alongside_medication": "education",
+    "light_activity": "movement",
+    "light_stretching": "movement",
+    "consistent_movement": "movement",
+    "regular_activity": "movement",
+    # lever_mapping.py action IDs
+    "eat_earlier_dinner": "timing",
+    "allow_meal_gap": "timing",
+    "delay_next_meal": "timing",
+    "check_again_in_30min": "monitoring",
+    "check_glucose_again": "monitoring",
+    "pre_post_meal_compare": "monitoring",
+    "add_vinegar_to_meal": "enhancers",
+    "add_cinnamon_to_diet": "enhancers",
+    "add_garlic_daily": "enhancers",
+    "add_protein_next_meal": "food",
+    "do_breathing_5min": "recovery",
+    # fiber lever action IDs
+    "add_fiber_before_meal": "fiber",
+    "fiber_first": "fiber",
+    "eat_vegetables_first": "fiber",
+    # protein lever action IDs
+    "eat_protein_first": "protein",
+    "choose_high_protein": "protein",
+    # lever_mapping.py movement extras
+    "sit_and_rest_now": "recovery",
+    "track_bg_pattern": "monitoring",
+}
+
+
+def build_structured_response(intent: dict, ctx: dict) -> dict:
+    """Deterministic: intent + ctx → top 3 actions (each from a different lever)."""
+    domain = intent.get("domain", "lifestyle")
+    need = intent.get("need", "education")
+    lever = intent.get("lever", "food")
+    sub_lever = intent.get("sub_lever")
+    context_name = intent.get("context_name")
+
+    # ── Context-driven path ────────────────────────────────────────────────
+    ordered_levers = (
+        CONTEXT_LEVERS[context_name]
+        if context_name and context_name in CONTEXT_LEVERS
+        else DEFAULT_LEVERS
+    )
+    top_actions: list = []
+    levers_used: list = []
+    for lv in ordered_levers:
+        if lv in LEVER_ACTIONS and lv not in levers_used:
+            levers_used.append(lv)
+            top_actions.append(LEVER_ACTIONS[lv][0])
+        if len(top_actions) == 3:
+            break
+
+    # ── Supplement from intervention engine if context gave fewer than 3 ──
+    if len(top_actions) < 3:
+        interventions = intent.get("interventions", [])
+        seen_set = set(levers_used)
+        for action in interventions:
+            action_lever = _ACTION_LEVER.get(action, lever)
+            if action_lever == "education":
+                continue
+            if action_lever not in seen_set and action not in top_actions:
+                seen_set.add(action_lever)
+                levers_used.append(action_lever)
+                top_actions.append(action)
+            if len(top_actions) == 3:
+                break
+
+    return {
+        "domain": domain,
+        "need": need,
+        "lever": lever,
+        "sub_lever": sub_lever,
+        "context_name": context_name,
+        "top_actions": top_actions,
+        "levers": levers_used,
+        "context": ctx,
+    }
+
+
+def format_chat_response(structured: dict, llm_text: str) -> str:
+    """LLM output is the chat response; structured actions are the source of truth."""
+    return llm_text
+
+
+def _action_label(action_id: str) -> str:
+    """Human-readable label for an action ID, using ACTION_REGISTRY when available."""
+    meta = ACTION_REGISTRY.get(action_id)
+    if meta:
+        return meta["display"]
+    return action_id.replace("_", " ").title()
+
+
+def format_screen_response(structured: dict) -> dict:
+    """JSON payload for screen UI rendering."""
+    domain = structured["domain"]
+    titles = {
+        "glucose": "Glucose Control",
+        "bp": "Blood Pressure",
+        "cholesterol": "Cholesterol",
+        "lifestyle": "Lifestyle",
+    }
+    top_actions = structured["top_actions"]
+    return {
+        "title": titles.get(domain, "Health"),
+        "domain": domain,
+        "need": structured["need"],
+        "lever": structured["lever"],
+        "sub_lever": structured["sub_lever"],
+        "top_actions": top_actions,
+        "top_action_labels": [_action_label(a) for a in top_actions],
+        "levers": structured["levers"],
+        "context": {
+            "after_meal": structured["context"].get("after_meal", False),
+            "high": structured["context"].get("high", False),
+            "low": structured["context"].get("low", False),
+            "unstable": structured["context"].get("unstable", False),
+        },
+    }
+
+
+def normalize_action(a: str) -> str:
+    return a.lower().replace("_", " ")
+
+
+def enforce_actions_in_text(text: str, actions: list[str]) -> str:
+    text_lower = text.lower()
+    missing = []
+
+    for action_id in actions:
+        meta = ACTION_REGISTRY.get(action_id, {})
+        keywords = meta.get("keywords", [])
+
+        if not any(k in text_lower for k in keywords):
+            missing.append(action_id)
+
+    if not missing:
+        return text
+
+    forced_block = "\n\nDo this now:\n"
+
+    for action_id in missing:
+        meta = ACTION_REGISTRY.get(action_id)
+        display = meta["display"] if meta else action_id.replace("_", " ")
+        forced_block += f"- {display}\n"
+
+    return text + forced_block
+
+
+def _enriched_response(text: str, score: int, intent: dict, ctx: dict) -> dict:
+    """Attach structured + chat + screen to every response dict."""
+    structured = build_structured_response(intent, ctx)
+    return {
+        "text": text,
+        "chat": format_chat_response(structured, text),
+        "screen": format_screen_response(structured),
+        "structured": structured,
+        "score": score,
+        "intent": intent,
+    }
+
+
 # ---------------- BUILD RESPONSE ----------------
 async def build_response(query: str, lite: bool):
     t0_func = trace_start("build_response")
@@ -1397,6 +1655,12 @@ async def build_response(query: str, lite: bool):
         tokens = set(q_norm.split())
         ctx = detect_context(q)
 
+        # PRIMARY context source — locked here, never overwritten downstream
+        ctx_pattern = detect_context_pattern(q)
+        context_name = ctx_pattern.get("context")  # None if no pattern matched
+        if TRACE_LEVEL >= 1 and ctx_pattern:
+            print(f"[{now_iso()}][{trace_id_var.get()}] CTX_PATTERN:", ctx_pattern)
+
         # ✅ STATE DETECTION
         state_hit = None
         for key in STATE_MAP:
@@ -1431,6 +1695,14 @@ async def build_response(query: str, lite: bool):
             # boost for identified health domain — short queries like "sugar crash" are valid
             if domain in HEALTH_DOMAINS:
                 confidence = max(confidence, 0.8)
+
+        # ✅ Domain override — only when classifier fell back to lifestyle
+        if ctx_pattern.get("domain") and domain == DOMAINS["LIFESTYLE"]:
+            domain = ctx_pattern["domain"]
+            intent["domain"] = domain
+
+        # Lock context_name — single assignment, never modified after this point
+        intent["context_name"] = context_name
 
         # ✅ FALLBACK SAFETY
         if not domain or not need:
@@ -1475,13 +1747,26 @@ async def build_response(query: str, lite: bool):
         else:
             context_label = "general"
 
-        if TRACE_LEVEL >= 1:
+        # Trace mismatch: pattern context vs keyword classifier (classify is secondary)
+        if context_name and context_name != context_label and TRACE_LEVEL >= 1:
             print(
-                f"[{now_iso()}][{trace_id_var.get()}] CLASSIFY: domain={domain} need={need} context={context_label}"
+                f"[{now_iso()}][{trace_id_var.get()}] CONTEXT_MISMATCH: detected={context_name!r} classify={context_label!r}"
             )
 
-        # interventions
-        interventions = get_intervention(domain, need, ctx)
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] CLASSIFY: domain={domain} need={need} context={context_name or context_label}"
+            )
+
+        # Deterministic interventions — pattern context wins over legacy engine
+        if context_name and context_name in CONTEXT_LEVERS:
+            interventions = [
+                LEVER_ACTIONS[lv][0]
+                for lv in CONTEXT_LEVERS[context_name]
+                if lv in LEVER_ACTIONS
+            ][:3]
+        else:
+            interventions = get_intervention(domain, need, ctx)
         intent["interventions"] = interventions
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] INTERVENTIONS:", interventions)
@@ -1508,7 +1793,7 @@ async def build_response(query: str, lite: bool):
 
         # SCROLL TEST
         if SCROLL_TEST:
-            return {"text": scroll_test_response(), "score": score, "intent": intent}
+            return _enriched_response(scroll_test_response(), score, intent, ctx)
 
         # MOCK
         if USE_MOCK:
@@ -1516,29 +1801,30 @@ async def build_response(query: str, lite: bool):
             mock_key = (
                 condition_key if condition_key in _health else DOMAINS["LIFESTYLE"]
             )
-            return {"text": mock_response(mock_key), "score": score, "intent": intent}
+            return _enriched_response(mock_response(mock_key), score, intent, ctx)
 
         # LLM
         if USE_LLM:
             use_lite = intent.get("tool") == "llm_lite"
 
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] LLM_MODE: {'lite' if use_lite else 'full'}"
+                    f" context_name={context_name!r} interventions={interventions}"
+                )
+
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(llm_response, q, ctx, use_lite, interventions),
+                    asyncio.to_thread(llm_response, q, ctx, use_lite),
                     timeout=15,
                 )
-                return {
-                    "text": result if use_lite else enforce_format(result),
-                    "score": score,
-                    "intent": intent,
-                }
+                text = result if use_lite else enforce_format(result)
+                return _enriched_response(text, score, intent, ctx)
 
             except asyncio.TimeoutError:
-                return {
-                    "text": "LLM timed out. Try again.",
-                    "score": score,
-                    "intent": intent,
-                }
+                return _enriched_response(
+                    "LLM timed out. Try again.", score, intent, ctx
+                )
 
             except Exception as e:
                 mock_key = (
@@ -1547,23 +1833,21 @@ async def build_response(query: str, lite: bool):
                     in (DOMAINS["GLUCOSE"], DOMAINS["BP"], DOMAINS["CHOLESTEROL"])
                     else DOMAINS["LIFESTYLE"]
                 )
-                return {
-                    "text": mock_response(mock_key),
-                    "score": score,
-                    "intent": intent,
-                    "error": str(e),
-                }
+                resp = _enriched_response(mock_response(mock_key), score, intent, ctx)
+                resp["error"] = str(e)
+                return resp
 
         # fallback
-        return {
-            "text": """## Insight
-Fallback response active.
+        return _enriched_response(
+            """## Insight
+Ask about glucose, blood pressure, cholesterol, or lifestyle habits.
 
-## Next Step
-Try asking about lifestyle, BP, glucose, or cholesterol.""",
-            "score": score,
-            "intent": intent,
-        }
+## Expected Outcome
+You'll receive a clear explanation and specific actions to take.""",
+            score,
+            intent,
+            ctx,
+        )
 
     finally:
         trace_end("build_response", t0_func)
@@ -2028,17 +2312,22 @@ async def handle_query(request: Request):
         return _inject_trace(
             {
                 "status": "success",
-                "message": text,
+                # ✅ SINGLE SOURCE OF TRUTH
+                "text": text,
+                "chat": result.get("chat", text),
+                # ❌ REMOVE "message" (or keep temporarily for backward compatibility)
+                # "message": text,
                 "cleaned_query": None,
                 "tts_text": None,
                 "audio": None,
                 "score": score,
-                # 🔥 ADD THESE (top-level exposure)
                 "domain": intent.get("domain"),
                 "need": intent.get("need"),
                 "lever": intent.get("lever"),
                 "sub_lever": intent.get("sub_lever"),
-                # keep original (optional but recommended)
                 "intent": intent,
+                # unified pipeline outputs
+                "screen": result.get("screen", {}),
+                "structured": result.get("structured", {}),
             }
         )
