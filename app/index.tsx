@@ -57,6 +57,7 @@ type Message = {
   rawText?: string;
   errorMessage?: string;
   nextActions?: string[];
+  topActions?: string[];
 };
 
 // Valid state transitions per spec §4.2
@@ -361,10 +362,23 @@ export default function HomeScreen() {
           ? data.cleaned_query
           : "Voice input";
 
+      console.log("FULL RESPONSE:", JSON.stringify(data));
+      console.log("CHAT:", data.chat);
+      console.log("TEXT:", data.text);
+      console.log("MESSAGE:", data.message);
+
       const text =
-        typeof data.message === "string" && data.message.trim()
-          ? data.message
-          : "No response received.";
+        (typeof data.chat === "string" && data.chat.trim())
+          ? data.chat
+          : (typeof data.text === "string" && data.text.trim())
+            ? data.text
+            : (typeof data.message === "string" && data.message.trim())
+              ? data.message
+              : "No response received.";
+
+      if (!text || text.trim() === "") {
+        console.warn("Empty response", data);
+      }
 
       if (data.status === "error") {
         setMessages((prev) =>
@@ -381,6 +395,12 @@ export default function HomeScreen() {
       }
 
       const sections = parseSections(text);
+      const topActions: string[] =
+        data.screen?.top_action_labels ||
+        data.structured?.top_action_labels ||
+        data.screen?.top_actions ||
+        data.structured?.top_actions ||
+        [];
 
       setMessages((prev) =>
         prev.map((m) => {
@@ -389,8 +409,9 @@ export default function HomeScreen() {
             ...m,
             status: "complete",
             text,
-            sections: liteMode ? undefined : sections ?? undefined,
-            rawText: liteMode ? text : (sections ? undefined : text),
+            sections: liteMode === true ? undefined : sections ?? undefined,
+            rawText: liteMode === true ? text : (sections ? undefined : text),
+            topActions,
           };
           return m;
         })
@@ -546,12 +567,31 @@ export default function HomeScreen() {
           ? data.cleaned_query
           : query;
 
+      console.log("FULL RESPONSE:", JSON.stringify(data));
+      console.log("CHAT:", data.chat);
+      console.log("TEXT:", data.text);
+      console.log("MESSAGE:", data.message);
+
       const text =
-        typeof data.message === "string" && data.message.trim().length > 0
-          ? data.message
-          : "No response received.";
+        (typeof data.chat === "string" && data.chat.trim().length > 0)
+          ? data.chat
+          : (typeof data.text === "string" && data.text.trim().length > 0)
+            ? data.text
+            : (typeof data.message === "string" && data.message.trim().length > 0)
+              ? data.message
+              : "No response received.";
+
+      if (!text || text.trim() === "") {
+        console.warn("Empty response", data);
+      }
 
       const sections = parseSections(text);
+      const topActions: string[] =
+        data.screen?.top_action_labels ||
+        data.structured?.top_action_labels ||
+        data.screen?.top_actions ||
+        data.structured?.top_actions ||
+        [];
 
       logTrace(traceId, "UI_UPDATE_START");
 
@@ -564,6 +604,7 @@ export default function HomeScreen() {
               text,
               sections: liteMode ? undefined : sections ?? undefined,
               rawText: liteMode ? text : (sections ? undefined : text),
+              topActions,
             }
             : m
         )
@@ -950,6 +991,13 @@ export default function HomeScreen() {
   }, [checkingUser]);
 
   const handleNextAction = (value: string) => {
+    // Cancel any in-flight request before switching modes
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      discardResponseRef.current = true;
+    }
+
     if (value === "Try Lite") {
       setLiteMode(true);
       setMessages([]);
@@ -1110,8 +1158,12 @@ export default function HomeScreen() {
                       </Text>
                     )}
 
-                    {/* Assistant sections (structured response) */}
-                    {msg.role === "assistant" && msg.status === "complete" &&
+                    {/* Safety assertion — both should never coexist */}
+                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText && msg.sections &&
+                      (() => { console.error("INVALID STATE: both rawText and sections present", { id: msg.id }); return null; })()}
+
+                    {/* Assistant sections (full mode only — never renders when rawText is set) */}
+                    {msg.role === "assistant" && msg.status === "complete" && !msg.rawText &&
                       msg.sections?.map((s, i) => (
                         <View key={i} style={{ padding: 10 }}>
                           <Text style={{ color: "white" }}>{s.title}</Text>
@@ -1122,7 +1174,8 @@ export default function HomeScreen() {
                       ))}
 
                     {/* Assistant raw text (lite mode) */}
-                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText && (
+                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText &&
+                      (() => { console.log("RAW:", msg.rawText); console.log("SECTIONS:", msg.sections); return true; })() && (
                       <View
                         style={{
                           backgroundColor: C.surfaceAlt,
@@ -1133,6 +1186,26 @@ export default function HomeScreen() {
                       >
                         <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
                           {msg.rawText}
+                        </Text>
+                      </View>
+                    )}
+
+                    {/* Actions block — deterministic from backend, never from LLM */}
+                    {msg.role === "assistant" && msg.status === "complete" &&
+                      msg.topActions && msg.topActions.length > 0 && (
+                      <View
+                        style={{
+                          backgroundColor: C.surface,
+                          borderRadius: 14,
+                          padding: 12,
+                          marginTop: 8,
+                        }}
+                      >
+                        <Text style={{ color: C.muted, fontSize: 13, marginBottom: 6, fontWeight: "600" }}>
+                          Do this now:
+                        </Text>
+                        <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
+                          {msg.topActions.join("\n")}
                         </Text>
                       </View>
                     )}
