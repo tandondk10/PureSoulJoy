@@ -1,0 +1,224 @@
+﻿#,Name,Category,Weight,Calories (kcal),Carbs (g),Total Fiber (g),Soluble Fiber (g),Total Fat (g),Saturated Fat (g),Protein (g)
+1,Beets,Vegetables,100g,43,9.6,2.8,0.8,0.2,0,1.6
+2,Jicama,Vegetables,100g,38,8.8,4.9,1.4,0.1,0,0.7
+3,Broccoli,Vegetables,100g,34,6.6,2.6,1,0.4,0,2.8
+4,Spinach,Vegetables,100g,23,3.6,2.2,0.5,0.4,0.1,2.9
+5,Kale,Vegetables,100g,49,8.8,3.6,0.5,0.9,0.1,4.3
+6,Carrots,Vegetables,100g,41,9.6,2.8,1.1,0.2,0,0.9
+7,Purple Carrots,Vegetables,100g,41,9.6,2.8,1.1,0.2,0,0.9
+8,Turnips,Vegetables,100g,28,6.4,1.8,0.6,0.1,0,0.9
+9,Sweet Potato,Vegetables,100g,86,20.1,3,0.5,0.1,0,1.6
+10,Brussels Sprouts,Vegetables,100g,43,8.9,3.8,1,0.3,0.1,3.4
+11,Cauliflower,Vegetables,100g,25,5,2,0.5,0.3,0,1.9
+12,Cabbage,Vegetables,100g,25,5.8,2.5,0.6,0.1,0,1.3
+13,Celery,Vegetables,100g,16,3,1.6,0.7,0.2,0,0.7
+14,Cucumber,Vegetables,100g,16,3.6,0.5,0.2,0.1,0,0.7
+15,Radish,Vegetables,100g,16,3.4,1.6,0.5,0.1,0,0.7
+16,Daikon,Vegetables,100g,18,4.1,1.6,0.5,0.1,0,0.6
+17,Zucchini,Vegetables,100g,17,3.1,1,0.4,0.3,0.1,1.2
+18,Asparagus,Vegetables,100g,20,3.9,2.1,0.7,0.1,0,2.2
+19,Bell Peppers,Vegetables,100g,31,6,2.1,0.5,0.3,0,1
+20,Mushrooms,Vegetables,100g,22,3.3,1,0.1,0.3,0,3.1
+21,Onion,Vegetables,100g,40,9.3,1.7,1.1,0.1,0,1.1
+22,Garlic,Vegetables,100g,149,33.1,2.1,0.8,0.5,0.1,6.4
+23,Ginger,Vegetables,100g,80,17.8,2,0.6,0.8,0.2,1.8
+24,Bitter Melon,Vegetables,100g,17,3.7,2.8,1,0.2,0,1
+25,Drumstick (Moringa),Vegetables,100g,37,8.5,3.2,1.1,0.2,0,2.1
+26,Bottle Gourd,Vegetables,100g,14,3.4,0.5,0.2,0,0,0.6
+27,Okra,Vegetables,100g,33,7.5,3.2,1.9,0.2,0,1.9
+28,Green Beans,Vegetables,100g,31,7,2.7,0.7,0.1,0,1.8
+29,Snap Peas,Vegetables,100g,42,7.6,2.6,0.8,0.2,0,2.8
+30,Bok Choy,Vegetables,100g,13,2.2,1,0.4,0.2,0,1.5
+31,Artichoke,Vegetables,100g,47,10.5,5.4,3,0.2,0,3.3
+32,Leeks,Vegetables,100g,61,14.2,1.8,0.6,0.3,0,1.5
+33,Fennel,Vegetables,100g,31,7.3,3.1,0.9,0.2,0,1.2
+34,Tomato,Vegetables,100g,18,3.9,1.2,0.3,0.2,0,0.9
+35,Watercress,Vegetables,100g,11,1.3,0.5,0.2,0.1,0,2.3
+36,Collard Greens,Vegetables,100g,32,5.4,4,0.7,0.6,0.1,3
+37,Mustard Greens,Vegetables,100g,27,4.7,3.2,0.6,0.4,0,2.7
+38,Swiss Chard,Vegetables,100g,19,3.7,1.6,0.5,0.2,0,1.8
+39,Beet Greens,Vegetables,100g,22,4.3,3.7,0.7,0.1,0,2.2
+40,Scallions,Vegetables,100g,32,7.3,2.6,0.9,0.2,0,1.8
+41,Shallots,Vegetables,100g,72,16.8,3.2,1,0.1,0,2.5
+42,Kohlrabi,Vegetables,100g,27,6.2,3.6,0.9,0.1,0,1.7
+43,Corn (fresh sweet),Vegetables,100g,86,18.7,2,0.4,1.4,0.2,3.3
+44,Romaine Lettuce,Greens,100g,17,3.3,2.1,0.6,0.3,0,1.2
+45,Iceberg Lettuce,Greens,100g,14,2.9,1.2,0.4,0.1,0,0.9
+46,Green Leaf Lettuce,Greens,100g,15,2.9,1.3,0.5,0.2,0,1.4
+47,Red Leaf Lettuce,Greens,100g,16,2.3,0.9,0.3,0.3,0,1.3
+48,Butter Lettuce,Greens,100g,13,2.2,1.1,0.5,0.2,0,1.4
+49,Oak Leaf Lettuce,Greens,100g,15,2.8,1.2,0.4,0.2,0,1.3
+50,Little Gem,Greens,100g,14,2.5,1.3,0.5,0.2,0,1.3
+51,Mache,Greens,100g,21,3.6,1.9,0.6,0.4,0.1,2
+52,Frisee,Greens,100g,18,3.6,3,0.8,0.3,0,1.3
+53,Arugula,Greens,100g,25,3.7,1.6,0.5,0.7,0.1,2.6
+54,Cilantro,Herbs,100g,23,3.7,2.8,0.5,0.5,0,2.1
+55,Mint,Herbs,100g,70,14.9,8,2,0.9,0.2,3.8
+56,Parsley,Herbs,100g,36,6.3,3.3,0.7,0.8,0.1,3
+57,Basil,Herbs,100g,23,2.7,1.6,0.5,0.6,0.1,3.2
+58,Dill,Herbs,100g,43,7,2.1,0.6,1.1,0.1,3.5
+59,Fenugreek Leaves (Methi),Herbs,100g,49,6,2.7,0.9,0.9,0.2,4.4
+60,Curry Leaves,Herbs,100g,108,18.7,6.4,1.5,0.6,0.1,6.1
+61,Lemongrass,Herbs,100g,99,25.3,0,0,0.5,0.1,1.8
+62,Chives,Herbs,100g,30,4.4,2.5,0.8,0.7,0.1,3.3
+63,Tarragon,Herbs,100g,295,50.2,7.4,2,7.2,1.9,22.8
+64,Rosemary,Herbs,100g,131,20.7,14.1,2.6,5.9,2.8,3.3
+65,Oregano,Herbs,100g,265,68.9,42.5,5,4.3,1.6,9
+66,Thyme,Herbs,100g,101,24.5,14,3,1.7,0.5,5.6
+67,Apple,Fruits,100g,52,13.8,2.4,1,0.2,0,0.3
+68,Guava,Fruits,100g,68,14.3,5.4,1.7,1,0.3,2.6
+69,Raspberries,Fruits,100g,52,11.9,6.5,1.7,0.7,0,1.2
+70,Mango,Fruits,100g,60,15,1.6,0.5,0.4,0.1,0.8
+71,Avocado,Fruits,100g,160,8.5,6.7,2.1,14.7,2.1,2
+72,Dates,Fruits,100g,277,75,6.7,0.6,0.2,0,1.8
+73,Banana,Fruits,100g,89,22.8,2.6,0.6,0.3,0.1,1.1
+74,Pear,Fruits,100g,57,15.2,3.1,1,0.1,0,0.4
+75,Orange,Fruits,100g,47,11.8,2.4,1.4,0.1,0,0.9
+76,Strawberries,Fruits,100g,32,7.7,2,0.7,0.3,0,0.7
+77,Blueberries,Fruits,100g,57,14.5,2.4,0.5,0.3,0,0.7
+78,Pomegranate,Fruits,100g,83,18.7,4,0.7,1.2,0.1,1.7
+79,Papaya,Fruits,100g,43,10.8,1.8,0.5,0.3,0.1,0.5
+80,Amla (Indian Gooseberry),Fruits,100g,44,10.2,4.3,1.2,0.6,0.1,0.9
+81,Lemon,Fruits,100g,29,9.3,2.8,1,0.3,0,1.1
+82,Lime,Fruits,100g,30,10.5,2.8,1,0.2,0,0.7
+83,Grapefruit,Fruits,100g,42,10.7,1.6,0.9,0.1,0,0.8
+84,Kiwi,Fruits,100g,61,14.7,3,1.1,0.5,0,1.1
+85,Blackberries,Fruits,100g,43,9.6,5.3,1.4,0.5,0,1.4
+86,Cherries,Fruits,100g,50,12.2,1.6,0.4,0.3,0.1,1
+87,Peach,Fruits,100g,39,9.5,1.5,0.5,0.3,0,0.9
+88,Plum,Fruits,100g,46,11.4,1.4,0.7,0.3,0,0.7
+89,Watermelon,Fruits,100g,30,7.6,0.4,0.1,0.2,0,0.6
+90,Cantaloupe,Fruits,100g,34,8.2,0.9,0.2,0.2,0,0.8
+91,Figs,Fruits,100g,74,19.2,2.9,1,0.3,0.1,0.8
+92,Jackfruit,Fruits,100g,95,23.2,1.5,0.7,0.6,0.2,1.7
+93,Dragon Fruit,Fruits,100g,60,13,3,0.8,1.5,0,1.2
+94,Starfruit (Carambola),Fruits,100g,31,6.7,2.8,0.8,0.3,0,1
+95,Acai (frozen/powder),Fruits,100g,70,4,2,0.5,5,1.5,1.5
+96,Passion Fruit,Fruits,100g,97,23.4,10.4,1.8,0.7,0.1,2.2
+97,Concord Grapes,Fruits,100g,62,15.8,1.4,0.4,0.3,0.1,0.7
+98,Kumquats,Fruits,100g,71,15.9,6.5,1.6,0.9,0.1,1.9
+99,Lychee,Fruits,100g,66,16.5,1.3,0.3,0.4,0.1,0.8
+100,Tart Cherries (Montmorency),Fruits,100g,50,12.2,1.6,0.4,0.3,0.1,1
+101,Almonds,Nuts,100g,579,21.6,12.5,0.5,49.9,3.8,21.2
+102,Walnuts,Nuts,100g,654,13.7,6.7,0.5,65.2,6.1,15.2
+103,Pistachios,Nuts,100g,560,27.2,10.6,1,45.3,5.6,20.2
+104,Cashews,Nuts,100g,553,30.2,3.3,0.7,43.9,7.8,18.2
+105,Pecans,Nuts,100g,691,13.9,9.6,0.8,71.9,6.2,9.2
+106,Macadamia,Nuts,100g,718,13.8,8.6,1.1,75.8,12.1,7.9
+107,Pine Nuts,Nuts,100g,673,13.1,3.7,0.8,68.4,4.9,13.7
+108,Brazil Nuts,Nuts,100g,659,12.3,7.5,0.6,67.1,15.1,14.3
+109,Chia Seeds,Seeds,100g,486,42.1,34.4,12,30.7,3.3,16.5
+110,Flax Seeds,Seeds,100g,534,28.9,27.3,9.4,42.2,3.7,18.3
+111,Hemp Seeds,Seeds,100g,553,8.7,4,0.7,48.8,4.6,31.6
+112,Psyllium Husk,Seeds,100g,200,80,71,67,0.6,0.1,2
+113,Pumpkin Seeds,Seeds,100g,559,10.7,6,0.9,49.1,8.7,30.2
+114,Sunflower Seeds,Seeds,100g,584,20,8.6,1,51.5,4.5,20.8
+115,Sesame Seeds,Seeds,100g,573,23.5,11.8,1,49.7,7,17.7
+116,Sabja (Basil Seeds),Seeds,100g,442,63.8,22.6,17,13.8,1.5,14.8
+117,Nigella Seeds (Kalonji),Seeds,100g,345,44.2,10.5,1.5,22.3,2.4,16
+118,Watermelon Seeds,Seeds,100g,557,15.3,0.5,0.1,47.4,6,28.3
+119,Fenugreek Seeds,Seeds,100g,323,58.4,24.6,14.5,6.4,1.5,23
+120,Poppy Seeds,Seeds,100g,525,28.1,19.5,2,41.6,4.5,17.9
+121,Mayocoba Beans (cooked),Beans & Legumes,100g,128,23.6,8.2,2,0.5,0.1,8.2
+122,Black Beans (cooked),Beans & Legumes,100g,132,23.7,8.7,2,0.5,0.1,8.9
+123,Brown Lentils (cooked),Beans & Legumes,100g,116,20.1,7.9,1.4,0.4,0.1,9
+124,Red Lentils (cooked),Beans & Legumes,100g,116,20.1,7.9,1.4,0.4,0.1,9
+125,Chickpeas (cooked),Beans & Legumes,100g,164,27.4,7.6,2,2.6,0.3,8.9
+126,Moong Dal (cooked),Beans & Legumes,100g,105,19.2,7.6,1.7,0.4,0.1,7
+127,Kidney Beans (cooked),Beans & Legumes,100g,127,22.8,7.4,2,0.5,0.1,8.7
+128,Edamame (cooked),Beans & Legumes,100g,121,8.9,5.2,1.7,5.2,0.6,11.9
+129,Black Eyed Peas (cooked),Beans & Legumes,100g,116,20.8,6.5,1.5,0.5,0.1,7.7
+130,Navy Beans (cooked),Beans & Legumes,100g,140,26.1,10.5,2,0.6,0.1,8.2
+131,Pinto Beans (cooked),Beans & Legumes,100g,143,26.2,9,2,0.6,0.1,9
+132,Split Peas (cooked),Beans & Legumes,100g,118,21.1,8.3,1.5,0.4,0.1,8.3
+133,Eggs (whole),Proteins,100g,155,1.1,0,0,10.6,3.1,12.6
+134,Greek Yogurt (plain),Proteins,100g,59,3.6,0,0,0.4,0.1,10
+135,Cottage Cheese (low-fat),Proteins,100g,72,2.7,0,0,1,0.6,12.4
+136,Tofu (firm),Proteins,100g,76,1.9,0.3,0.1,4.8,0.7,8.1
+137,Tempeh,Proteins,100g,193,9.4,0,0,10.8,2.2,20.3
+138,Sardines (canned in water),Proteins,100g,208,0,0,0,11.5,1.5,24.6
+139,Salmon (cooked),Proteins,100g,208,0,0,0,13.4,3.1,20.4
+140,Paneer,Cheeses,100g,265,3.6,0,0,20.8,13,18.3
+141,Ricotta,Cheeses,100g,174,3,0,0,12.9,7.5,11.3
+142,Feta,Cheeses,100g,264,4.1,0,0,21.3,14.9,14.2
+143,Parmesan,Cheeses,100g,431,4.1,0,0,28.6,18.3,38.5
+144,Fresh Mozzarella,Cheeses,100g,253,2.2,0,0,17.1,10.9,17.1
+145,Kimchi,Fermented,100g,15,2.4,1.6,0.5,0.5,0.1,1.1
+146,Sauerkraut,Fermented,100g,19,4.3,2.9,0.9,0.1,0,0.9
+147,Kefir,Fermented,100g,61,4.7,0,0,3.5,2.2,3.4
+148,Miso,Fermented,100g,199,26.5,5.4,1.5,6,1.2,12.1
+149,Kombucha,Fermented,100g,13,3,0,0,0,0,0
+150,Natto,Fermented,100g,211,14.4,5.4,1.5,11,1.6,17.7
+151,Apple Cider Vinegar,Fermented,100g,22,0.9,0,0,0,0,0
+152,Oats (rolled),Grains,100g,389,66.3,10.6,4.2,6.9,1.2,16.9
+153,Quinoa (cooked),Grains,100g,120,21.3,2.8,0.7,1.9,0.2,4.4
+154,Barley (cooked),Grains,100g,123,28.2,6,1.5,0.4,0.1,2.3
+155,Farro (cooked),Grains,100g,170,34,3.5,0.9,1,0.2,6
+156,Millet (cooked),Grains,100g,119,23.7,1.3,0.3,1,0.2,3.5
+157,Sorghum (cooked),Grains,100g,329,72.1,6.3,1.5,3.5,0.5,10.6
+158,Brown Rice (cooked),Grains,100g,111,23,1.8,0.2,0.9,0.2,2.6
+159,Wild Rice (cooked),Grains,100g,101,21.3,1.8,0.3,0.3,0,4
+160,Buckwheat (cooked),Grains,100g,92,19.9,2.7,1,0.6,0.1,3.4
+161,Amaranth (cooked),Grains,100g,102,18.7,2.1,0.6,1.6,0.4,3.8
+162,Teff (cooked),Grains,100g,101,19.9,2.8,0.6,0.7,0.1,3.9
+163,Freekeh (cooked),Grains,100g,130,25,6,1.5,0.9,0.2,5
+164,Rye Berries (cooked),Grains,100g,338,75.9,15.1,4,1.6,0.2,10.3
+165,Spelt (cooked),Grains,100g,127,26.5,3,0.8,0.9,0.2,5.3
+166,Einkorn (cooked),Grains,100g,340,63,10,2.5,2,0.4,15
+167,Black Rice (cooked),Grains,100g,156,33.6,1.3,0.3,1.7,0.4,4.9
+168,Red Rice (cooked),Grains,100g,111,23.5,2,0.5,0.9,0.2,2.7
+169,Hummus,Prepared,100g,166,14.3,6,1.5,9.6,1.4,7.9
+170,Tahini,Prepared,100g,595,21.2,9.3,1.5,53.8,7.5,17
+171,Nutritional Yeast,Prepared,100g,325,40.6,25,5,5,0.7,50
+172,Peanut Butter (natural),Prepared,100g,588,21.6,6,1.5,50.4,10.7,22.5
+173,Extra Virgin Olive Oil,Oils,100g,884,0,0,0,100,13.8,0
+174,Avocado Oil,Oils,100g,884,0,0,0,100,11.6,0
+185,2% Milk,Dairy,100g,50,4.8,0,0,2,1.2,3.3
+219,Black Coffee (brewed),Functional Beverages,100g,2,0,0,0,0,0,0.3
+221,Bone Broth,Functional Beverages,100g,15,0.5,0,0,0.5,0.2,2.7
+189,Butter,Dairy,100g,717,0.1,0,0,81.1,51.4,0.9
+213,Canned Pumpkin (plain),Frozen & Canned,100g,34,8.1,2.9,1,0.1,0,1.1
+212,Canned Tomatoes (diced),Frozen & Canned,100g,32,7.3,1.8,0.6,0.2,0,1.6
+186,Cheddar Cheese,Dairy,100g,402,1.3,0,0,33.1,21.1,24.9
+175,Chicken Breast (cooked),Animal Proteins,100g,165,0,0,0,3.6,1,31
+199,Chickpea Pasta (cooked),Pasta & Noodles,100g,160,27,5,1.5,2.5,0.3,11
+210,Coconut Aminos,Sweeteners & Condiments,100g,197,48,0,0,0,0,0.8
+205,Coconut Sugar,Sweeteners & Condiments,100g,375,92.6,0,0,1,0.9,0
+180,Cod (cooked),Animal Proteins,100g,105,0,0,0,0.9,0.2,22.8
+193,Corn Tortilla,Breads & Wraps,100g,218,45.9,6.3,1,2.5,0.3,5.7
+216,Dark Chocolate (70%+),Snacks,100g,598,45.9,10.9,0.5,42.6,24.5,7.8
+188,Egg Whites,Dairy,100g,52,0.7,0,0,0.2,0,10.9
+195,Ezekiel Bread,Breads & Wraps,100g,260,40,6,1.5,1.5,0.3,12
+211,Frozen Peas (cooked),Frozen & Canned,100g,84,15.6,5.7,2,0.4,0.1,5.4
+190,Ghee,Dairy,100g,900,0,0,0,99.8,61.9,0.3
+218,Green Tea (brewed),Functional Beverages,100g,1,0.2,0,0,0,0,0.2
+181,Ground Turkey (cooked),Animal Proteins,100g,218,0,0,0,12.7,3.3,27.4
+203,Honey,Sweeteners & Condiments,100g,304,82.4,0.2,0,0,0,0.3
+208,Hot Sauce,Sweeteners & Condiments,100g,31,5.6,0.9,0.2,0.5,0.1,1.4
+182,Lean Ground Beef (cooked),Animal Proteins,100g,215,0,0,0,11.4,4.4,26.1
+200,Lentil Pasta (cooked),Pasta & Noodles,100g,158,27,4,1,1.5,0.2,11
+204,Maple Syrup,Sweeteners & Condiments,100g,260,67,0,0,0.1,0,0
+220,Matcha (powder),Functional Beverages,100g,324,38.6,19.6,5,5.3,0.7,30.4
+207,Mustard (yellow),Sweeteners & Condiments,100g,66,5.8,3.3,0.8,3.7,0.2,4.4
+223,Pea Protein Powder,Protein Powders,100g,400,7.5,5,1,7.5,1,80
+196,Pita Bread (whole wheat),Breads & Wraps,100g,266,54.5,6,1.5,1.2,0.2,9.1
+217,"Pizza (cheese, regular crust)",Snacks,100g,266,33,2.3,0.5,10.4,4.8,11.4
+214,Popcorn (air-popped),Snacks,100g,387,77.8,14.5,0.3,4.5,0.6,12.9
+183,Pork Tenderloin (cooked),Animal Proteins,100g,143,0,0,0,3.5,1.2,26.2
+197,Rice Cakes (plain),Breads & Wraps,100g,387,81.5,2.2,0.3,2.8,0.6,8.2
+202,Rice Noodles (cooked),Pasta & Noodles,100g,109,25.2,0.9,0.1,0.2,0.1,0.9
+206,Salsa (fresh),Sweeteners & Condiments,100g,36,8,1.5,0.4,0.2,0,1.5
+215,Seaweed Snacks (nori),Snacks,100g,35,5.1,0.3,0.1,0.7,0.2,5.8
+178,Shrimp (cooked),Animal Proteins,100g,99,0.9,0,0,0.3,0.1,24
+201,Soba Noodles (cooked),Pasta & Noodles,100g,99,21.4,0,0,0.1,0,5.1
+192,Sourdough Bread,Breads & Wraps,100g,289,56.4,2.4,0.5,1.2,0.2,9.5
+187,String Cheese,Dairy,100g,280,3.1,0,0,19.5,12.5,22.7
+209,Tamari / Soy Sauce,Sweeteners & Condiments,100g,60,5.6,0.8,0.1,0.1,0,10.5
+179,Tilapia (cooked),Animal Proteins,100g,128,0,0,0,2.7,0.9,26.2
+177,Tuna (canned in water),Animal Proteins,100g,116,0,0,0,2.7,0.7,25.5
+176,Turkey Breast (cooked),Animal Proteins,100g,135,0,0,0,1,0.3,30.1
+222,Whey Protein Powder,Protein Powders,100g,400,7.5,0,0,8.5,4,74
+184,Whole Milk,Dairy,100g,61,4.8,0,0,3.3,1.9,3.2
+191,Whole Wheat Bread,Breads & Wraps,100g,247,41.3,6.8,1.5,3.4,0.7,13
+198,Whole Wheat Pasta (cooked),Pasta & Noodles,100g,124,26.5,3.9,0.9,0.5,0.1,5.3
+194,Whole Wheat Tortilla,Breads & Wraps,100g,294,48,4.4,1,7.3,1.6,8.4

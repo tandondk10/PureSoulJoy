@@ -925,6 +925,23 @@ function formatMealItemDisplay(item: MealItem): string {
   return `${quantity}${unit} ${name}`;
 }
 
+async function fetchBackendNutrition(query: string): Promise<Record<string, number> | null> {
+  const backendUrl = process.env.EXPO_PUBLIC_API_URL ?? "";
+  try {
+    const res = await fetch(`${backendUrl}/process-food-query`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data?.nutrition ?? null;
+  } catch (e) {
+    console.warn("fetchBackendNutrition failed:", e);
+    return null;
+  }
+}
+
 async function normalizeItems(names: string[]): Promise<string[]> {
   const backendUrl = process.env.EXPO_PUBLIC_API_URL ?? "";
   try {
@@ -961,6 +978,8 @@ export default function MealMain() {
   const [mealItems, setMealItems] = useState<MealItem[]>([]);
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [nutritionSummary, setNutritionSummary] = useState<NutritionSummary | null>(null);
+  const [backendNutrition, setBackendNutrition] = useState<Record<string, number> | null>(null);
+  const [rawMealQuery, setRawMealQuery] = useState<string>("");
   const [mealResult, setMealResult] = useState<MealResult | null>(null);
   const [improvements, setImprovements] = useState<string[]>([]);
 
@@ -1064,6 +1083,7 @@ export default function MealMain() {
     setStage("capture");
     setMealItems([]);
     setNutritionSummary(null);
+    setBackendNutrition(null);
     setMealResult(null);
     setImprovements([]);
     setBottomInput("");
@@ -1074,15 +1094,19 @@ export default function MealMain() {
     setStage("capture");
     setMealItems([]);
     setNutritionSummary(null);
+    setBackendNutrition(null);
     setMealResult(null);
     setImprovements([]);
     setBottomInput("");
   };
 
-  const runMealProcessing = async (items: MealItem[]) => {
+  const runMealProcessing = async (items: MealItem[], rawQuery?: string) => {
     const rawNames = items.map((i) => i.name);
     console.log("RAW:", rawNames);
     const normalizedNames = await normalizeItems(rawNames);
+    if (rawQuery) {
+      fetchBackendNutrition(rawQuery).then(setBackendNutrition);
+    }
     console.log("NORMALIZED:", normalizedNames);
     const safeNames =
       normalizedNames.length === rawNames.length ? normalizedNames : rawNames;
@@ -1147,6 +1171,7 @@ export default function MealMain() {
     console.log("UI items:", items.map((it) => it.name));
 
     setMealItems(items);
+    setRawMealQuery(text);
     setStage("confirm");
     setBottomInput("");
   };
@@ -1230,7 +1255,7 @@ export default function MealMain() {
               <ConfirmStage
                 items={mealItems}
                 onChange={setMealItems}
-                onConfirm={() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); setStage("processing"); void runMealProcessing(mealItems); }}
+                onConfirm={() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); setStage("processing"); void runMealProcessing(mealItems, rawMealQuery); }}
                 confirmLabel={imageUri ? "Analyze Photo" : "Analyze Meal"}
               />
             )}
@@ -1261,15 +1286,16 @@ export default function MealMain() {
                   }
                 />
                 {(() => {
-                  const n = nutritionSummary as any;
-                  const content =
-                    `Carbs: ${n.carbs_total ?? 0}g\n` +
-                    `Protein: ${n.protein ?? 0}g\n` +
-                    `Fat: ${n.fat_total ?? 0}g\n` +
-                    `Saturated Fat: ${n.sat_fat ?? 0}g\n\n` +
-                    `Fiber: ${n.fiber_total ?? 0}g\n` +
-                    `  • Soluble: ${n.fiber_soluble ?? 0}g\n` +
-                    `  • Insoluble: ${n.fiber_insoluble ?? 0}g`;
+                  const n = backendNutrition;
+                  const content = n
+                    ? `Carbs: ${n.carbs_g.toFixed(1)}g\n` +
+                      `Protein: ${n.protein_g.toFixed(1)}g\n` +
+                      `Fat: ${n.fat_g.toFixed(1)}g\n` +
+                      `Saturated Fat: ${n.sat_fat_g.toFixed(1)}g\n` +
+                      `Fiber: ${n.fiber_g.toFixed(1)}g\n` +
+                      `  • Soluble: ${n.soluble_fiber_g.toFixed(1)}g\n` +
+                      `  • Insoluble: ${n.insoluble_fiber_g.toFixed(1)}g`
+                    : "Nutrition data unavailable";
                   return <SectionCard title="Nutrition Summary" content={content} />;
                 })()}
                 {(() => {

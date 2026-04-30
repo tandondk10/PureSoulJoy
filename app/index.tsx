@@ -26,7 +26,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
-import { parseMealItems, normalizeQuery } from "./utils/mealParser";
+import { normalizeQuery, parseMealItems } from "./utils/mealParser";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
 
@@ -56,9 +56,10 @@ type Message = {
   sections?: Section[];
   rawText?: string;
   errorMessage?: string;
-  nextActions?: string[];
   topActions?: string[];
   topActionCodes?: string[];
+  nextActionLabels?: string[];
+  nextActionCodes?: string[];
   traceId?: string;
   feedbackSent?: "helpful" | "not_helpful";
   actionTaken?: boolean;
@@ -136,6 +137,14 @@ export default function HomeScreen() {
   };
 
   // ─── Utilities ───────────────────────────────────────────────────────────
+
+  const parseVoiceIntent = (transcript: string): "helpful" | "not_helpful" | "action_taken" | null => {
+    const t = transcript.trim().toLowerCase();
+    if (["yes", "yeah", "yep", "yup"].includes(t)) return "helpful";
+    if (["no", "nope", "nah"].includes(t)) return "not_helpful";
+    if (["do it", "i will", "i'll do it", "i'll do this"].includes(t)) return "action_taken";
+    return null;
+  };
 
   const parseSections = (text: string): Section[] | null => {
     if (!text || !text.includes("##")) return null;
@@ -398,6 +407,21 @@ export default function HomeScreen() {
         return;
       }
 
+      // Check if transcript is a voice intent response to the previous message
+      const lastAssistant = [...messages].reverse().find(m => m.role === "assistant" && m.status === "complete");
+      const voiceIntent = parseVoiceIntent(cleanedQuery);
+      if (voiceIntent && lastAssistant?.traceId) {
+        if (voiceIntent === "helpful" || voiceIntent === "not_helpful") {
+          sendFeedback(lastAssistant, voiceIntent);
+        } else if (voiceIntent === "action_taken") {
+          sendActionTaken(lastAssistant);
+        }
+        setMessages(prev => prev.filter(m => m.id !== userMsgId && m.id !== assistantMsgId));
+        updateVoiceState("IDLE");
+        setStatusText(null);
+        return;
+      }
+
       const sections = parseSections(text);
       const topActions: string[] =
         data.screen?.top_action_labels ||
@@ -409,8 +433,18 @@ export default function HomeScreen() {
         data.screen?.top_actions ||
         data.structured?.top_actions ||
         [];
+      console.log("PARSED ACTION CODES:", topActionCodes);
+      const nextActionCodes: string[] =
+        data.screen?.next_actions ||
+        data.structured?.next_actions ||
+        [];
+      const nextActionLabels: string[] =
+        data.screen?.next_action_labels ||
+        data.structured?.next_action_labels ||
+        [];
 
       // TODO: remove after validation
+      console.log("VOICE HANDLER HIT");
       console.log("[VOICE] ACTION CODES:", topActionCodes);
       console.log("[VOICE] DISPLAY ACTIONS:", topActions);
 
@@ -425,6 +459,8 @@ export default function HomeScreen() {
             rawText: liteMode === true ? text : (sections ? undefined : text),
             topActions,
             topActionCodes,
+            nextActionCodes,
+            nextActionLabels,
             traceId,
           };
           return m;
@@ -610,6 +646,14 @@ export default function HomeScreen() {
         data.screen?.top_actions ||
         data.structured?.top_actions ||
         [];
+      const nextActionCodes: string[] =
+        data.screen?.next_actions ||
+        data.structured?.next_actions ||
+        [];
+      const nextActionLabels: string[] =
+        data.screen?.next_action_labels ||
+        data.structured?.next_action_labels ||
+        [];
 
       // TODO: remove after validation
       console.log("[KB] ACTION CODES:", topActionCodes);
@@ -628,6 +672,8 @@ export default function HomeScreen() {
               rawText: liteMode ? text : (sections ? undefined : text),
               topActions,
               topActionCodes,
+              nextActionCodes,
+              nextActionLabels,
               traceId,
             }
             : m
@@ -1246,87 +1292,120 @@ export default function HomeScreen() {
                     {/* Assistant raw text (lite mode) */}
                     {msg.role === "assistant" && msg.status === "complete" && msg.rawText &&
                       (() => { console.log("RAW:", msg.rawText); console.log("SECTIONS:", msg.sections); return true; })() && (
-                      <View
-                        style={{
-                          backgroundColor: C.surfaceAlt,
-                          padding: 12,
-                          borderRadius: 14,
-                          marginVertical: 6,
-                        }}
-                      >
-                        <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-                          {msg.rawText}
-                        </Text>
-                      </View>
-                    )}
+                        <View
+                          style={{
+                            backgroundColor: C.surfaceAlt,
+                            padding: 12,
+                            borderRadius: 14,
+                            marginVertical: 6,
+                          }}
+                        >
+                          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
+                            {msg.rawText}
+                          </Text>
+                        </View>
+                      )}
 
                     {/* Actions block — deterministic from backend, never from LLM */}
                     {msg.role === "assistant" && msg.status === "complete" &&
                       msg.topActions && msg.topActions.length > 0 && (
-                      <View
-                        style={{
-                          backgroundColor: C.surface,
-                          borderRadius: 14,
-                          padding: 12,
-                          marginTop: 8,
-                        }}
-                      >
-                        <Text style={{ color: C.muted, fontSize: 13, marginBottom: 6, fontWeight: "600" }}>
-                          Do this now:
-                        </Text>
-                        <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-                          {msg.topActions.join("\n")}
-                        </Text>
-                      </View>
-                    )}
+                        <View
+                          style={{
+                            backgroundColor: C.surface,
+                            borderRadius: 14,
+                            padding: 12,
+                            marginTop: 8,
+                          }}
+                        >
+                          <Text style={{ color: C.muted, fontSize: 13, marginBottom: 6, fontWeight: "600" }}>
+                            Do this now:
+                          </Text>
+                          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
+                            {msg.topActions.join("\n")}
+                          </Text>
+                        </View>
+                      )}
 
                     {/* Feedback buttons */}
                     {msg.role === "assistant" && msg.status === "complete" &&
                       msg.topActions && msg.topActions.length > 0 && (
-                      <View style={{ flexDirection: "row", marginTop: 8, gap: 8 }}>
-                        {msg.feedbackSent ? (
-                          <Text style={{ color: C.muted, fontSize: 13 }}>
-                            {msg.feedbackSent === "helpful" ? "Thanks for the feedback!" : "Got it, we'll improve."}
-                          </Text>
-                        ) : (
-                          <>
-                            <TouchableOpacity
-                              onPress={() => sendFeedback(msg, "helpful")}
-                              style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
-                            >
-                              <Text style={{ color: C.text, fontSize: 14 }}>👍 Helpful</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              onPress={() => sendFeedback(msg, "not_helpful")}
-                              style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
-                            >
-                              <Text style={{ color: C.text, fontSize: 14 }}>👎 Not helpful</Text>
-                            </TouchableOpacity>
-                          </>
-                        )}
-                      </View>
-                    )}
+                        <View style={{ flexDirection: "row", marginTop: 8, gap: 8 }}>
+                          {msg.feedbackSent ? (
+                            <Text style={{ color: C.muted, fontSize: 13 }}>
+                              {msg.feedbackSent === "helpful" ? "Thanks for the feedback!" : "Got it, we'll improve."}
+                            </Text>
+                          ) : (
+                            <>
+                              <TouchableOpacity
+                                onPress={() => sendFeedback(msg, "helpful")}
+                                style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
+                              >
+                                <Text style={{ color: C.text, fontSize: 14 }}>👍 Helpful</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => sendFeedback(msg, "not_helpful")}
+                                style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
+                              >
+                                <Text style={{ color: C.text, fontSize: 14 }}>👎 Not helpful</Text>
+                              </TouchableOpacity>
+                            </>
+                          )}
+                        </View>
+                      )}
 
                     {/* Action commitment button */}
                     {msg.role === "assistant" && msg.status === "complete" &&
                       msg.topActionCodes && msg.topActionCodes.length > 0 && (
-                      <TouchableOpacity
-                        onPress={() => sendActionTaken(msg)}
-                        disabled={msg.actionTaken}
-                        style={{
-                          marginTop: 8,
-                          paddingHorizontal: 16,
-                          paddingVertical: 8,
-                          borderRadius: 20,
-                          backgroundColor: msg.actionTaken ? "#1A2A1A" : "#1A3A1A",
-                          alignSelf: "flex-start",
-                        }}
-                      >
-                        <Text style={{ color: msg.actionTaken ? C.muted : "#4ADE80", fontSize: 14, fontWeight: "600" }}>
-                          {msg.actionTaken ? "✔ You committed — start now" : "⚡ I'll do this"}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
+                        <TouchableOpacity
+                          onPress={() => sendActionTaken(msg)}
+                          disabled={msg.actionTaken}
+                          style={{
+                            marginTop: 8,
+                            paddingHorizontal: 16,
+                            paddingVertical: 8,
+                            borderRadius: 20,
+                            backgroundColor: msg.actionTaken ? "#1A2A1A" : "#1A3A1A",
+                            alignSelf: "flex-start",
+                          }}
+                        >
+                          <Text style={{ color: msg.actionTaken ? C.muted : "#4ADE80", fontSize: 14, fontWeight: "600" }}>
+                            {msg.actionTaken ? "✔ You committed — start now" : "⚡ I'll do this"}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+
+                    {/* Next actions — continuation options */}
+                    {msg.role === "assistant" && msg.status === "complete" &&
+                      msg.nextActionCodes && msg.nextActionCodes.length > 0 && (
+                        <View style={{ marginTop: 12 }}>
+                          <Text style={{ color: C.muted, fontSize: 12, marginBottom: 6, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                            What's next?
+                          </Text>
+                          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                            {msg.nextActionCodes.map((code, idx) => (
+                              <TouchableOpacity
+                                key={code}
+                                onPress={() => {
+                                  const newTraceId = createTraceId();
+                                  sendKeyboardQuery(code, newTraceId);
+                                }}
+                                style={{
+                                  paddingHorizontal: 14,
+                                  paddingVertical: 7,
+                                  borderRadius: 20,
+                                  borderWidth: 1,
+                                  borderColor: "#2D3748",
+                                  backgroundColor: C.surface,
+                                }}
+                              >
+                                <Text style={{ color: C.text, fontSize: 13 }}>
+                                  {msg.nextActionLabels?.[idx] ?? code.replace(/_/g, " ")}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+                      )}
                   </View>
                 ))}
               </ScrollView>
