@@ -2,6 +2,7 @@ import csv
 import re
 import requests
 import os
+from typing import List, Optional, Tuple
 
 SEED_FOOD_ITEMS = [
     {
@@ -218,29 +219,140 @@ def build_food_calories(food_data: dict) -> dict:
     return food_calories
 
 
-def detect_foods(query: str) -> list:
+FOOD_SYNONYMS: dict = {
+    "rice": "brown rice (cooked)",
+    "white rice": "brown rice (cooked)",
+    "dal": "moong dal (cooked)",
+    "moong": "moong dal (cooked)",
+    "lentil": "red lentils (cooked)",
+    "lentils": "red lentils (cooked)",
+    "roti": "whole wheat tortilla",
+    "chapati": "whole wheat tortilla",
+    "chicken": "chicken breast (cooked)",
+    "paneer": "paneer",
+}
+
+
+def tokenize(query: str) -> List[str]:
+    tokens = re.split(r"[\s,;]+", query.lower().strip())
+    return [t for t in tokens if t]
+
+
+SAFE_PARTIALS: dict = {
+    "almond": "almonds",
+    "egg":    "eggs (whole)",
+    "oat":    "oats (rolled)",
+}
+
+
+PHRASE_SYNONYMS: dict = {
+    "chicken curry": "chicken breast (cooked)",
+    "fried rice":    "brown rice (cooked)",
+}
+
+STOPWORDS: set = {
+    "piece", "pieces",
+    "slice", "slices",
+    "serving", "servings",
+    "plate", "bowl",
+    "item", "items",
+    "with", "and", "of",
+}
+
+UNIT_PATTERN = re.compile(r"^\d+(\.\d+)?\s*(g|gram|grams|ml|oz|ounce|ounces|cup|cups)?$")
+
+# Add entries ONLY after verifying the canonical key exists in FOOD_DATA.
+# Run: python3 -c "from food_engine import FOOD_DATA; print('key' in FOOD_DATA)"
+HIGH_FREQUENCY_CANONICALS: dict = {}
+
+
+def normalize_phrases(query: str) -> Tuple[str, List[str]]:
     q = query.lower()
+    extracted: List[str] = []
+    for phrase, canonical in PHRASE_SYNONYMS.items():
+        pattern = rf"\b{re.escape(phrase)}\b"
+        if re.search(pattern, q):
+            extracted.append(canonical)
+            q = re.sub(pattern, " ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q, extracted
+
+
+def normalize_tokens(tokens: List[str]) -> List[str]:
+    result = []
+    for t in tokens:
+        if t in FOOD_SYNONYMS:
+            result.append(FOOD_SYNONYMS[t])
+        elif t in SAFE_PARTIALS:
+            result.append(SAFE_PARTIALS[t])
+        elif t in HIGH_FREQUENCY_CANONICALS:
+            result.append(HIGH_FREQUENCY_CANONICALS[t])
+        else:
+            result.append(t)
+    return result
+
+
+def is_noise_token(token: str) -> bool:
+    t = token.strip().lower()
+    if not t:
+        return True
+    if t in STOPWORDS:
+        return True
+    if t.startswith("(") and t.endswith(")"):
+        return True
+    if UNIT_PATTERN.match(t):
+        return True
+    return False
+
+
+def is_food_like(token: str) -> bool:
+    t = token.strip().lower()
+    if is_noise_token(t):
+        return False
+    if len(t) <= 2:
+        return False
+    if t.isdigit():
+        return False
+    return True
+
+
+def detect_foods(query: str) -> list:
+    query, phrase_foods = normalize_phrases(query)
+    tokens = tokenize(query)
+    normalized = normalize_tokens(tokens)
+    print(f"[FOOD_NORMALIZE] raw_tokens={tokens} normalized={normalized}")
+
     detected = []
+    unknown = []
 
-    for food in FOOD_DATA.keys():
-        base_name = food.split("(")[0].strip()  # remove "(cooked)", etc.
+    for token in normalized:
+        if is_noise_token(token):
+            continue
+        matched = False
+        for food in FOOD_DATA:
+            base = food.split("(")[0].strip()
+            if food == token or base == token:
+                detected.append(food)
+                matched = True
+                break
+        if not matched and is_food_like(token):
+            unknown.append(token)
 
-        if re.search(rf"\b{re.escape(base_name)}\b", q):
-            detected.append(food)
-
-    return detected
+    seen = set()
+    result = []
+    for item in detected + phrase_foods + unknown:
+        if item not in seen:
+            result.append(item)
+            seen.add(item)
+    return result
 
 
 def score_domains(foods: list, multiplier: float = 1.0) -> dict:
     scores = {"glucose": 0.0, "cholesterol": 0.0, "lifestyle": 0.0}
     for food in foods:
-        f = FOOD_DATA.get(food)
-        if not f:
-            continue
-        carbs = f.get("carbs_g", 0)
-        sat_fat = f.get("sat_fat_g", 0)
-        scores["glucose"] += carbs * 4 * multiplier
-        scores["cholesterol"] += sat_fat * 9 * multiplier
+        n = get_nutrition(food)
+        scores["glucose"] += n.get("carbs_g", 0) * 4 * multiplier
+        scores["cholesterol"] += n.get("sat_fat_g", 0) * 9 * multiplier
     return scores
 
 
@@ -300,10 +412,89 @@ def compute_meal_calories(foods: list, multiplier: float = 1.0) -> float:
     return total
 
 
+USDA_API_KEY = os.getenv("USDA_API_KEY")
+USDA_CACHE: dict = {}
+
+
+def call_usda(food: str) -> Optional[dict]:
+    if not USDA_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            "https://api.nal.usda.gov/fdc/v1/foods/search",
+            params={"api_key": USDA_API_KEY, "query": food, "pageSize": 1},
+            timeout=2,
+        )
+        data = r.json()
+        foods = data.get("foods", [])
+        foods = [f for f in foods if f.get("dataType") in ("SR Legacy", "Foundation")]
+        if not foods:
+            return None
+        nutrients = foods[0].get("foodNutrients", [])
+
+        def _val(name: str) -> float:
+            for n in nutrients:
+                if name in n.get("nutrientName", ""):
+                    return float(n.get("value", 0))
+            return 0.0
+
+        return {
+            "carbs_g":         _val("Carbohydrate"),
+            "protein_g":       _val("Protein"),
+            "fat_g":           _val("Total lipid"),
+            "sat_fat_g":       _val("Fatty acids, total saturated"),
+            "fiber_g":         _val("Fiber, total dietary"),
+            "soluble_fiber_g": 0.0,
+            "calories":        _val("Energy"),
+            "_source":         "usda",
+        }
+    except Exception:
+        return None
+
+
+def get_nutrition(food: str) -> dict:
+    if food in FOOD_DATA:
+        print(f"[NUTRITION] FOOD_DATA hit: {food}")
+        return FOOD_DATA[food]
+    if food in USDA_CACHE:
+        print(f"[NUTRITION] USDA_CACHE hit: {food}")
+        return USDA_CACHE[food]
+    print(f"[NUTRITION] USDA_FETCH: {food}")
+    data = call_usda(food)
+    if data:
+        USDA_CACHE[food] = data
+        return data
+    return {
+        "carbs_g": 0.0, "protein_g": 0.0, "fat_g": 0.0,
+        "sat_fat_g": 0.0, "fiber_g": 0.0, "soluble_fiber_g": 0.0,
+        "calories": 0.0, "_source": "unknown",
+    }
+
+
+FOOD_SPELLING_CORRECTIONS: dict = {
+    "avacado":   "avocado",
+    "avacados":  "avocados",
+    "brocoli":   "broccoli",
+    "broccolli": "broccoli",
+    "tumeric":   "turmeric",
+    "bannana":   "banana",
+}
+
+
+def normalize_input(query: str) -> str:
+    q = query.lower().strip()
+    q = re.sub(r"[,/;|]+", " ", q)
+    q = re.sub(r"[-]+", " ", q)
+    tokens = re.findall(r"\b\w+\b", q)
+    corrected = [FOOD_SPELLING_CORRECTIONS.get(t, t) for t in tokens]
+    return " ".join(corrected)
+
+
 UNKNOWN_FOODS = set()
 
 
 def process_query(query: str) -> dict:
+    query = normalize_input(query)
     foods = detect_foods(query)
 
     if not foods:
@@ -329,6 +520,28 @@ def process_query(query: str) -> dict:
         "meal_calories": calories,
         "nutrition": nutrition,
     }
+
+
+def nutrition_source_confidence(nutrition: dict) -> str:
+    source = nutrition.get("_source", "food_data")
+    if source == "food_data":
+        return "high"
+    if source == "usda":
+        return "medium"
+    return "low"
+
+
+def build_food_sources(foods: list) -> list:
+    sources = []
+    for food in foods:
+        n = get_nutrition(food)
+        source = n.get("_source", "food_data")
+        sources.append({
+            "food": food,
+            "source": source,
+            "confidence": nutrition_source_confidence(n),
+        })
+    return sources
 
 
 def load_food_data_from_csv(file_path: str) -> dict:

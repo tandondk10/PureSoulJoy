@@ -15,7 +15,8 @@ USE_MOCK=false USE_LLM=true python3 -m pytest backend/tests/test_real_user_input
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app
+from main import app
+
 
 client = TestClient(app)
 

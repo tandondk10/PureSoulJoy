@@ -1975,8 +1975,8 @@ def _enriched_response(
 
 
 # ---------------- FOOD ENGINE RESPONSE ----------------
-def build_food_engine_response(query: str) -> dict:
-    result = process_query(query)
+def build_food_engine_response(query: str, food_result: dict = None) -> dict:
+    result = food_result if food_result is not None else process_query(query)
 
     domain = result.get("domain", "unknown")
     foods = result.get("foods", [])
@@ -2092,14 +2092,15 @@ async def build_response(query: str, lite: bool):
             }
 
         # ── FOOD ENGINE ROUTING ──────────────────────────────────────────────
-        detected_foods = detect_foods(q)
+        _food_pre = process_query(q)
+        detected_foods = _food_pre.get("foods", [])
         if detected_foods:
             if TRACE_LEVEL >= 1:
                 print(
                     f"[{now_iso()}][{trace_id_var.get()}] FOOD_ENGINE_ROUTE "
                     f"query={q!r} foods={detected_foods!r} route='food_engine'"
                 )
-            return build_food_engine_response(q)
+            return build_food_engine_response(q, food_result=_food_pre)
 
         # ✅ normalization for matching
         q_norm = q.lower().replace("-", " ")
