@@ -19,7 +19,7 @@ from intervention_engine import get_intervention
 from context_patterns import detect_context_pattern
 from lever_mapping import CONTEXT_LEVERS, LEVER_ACTIONS, DEFAULT_LEVERS
 from utils.trace import create_trace_id
-from food_engine import SEED_FOOD_ITEMS, process_query, detect_foods, UNKNOWN_FOODS
+from food_engine import SEED_FOOD_ITEMS, process_query, detect_foods, UNKNOWN_FOODS, classify_macro_confidence, FOOD_DATA, CURATED_HIGH_IMPACT_FOODS, INTERNAL_FOOD_BEHAVIOR
 from typing import Optional, List
 from pydantic import BaseModel
 
@@ -292,7 +292,6 @@ KEYWORD_MAP = {
             "hypoglycemia",
             "hypo",
         ],
-        "food": ["carb", "carbs", "dessert", "sweet", "juice", "soda"],
         "timing": [
             "fasting",
             "postprandial",
@@ -305,7 +304,6 @@ KEYWORD_MAP = {
         "primary": [
             "blood pressure",
             "bp",
-            "pressure",
             "hypertension",
             "hypertensive",
             "hypotension",
@@ -331,10 +329,8 @@ KEYWORD_MAP = {
             "plaque",
             "lipid variability",
         ],
-        "food": ["fat", "saturated", "saturated fat", "trans fat"],
     },
     "lifestyle": {
-        "diet": ["diet", "food", "meal", "eat", "nutrition"],
         "activity": ["exercise", "workout", "walk", "steps"],
         "recovery": ["sleep", "stress", "meditation"],
         "body": ["weight", "fitness"],
@@ -1974,8 +1970,189 @@ def _enriched_response(
     }
 
 
+# ---------------- FOOD ENGINE MESSAGING ----------------
+def build_high_confidence_macro_message(dominance: str) -> str:
+    if dominance == "glucose":
+        return (
+            "Carb-heavy meal. "
+            "Take a 10–15 minute walk now and add protein or fiber next time."
+        )
+    if dominance == "cholesterol":
+        return (
+            "Fat-heavy meal. "
+            "Balance it with fiber and keep the next meal lighter."
+        )
+    return build_low_confidence_macro_message()
+
+
+def build_medium_confidence_macro_message(dominance: str) -> str:
+    if dominance == "glucose":
+        return (
+            "Likely carb-heavy. "
+            "A short walk helps, and next time add protein or fiber."
+        )
+    if dominance == "cholesterol":
+        return (
+            "Likely fat-heavy. "
+            "Add fiber and keep portions in check next time."
+        )
+    return build_low_confidence_macro_message()
+
+
+def build_low_confidence_macro_message() -> str:
+    return (
+        "This looks fairly balanced 👍 "
+        "I can't be 100% certain from this input. "
+        "Simple rule to learn: bread, rice, or juice usually pushes carbs; "
+        "butter, cheese, or fried foods usually push fat. "
+        "For more control, use Build Meal next time—it helps you shape balanced meals and build lasting habits."
+    )
+
+
+def apply_context_modifier(message: str, context_domain: str = None) -> str:
+    if not context_domain:
+        return message
+    if context_domain == "glucose":
+        return (
+            message
+            + " Given your glucose focus, keep portions controlled and pair carbs with protein or fiber."
+        )
+    if context_domain == "cholesterol":
+        return (
+            message
+            + " Since you're focusing on cholesterol, prioritize fiber and reduce saturated fat where possible."
+        )
+    if context_domain == "bp":
+        return (
+            message
+            + " Since blood pressure is a focus, watch sodium and keep meals simple and balanced."
+        )
+    if context_domain == "lifestyle":
+        return (
+            message
+            + " For lifestyle consistency, use Build Meal when you want more control."
+        )
+    return message
+
+
+def build_low_confidence_nutrition_prompt(query: str, result: dict) -> str:
+    foods = result.get("foods", [])
+    macro_dominance = result.get("macro_dominance", {})
+    macro_totals = result.get("macro_totals", {})
+    return f"""
+You are a nutrition coach for a lifestyle education app.
+
+User query:
+{query}
+
+Engine facts:
+- Foods detected: {foods}
+- Macro dominance: {macro_dominance}
+- Macro totals: {macro_totals}
+- Confidence: low / uncertain
+
+Critical rules:
+1. Do NOT classify the meal as carb-heavy or fat-heavy with certainty.
+2. Do NOT override the engine result.
+3. Explain that the meal looks balanced or unclear from the available input.
+4. Teach a simple nutrition rule:
+   - bread, rice, juice, sweets usually push carb load
+   - butter, cheese, fried foods usually push fat load
+   - protein and fiber improve meal quality and control
+5. Suggest using the Build Meal option for more control.
+6. Keep the response to 2-3 short sentences.
+7. Do not make medical claims.
+8. Do not mention internal fields, ratios, scores, or system logic.
+
+Tone:
+Warm, practical, encouraging, no guilt.
+""".strip()
+
+
+def low_confidence_llm_output_is_safe(text: str) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    blocked = [
+        "carb-heavy meal", "fat-heavy meal",
+        "this is carb-heavy", "this is fat-heavy",
+        "clearly carb-heavy", "clearly fat-heavy",
+        "definitely carb-heavy", "definitely fat-heavy",
+    ]
+    return not any(p in t for p in blocked)
+
+
+def explain_low_confidence_with_llm(query: str, result: dict) -> str:
+    prompt = build_low_confidence_nutrition_prompt(query, result)
+    try:
+        text = call_llm(prompt).strip()
+        if low_confidence_llm_output_is_safe(text):
+            return text
+        return build_low_confidence_macro_message()
+    except Exception as e:
+        if TRACE_LEVEL >= 1:
+            print(f"[LOW_CONF_LLM_FALLBACK] {e}")
+        return build_low_confidence_macro_message()
+
+
+def build_macro_guidance_message(result: dict, query: str = "", context_domain: str = None) -> str:
+    macro_dominance = result.get("macro_dominance", {})
+    dominance  = macro_dominance.get("dominance", "balanced")
+    confidence = classify_macro_confidence(macro_dominance)
+
+    if confidence == "high":
+        base = build_high_confidence_macro_message(dominance)
+    elif confidence == "medium":
+        base = build_medium_confidence_macro_message(dominance)
+    else:
+        base = explain_low_confidence_with_llm(query, result)
+    return apply_context_modifier(base, context_domain)
+
+
+# ---------------- SINGLE-WORD INTENT ROUTING ----------------
+_SINGLE_WORD_RESPONSES = {
+    "fat": (
+        "Fat matters most by type. Reduce fried/saturated fats and add fiber-rich foods; "
+        "if cholesterol is your focus, tell me what you ate."
+    ),
+    "carb": (
+        "Carbs affect glucose most by type and portion. Pair carbs with protein/fiber "
+        "or walk 10–15 minutes after eating."
+    ),
+    "carbs": (
+        "Carbs affect glucose most by type and portion. Pair carbs with protein/fiber "
+        "or walk 10–15 minutes after eating."
+    ),
+    "meal": (
+        "Tell me the meal items and I'll use them to find the top lever. "
+        "Add carbs, protein, and fats for a complete picture."
+    ),
+    "food": (
+        "Tell me what food you ate and I'll use that to give one clear action to improve the meal."
+    ),
+}
+
+
+def build_single_word_intent_response(q: str) -> Optional[dict]:
+    msg = _SINGLE_WORD_RESPONSES.get(q.strip().lower())
+    if msg is None:
+        return None
+    return {
+        "status": "success",
+        "chat": msg,
+        "text": msg,
+        "domain": "lifestyle",
+        "has_food": False,
+        "foods": [],
+        "context_domain": None,
+        "score": 50,
+        "needs_clarification": False,
+        "unknown_foods": [],
+    }
+
+
 # ---------------- FOOD ENGINE RESPONSE ----------------
-def build_food_engine_response(query: str, food_result: dict = None) -> dict:
+def build_food_engine_response(query: str, food_result: dict = None, context_domain: str = None, truly_unknown: list = None) -> dict:
     result = food_result if food_result is not None else process_query(query)
 
     domain = result.get("domain", "unknown")
@@ -1984,32 +2161,60 @@ def build_food_engine_response(query: str, food_result: dict = None) -> dict:
     scores = result.get("scores", {})
     calories = result.get("meal_calories", 0.0)
 
+    # Check INTERNAL_FOOD_BEHAVIOR for deterministic curated messages (no LLM, no USDA)
+    first_internal = next(
+        (INTERNAL_FOOD_BEHAVIOR[f.lower().strip()] for f in foods if f.lower().strip() in INTERNAL_FOOD_BEHAVIOR),
+        None,
+    )
+    truly_unknown = truly_unknown or []
+    needs_clarification = False
+
     if domain == "unknown":
         message = "I could not identify a known food item in that meal yet."
         top_actions = ["improve_meal"]
         top_action_labels = ["Add or clarify food items"]
         title = "Unknown Meal"
+    elif first_internal:
+        domain = first_internal["domain"]
+        base_message = first_internal["message"]
+        if context_domain == "cholesterol":
+            base_message += " Since cholesterol is your focus, also watch saturated fat and add fiber."
+        elif context_domain == "bp":
+            base_message += " Since blood pressure is your focus, also watch sodium."
+        if truly_unknown:
+            message = build_mixed_food_clarification(base_message, truly_unknown)
+            needs_clarification = True
+        else:
+            message = base_message
+        top_actions = ["walk_10min_now"] if domain == "glucose" else ["add_fiber_next_meal"]
+        top_action_labels = ["Walk 10 Minutes"] if domain == "glucose" else ["Add Fiber Next Meal"]
+        title = domain.capitalize()
     elif domain == "glucose":
-        message = "This meal is mainly glucose-driven because carbohydrate load is the strongest signal."
         top_actions = ["walk_10min_now"]
         top_action_labels = ["Walk 10 Minutes"]
         title = "Glucose"
+        message = build_macro_guidance_message(result, query, context_domain)
     elif domain == "cholesterol":
-        message = "This meal is mainly cholesterol-driven because saturated fat is the strongest signal."
         top_actions = ["add_fiber_next_meal"]
         top_action_labels = ["Add Fiber Next Meal"]
         title = "Cholesterol"
+        message = build_macro_guidance_message(result, query, context_domain)
     else:
-        message = "This meal has been analyzed using your food engine."
         top_actions = ["improve_meal"]
         top_action_labels = ["Improve Meal"]
         title = "Meal"
+        message = build_macro_guidance_message(result, query, context_domain)
 
     return {
         "status": "success",
         "text": message,
         "chat": message,
         "domain": domain,
+        "context_domain": context_domain,
+        "needs_clarification": needs_clarification,
+        "unknown_foods": truly_unknown,
+        "macro_dominance": result.get("macro_dominance", {}),
+        "macro_totals": result.get("macro_totals", {}),
         "need": "meal_analysis",
         "lever": domain,
         "sub_lever": None,
@@ -2020,6 +2225,7 @@ def build_food_engine_response(query: str, food_result: dict = None) -> dict:
             "lever": domain,
             "sub_lever": None,
         },
+        "has_food": True,
         "food_engine": True,
         "foods": foods,
         "scores": scores,
@@ -2065,6 +2271,110 @@ def build_food_engine_response(query: str, food_result: dict = None) -> dict:
     }
 
 
+def build_standard_text_response(
+    message: str,
+    domain: str = "lifestyle",
+    context_domain: str = None,
+    status: str = "success",
+) -> dict:
+    return {
+        "status": status,
+        "text": message,
+        "chat": message,
+        "domain": domain,
+        "context_domain": context_domain,
+        "has_food": False,
+        "foods": [],
+    }
+
+
+def ensure_response_contract(resp: dict, default_domain: str = "lifestyle") -> dict:
+    if resp is None:
+        resp = {}
+    message = (
+        resp.get("chat")
+        or resp.get("text")
+        or resp.get("message")
+        or "I can help with that. Tell me what you ate or what health area you want to improve."
+    )
+    resp.setdefault("chat", message)
+    resp.setdefault("text", message)
+    resp.setdefault("domain", default_domain)
+    resp.setdefault("has_food", False)
+    resp.setdefault("foods", [])
+    resp.setdefault("context_domain", None)
+    resp.setdefault("needs_clarification", False)
+    resp.setdefault("unknown_foods", [])
+    return resp
+
+
+def is_trusted_food(food: str) -> bool:
+    f = (food or "").lower().strip()
+    return (
+        f in FOOD_DATA
+        or f in CURATED_HIGH_IMPACT_FOODS
+    )
+
+
+def build_unknown_food_clarification(unknown_foods: list) -> str:
+    label = ", ".join(unknown_foods[:2]) if unknown_foods else "that food"
+    return (
+        f"I don't want to guess on {label}. "
+        "Was it mostly carbs like rice/bread, protein like chicken/paneer, or fats like cheese/oil?"
+    )
+
+
+def build_mixed_food_clarification(known_message: str, unknown_foods: list) -> str:
+    return known_message + " " + build_unknown_food_clarification(unknown_foods)
+
+
+def resolve_domain_and_context(query: str) -> dict:
+    """
+    Resolves final domain and optional context domain.
+
+    Contract:
+    - all_foods = parser/engine candidates (for visibility)
+    - matched_foods = FOOD_DATA-backed OR curated high-impact foods (trusted for routing)
+    - has_food = True ONLY when matched_foods is non-empty
+    """
+    text_domain = detect_condition(query)
+    food_result = process_query(query)
+    all_foods = food_result.get("foods", []) or []
+    matched_foods = [f for f in all_foods if is_trusted_food(f)]
+    truly_unknown = [f for f in all_foods if not is_trusted_food(f)]
+    has_food = bool(matched_foods)  # unchanged: only trusted foods count
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[DOMAIN_RESOLVE] query={query!r} "
+            f"all_foods={all_foods!r} matched_foods={matched_foods!r} "
+            f"truly_unknown={truly_unknown!r} "
+            f"has_food={has_food} text_domain={text_domain!r}"
+        )
+
+    if has_food:
+        return {
+            "has_food": True,
+            "foods": all_foods,
+            "matched_foods": matched_foods,
+            "truly_unknown": truly_unknown,
+            "food_result": food_result,
+            "domain": food_result.get("domain", "unknown"),
+            "context_domain": text_domain,
+            "text_domain": text_domain,
+        }
+    return {
+        "has_food": False,
+        "foods": [],
+        "matched_foods": [],
+        "truly_unknown": truly_unknown,
+        "food_result": None,
+        "domain": text_domain,
+        "context_domain": None,
+        "text_domain": text_domain,
+    }
+
+
 # ---------------- BUILD RESPONSE ----------------
 async def build_response(query: str, lite: bool):
     t0_func = trace_start("build_response")
@@ -2092,15 +2402,19 @@ async def build_response(query: str, lite: bool):
             }
 
         # ── FOOD ENGINE ROUTING ──────────────────────────────────────────────
-        _food_pre = process_query(q)
-        detected_foods = _food_pre.get("foods", [])
-        if detected_foods:
+        routing = resolve_domain_and_context(q)
+        if routing.get("has_food"):
             if TRACE_LEVEL >= 1:
                 print(
                     f"[{now_iso()}][{trace_id_var.get()}] FOOD_ENGINE_ROUTE "
-                    f"query={q!r} foods={detected_foods!r} route='food_engine'"
+                    f"query={q!r} matched_foods={routing.get('matched_foods')!r} "
+                    f"route='food_engine' context_domain={routing.get('context_domain')!r}"
                 )
-            return build_food_engine_response(q, food_result=_food_pre)
+            return build_food_engine_response(
+                q,
+                food_result=routing.get("food_result"),
+                context_domain=routing.get("context_domain"),
+            )
 
         # ✅ normalization for matching
         q_norm = q.lower().replace("-", " ")
@@ -2895,9 +3209,46 @@ async def handle_query(request: Request):
                 }
             )
 
-        # Allow valid single-word health terms like "prediabetic", "diabetes", "ldl", "hdl", "bp"
+        # Routing is the single source of truth for food detection.
+        # Run before the single-word guard so food queries are never blocked.
+        kb_routing = resolve_domain_and_context(query)
+        if kb_routing.get("has_food"):
+            food_resp = build_food_engine_response(
+                query,
+                food_result=kb_routing.get("food_result"),
+                context_domain=kb_routing.get("context_domain"),
+                truly_unknown=kb_routing.get("truly_unknown"),
+            )
+            return _inject_trace(ensure_response_contract(food_resp, default_domain=food_resp.get("domain", "lifestyle")))
+
+        elif kb_routing.get("truly_unknown"):
+            clarification_msg = build_unknown_food_clarification(kb_routing["truly_unknown"])
+            return _inject_trace(
+                ensure_response_contract(
+                    {
+                        "status": "success",
+                        "message": clarification_msg,
+                        "needs_clarification": True,
+                        "clarification_type": "unknown_food",
+                        "unknown_foods": kb_routing["truly_unknown"],
+                        "cleaned_query": None,
+                        "tts_text": None,
+                        "audio": None,
+                        "score": 0,
+                    },
+                    default_domain=kb_routing.get("domain", "lifestyle"),
+                )
+            )
+
+        # Single-word guard applies only when has_food=False.
         if len(query.split()) <= 1:
             q_check = normalize(correct_spelling(query)).lower().strip()
+
+            # ---- SINGLE WORD INTENT ROUTING ----
+            if len(q_check.split()) == 1:
+                intent_resp = build_single_word_intent_response(q_check)
+                if intent_resp is not None:
+                    return _inject_trace(ensure_response_contract(intent_resp, default_domain="lifestyle"))
 
             single_word_allowed = False
 
@@ -2906,24 +3257,28 @@ async def handle_query(request: Request):
                 single_word_allowed = True
 
             # Check KEYWORD_MAP
-            for domain, groups in KEYWORD_MAP.items():
-                for group in groups.values():
-                    if q_check in group:
-                        single_word_allowed = True
+            if not single_word_allowed:
+                for domain, groups in KEYWORD_MAP.items():
+                    for group in groups.values():
+                        if q_check in group:
+                            single_word_allowed = True
+                            break
+                    if single_word_allowed:
                         break
-                if single_word_allowed:
-                    break
 
             if not single_word_allowed:
                 return _inject_trace(
-                    {
-                        "status": "success",
-                        "message": "Please say a full sentence like 'my sugar is high after meal'",
-                        "cleaned_query": None,
-                        "tts_text": None,
-                        "audio": None,
-                        "score": 0,
-                    }
+                    ensure_response_contract(
+                        {
+                            "status": "success",
+                            "message": "Please say a full sentence like 'my sugar is high after meal'",
+                            "cleaned_query": None,
+                            "tts_text": None,
+                            "audio": None,
+                            "score": 0,
+                        },
+                        default_domain=kb_routing.get("domain", "lifestyle"),
+                    )
                 )
 
         try:
@@ -2984,10 +3339,16 @@ async def handle_query(request: Request):
                 "screen": screen,
                 "structured": result.get("structured", {}),
                 # food engine fields (present only when routed through food engine)
+                "has_food": result.get("has_food", False),
                 "food_engine": result.get("food_engine", False),
                 "foods": result.get("foods", []),
                 "scores": result.get("scores", {}),
                 "meal_calories": result.get("meal_calories", 0.0),
                 "nutrition": result.get("nutrition", {}),
+                "context_domain": result.get("context_domain"),
+                "macro_dominance": result.get("macro_dominance", {}),
+                "macro_totals": result.get("macro_totals", {}),
+                "needs_clarification": result.get("needs_clarification", False),
+                "unknown_foods": result.get("unknown_foods", []),
             }
         )

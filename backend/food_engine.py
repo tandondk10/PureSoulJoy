@@ -248,16 +248,77 @@ SAFE_PARTIALS: dict = {
 PHRASE_SYNONYMS: dict = {
     "chicken curry": "chicken breast (cooked)",
     "fried rice":    "brown rice (cooked)",
+    "ice cream":     "ice cream",  # captures phrase before tokenization splits it
+}
+
+# High-impact food/drink terms trusted for routing even when not in FOOD_DATA.
+# Keep small and intentional — do NOT add macro words (fat, carbs, fiber).
+CURATED_HIGH_IMPACT_FOODS: set = {
+    "coke", "cola", "soda", "juice",
+    "orange juice", "apple juice",
+    "ice cream",
+}
+
+INTERNAL_FOOD_BEHAVIOR: dict = {
+    "juice": {
+        "domain": "glucose",
+        "message": "Juice is a fast sugar load, so the glucose risk is high. Pair it with protein or take a 10–15 minute walk after.",
+    },
+    "coke": {
+        "domain": "glucose",
+        "message": "Coke is liquid sugar, so glucose can rise quickly. Best move: reduce the portion or walk 10–15 minutes after.",
+    },
+    "soda": {
+        "domain": "glucose",
+        "message": "Soda is a fast carb drink, so expect a quick glucose rise. Reduce the portion or pair it with protein/fiber.",
+    },
+    "ice cream": {
+        "domain": "glucose",
+        "message": "Ice cream has sugar plus fat, so the spike can be delayed. Keep the portion small and walk after if you can.",
+    },
 }
 
 STOPWORDS: set = {
-    "piece", "pieces",
-    "slice", "slices",
-    "serving", "servings",
-    "plate", "bowl",
-    "item", "items",
-    "with", "and", "of",
+    # serving / connector words
+    "piece", "pieces", "slice", "slices", "serving", "servings",
+    "plate", "bowl", "item", "items", "with", "and", "of",
+    # question words
+    "how", "what", "why", "when", "where", "which", "who",
+    # auxiliaries / copulas
+    "do", "does", "did", "can", "could", "should", "would", "will",
+    "am", "is", "are", "was", "were",
+    # pronouns / determiners
+    "my", "your", "our", "their", "its", "the", "a", "an", "this", "that",
+    # prepositions
+    "to", "for", "in", "on", "at", "by", "from", "into", "after", "before",
+    # common verbs in health queries (not food)
+    "lower", "reduce", "improve", "increase", "manage", "help", "get",
+    # medical abbreviations / lab terms (not food)
+    "a1c", "ldl", "hdl", "blood", "pressure",
+    # nutrition/macro concepts (not standalone foods)
+    "fat", "carbs", "carb", "fiber", "protein",
+    # common health-query adjectives
+    "high", "low",
+    # time / context words (not food)
+    "late", "night", "morning", "evening",
+    # meta-level words (not food items themselves)
+    "meal", "food",
 }
+
+STOPWORDS.update({
+    # intent / helper verbs
+    "need", "want", "control", "track", "check", "know", "tell",
+    # health metrics — not food items
+    "sugar", "glucose", "hba1c", "cholesterol", "triglycerides", "diabetes",
+    # meta nutrition concepts
+    "diet", "nutrition", "calories", "fats",
+    # lifestyle context words
+    "workout", "exercise",
+    # adjectives
+    "good", "bad", "better", "normal",
+    # time
+    "today", "tomorrow",
+})
 
 UNIT_PATTERN = re.compile(r"^\d+(\.\d+)?\s*(g|gram|grams|ml|oz|ounce|ounces|cup|cups)?$")
 
@@ -356,17 +417,114 @@ def score_domains(foods: list, multiplier: float = 1.0) -> dict:
     return scores
 
 
-DOMAIN_PRIORITY = ["glucose", "cholesterol", "lifestyle"]
+CARB_KCAL_PER_G = 4
+FAT_KCAL_PER_G = 9
+CARB_DOMINANCE_THRESHOLD = 0.65
+FAT_DOMINANCE_THRESHOLD = 0.55
+
+DOMAIN_PRIORITY = ["glucose", "cholesterol", "bp", "lifestyle"]
 
 
 def pick_domain(scores: dict) -> str:
+    if not scores:
+        return "glucose"
     best_score = max(scores.values())
     winners = [d for d, v in scores.items() if v == best_score]
     if len(winners) == 1:
         return winners[0]
-    for d in DOMAIN_PRIORITY:
-        if d in winners:
-            return d
+    for domain in DOMAIN_PRIORITY:
+        if domain in winners:
+            return domain
+    return winners[0]
+
+
+def aggregate_macro_totals(foods: list) -> dict:
+    totals = {"carbs_g": 0.0, "fat_g": 0.0, "protein_g": 0.0, "fiber_g": 0.0, "calories": 0.0}
+    for food in foods:
+        n = get_nutrition(food)
+        totals["carbs_g"]  += float(n.get("carbs_g",  0) or 0)
+        totals["fat_g"]    += float(n.get("fat_g",    0) or 0)
+        totals["protein_g"]+= float(n.get("protein_g",0) or 0)
+        totals["fiber_g"]  += float(n.get("fiber_g",  0) or 0)
+        totals["calories"] += float(n.get("calories", 0) or 0)
+    return totals
+
+
+def compute_macro_dominance(totals: dict) -> dict:
+    carbs_g = float(totals.get("carbs_g", 0) or 0)
+    fat_g   = float(totals.get("fat_g",   0) or 0)
+    carb_cal = carbs_g * CARB_KCAL_PER_G
+    fat_cal  = fat_g   * FAT_KCAL_PER_G
+    macro_cal = carb_cal + fat_cal
+
+    if macro_cal <= 0:
+        return {"dominance": "balanced", "carb_cal": 0.0, "fat_cal": 0.0,
+                "carb_ratio": 0.0, "fat_ratio": 0.0}
+
+    carb_ratio = carb_cal / macro_cal
+    fat_ratio  = fat_cal  / macro_cal
+
+    if carb_ratio >= CARB_DOMINANCE_THRESHOLD:
+        dominance = "glucose"
+    elif fat_ratio >= FAT_DOMINANCE_THRESHOLD:
+        dominance = "cholesterol"
+    else:
+        dominance = "balanced"
+
+    return {"dominance": dominance, "carb_cal": round(carb_cal, 2),
+            "fat_cal": round(fat_cal, 2), "carb_ratio": round(carb_ratio, 3),
+            "fat_ratio": round(fat_ratio, 3)}
+
+
+def apply_macro_dominance_signal(scores: dict, dominance_info: dict) -> dict:
+    adjusted = dict(scores)
+    dominance = dominance_info.get("dominance", "balanced")
+    if dominance == "glucose":
+        adjusted["glucose"] = adjusted.get("glucose", 0) + 2
+    elif dominance == "cholesterol":
+        adjusted["cholesterol"] = adjusted.get("cholesterol", 0) + 2
+    return adjusted
+
+
+def classify_macro_confidence(macro_dominance: dict) -> str:
+    dominance  = macro_dominance.get("dominance", "balanced")
+    carb_ratio = float(macro_dominance.get("carb_ratio", 0.0) or 0.0)
+    fat_ratio  = float(macro_dominance.get("fat_ratio",  0.0) or 0.0)
+
+    if dominance == "balanced":
+        return "low"
+    if dominance == "glucose":
+        margin = carb_ratio - CARB_DOMINANCE_THRESHOLD
+    elif dominance == "cholesterol":
+        margin = fat_ratio - FAT_DOMINANCE_THRESHOLD
+    else:
+        return "low"
+
+    if margin >= 0.15:
+        return "high"
+    if margin >= 0.05:
+        return "medium"
+    return "low"
+
+
+def determine_domain_from_foods_and_query(query: str, foods: list) -> dict:
+    food_scores = score_domains(foods)
+    macro_totals = aggregate_macro_totals(foods)
+    dominance_info = compute_macro_dominance(macro_totals)
+    food_scores = apply_macro_dominance_signal(food_scores, dominance_info)
+
+    query_scores = detect_domain_from_query(query) if "detect_domain_from_query" in globals() else {}
+    final_scores = (merge_domain_scores(query_scores, food_scores)
+                    if "merge_domain_scores" in globals() else food_scores)
+
+    domain = pick_domain(final_scores)
+    # When macro dominance is clear (not balanced), it overrides the score-based selection.
+    # This prevents sat_fat-based scoring (which uses only saturated fat) from misclassifying
+    # fat-heavy foods whose total fat clearly dominates.
+    if dominance_info.get("dominance") != "balanced":
+        domain = dominance_info["dominance"]
+    return {"domain": domain, "scores": final_scores,
+            "macro_totals": macro_totals, "macro_dominance": dominance_info}
 
 
 def extract_grams(query: str) -> float:
@@ -504,21 +662,25 @@ def process_query(query: str) -> dict:
             "scores": {"glucose": 0, "cholesterol": 0, "lifestyle": 0},
             "domain": "unknown",
             "meal_calories": 0.0,
+            "macro_dominance": {"dominance": "balanced", "carb_cal": 0.0,
+                                "fat_cal": 0.0, "carb_ratio": 0.0, "fat_ratio": 0.0},
+            "macro_totals": {},
         }
 
     grams = extract_grams(query)
     multiplier = grams / 100.0 if len(foods) == 1 else 1.0
 
-    scores = score_domains(foods, multiplier)
-    domain = pick_domain(scores)
+    domain_result = determine_domain_from_foods_and_query(query, foods)
     calories = compute_meal_calories(foods, multiplier)
     nutrition = compute_nutrition_summary(foods, multiplier)
     return {
         "foods": foods,
-        "scores": scores,
-        "domain": domain,
+        "scores": domain_result["scores"],
+        "domain": domain_result["domain"],
         "meal_calories": calories,
         "nutrition": nutrition,
+        "macro_dominance": domain_result["macro_dominance"],
+        "macro_totals": domain_result["macro_totals"],
     }
 
 
