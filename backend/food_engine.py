@@ -419,6 +419,7 @@ def score_domains(foods: list, multiplier: float = 1.0) -> dict:
 
 CARB_KCAL_PER_G = 4
 FAT_KCAL_PER_G = 9
+PROTEIN_KCAL_PER_G = 4
 CARB_DOMINANCE_THRESHOLD = 0.65
 FAT_DOMINANCE_THRESHOLD = 0.55
 
@@ -451,30 +452,50 @@ def aggregate_macro_totals(foods: list) -> dict:
 
 
 def compute_macro_dominance(totals: dict) -> dict:
-    carbs_g = float(totals.get("carbs_g", 0) or 0)
-    fat_g   = float(totals.get("fat_g",   0) or 0)
-    carb_cal = carbs_g * CARB_KCAL_PER_G
-    fat_cal  = fat_g   * FAT_KCAL_PER_G
-    macro_cal = carb_cal + fat_cal
+    carbs_g   = float(totals.get("carbs_g", 0) or 0)
+    fat_g     = float(totals.get("fat_g", 0) or 0)
+    protein_g = float(totals.get("protein_g", 0) or 0)
 
-    if macro_cal <= 0:
-        return {"dominance": "balanced", "carb_cal": 0.0, "fat_cal": 0.0,
-                "carb_ratio": 0.0, "fat_ratio": 0.0}
+    carb_cal    = carbs_g * CARB_KCAL_PER_G
+    fat_cal     = fat_g   * FAT_KCAL_PER_G
+    protein_cal = protein_g * PROTEIN_KCAL_PER_G
 
-    carb_ratio = carb_cal / macro_cal
-    fat_ratio  = fat_cal  / macro_cal
+    total_cal = carb_cal + fat_cal + protein_cal
 
+    if total_cal <= 0:
+        return {
+            "dominance": "balanced",
+            "carb_cal": 0.0,
+            "fat_cal": 0.0,
+            "protein_cal": 0.0,
+            "carb_ratio": 0.0,
+            "fat_ratio": 0.0,
+            "protein_ratio": 0.0,
+        }
+
+    carb_ratio = carb_cal / total_cal
+    fat_ratio  = fat_cal  / total_cal
+    protein_ratio = protein_cal / total_cal
+
+    # 🔥 dominance logic (ordered by impact)
     if carb_ratio >= CARB_DOMINANCE_THRESHOLD:
         dominance = "glucose"
     elif fat_ratio >= FAT_DOMINANCE_THRESHOLD:
         dominance = "cholesterol"
+    elif protein_ratio >= 0.5:
+        dominance = "protein"
     else:
         dominance = "balanced"
 
-    return {"dominance": dominance, "carb_cal": round(carb_cal, 2),
-            "fat_cal": round(fat_cal, 2), "carb_ratio": round(carb_ratio, 3),
-            "fat_ratio": round(fat_ratio, 3)}
-
+    return {
+        "dominance": dominance,
+        "carb_cal": round(carb_cal, 2),
+        "fat_cal": round(fat_cal, 2),
+        "protein_cal": round(protein_cal, 2),
+        "carb_ratio": round(carb_ratio, 3),
+        "fat_ratio": round(fat_ratio, 3),
+        "protein_ratio": round(protein_ratio, 3),
+    }
 
 def apply_macro_dominance_signal(scores: dict, dominance_info: dict) -> dict:
     adjusted = dict(scores)

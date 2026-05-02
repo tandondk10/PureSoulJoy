@@ -40,8 +40,9 @@ def assert_not_generic(chat):
         ("avocado toast",     {"cholesterol"},                                      True),
         ("butter and cheese", {"cholesterol"},                                      True),
         ("rice and dal",      {"glucose"},                                          True),
-        # chicken is FOOD_DATA-backed via synonym; salad unknown — gate still satisfied by chicken
-        ("chicken salad",     {"cholesterol", "balanced", "lifestyle", "glucose"},  True),
+        # chicken is FOOD_DATA-backed via synonym; salad unknown — gate satisfied by chicken
+        # domain can be protein (V2 food engine) or cholesterol/balanced/lifestyle/glucose (V1)
+        ("chicken salad",     {"cholesterol", "balanced", "lifestyle", "glucose", "protein"},  True),
 
         # Food + condition context
         ("pizza and coke. my A1C is 6.0",   {"glucose"},                True),
