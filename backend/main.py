@@ -19,9 +19,10 @@ from intervention_engine import get_intervention
 from context_patterns import detect_context_pattern
 from lever_mapping import CONTEXT_LEVERS, LEVER_ACTIONS, DEFAULT_LEVERS
 from utils.trace import create_trace_id
-from food_engine import SEED_FOOD_ITEMS, process_query, detect_foods, UNKNOWN_FOODS, classify_macro_confidence, FOOD_DATA, CURATED_HIGH_IMPACT_FOODS, INTERNAL_FOOD_BEHAVIOR
+from food_engine import SEED_FOOD_ITEMS, process_query, detect_foods, UNKNOWN_FOODS, classify_macro_confidence, FOOD_DATA, CURATED_HIGH_IMPACT_FOODS, INTERNAL_FOOD_BEHAVIOR, call_usda
 from typing import Optional, List
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "feedback.db")
 
@@ -41,10 +42,12 @@ TRACE_LEVEL = int(os.getenv("TRACE_LEVEL", "1"))
 TRACE_TARGETS = os.getenv("TRACE_TARGETS", "").split(",")
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
+USE_NEW_ROUTER = os.getenv("USE_NEW_ROUTER", "false").lower() == "true"
+
 print("TRACE_LEVEL:", TRACE_LEVEL)
 print("TRACE_TARGETS:", TRACE_TARGETS)
 print("DEBUGE:", DEBUG)
-
+print("USE_NEW_ROUTER :", USE_NEW_ROUTER)
 
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
@@ -2151,8 +2154,78 @@ def build_single_word_intent_response(q: str) -> Optional[dict]:
     }
 
 
+# ---------------- FOOD INTENT PROMPT ----------------
+def ask_food_intent():
+    message = "Analyze, improve, or build a better version — or say No to skip."
+    return {
+        "status": "success",
+        "chat": message,
+        "text": message,
+        "domain": "lifestyle",
+        "has_food": False,
+        "foods": [],
+        "context_domain": None,
+        "needs_clarification": True,
+        "unknown_foods": [],
+        "score": 50,
+    }
+
+
+# ---------------- EXIT MEAL FLOW DETECTOR ----------------
+def is_exit_meal_flow(query: str) -> bool:
+    if not query:
+        return False
+
+    q = query.lower().strip()
+
+    exit_terms = ["no", "nope", "nah", "skip", "cancel", "not now", "none"]
+    return q in exit_terms
+
+
+# ---------------- FOOD INTENT RESOLVER ----------------
+def resolve_food_intent(query: str):
+    if not query:
+        return None
+
+    q = query.lower().strip()
+
+    if q == "1":
+        return "analyze"
+    if q == "2":
+        return "improve"
+    if q == "3":
+        return "build"
+
+    analyze_terms = ["analyze", "analyse", "analysis", "review", "score", "rate", "evaluate"]
+    if any(term in q for term in analyze_terms):
+        return "analyze"
+
+    improve_terms = ["improve", "better", "fix", "upgrade", "make this better", "make it better"]
+    if any(term in q for term in improve_terms):
+        return "improve"
+
+    build_terms = ["build", "create", "plan", "make"]
+    meal_context_terms = ["meal", "food", "plate", "breakfast", "lunch", "dinner", "snack", "eating", "eat"]
+    if any(term in q for term in build_terms) and any(ctx in q for ctx in meal_context_terms):
+        return "build"
+
+    return None
+
+
 # ---------------- FOOD ENGINE RESPONSE ----------------
-def build_food_engine_response(query: str, food_result: dict = None, context_domain: str = None, truly_unknown: list = None) -> dict:
+def build_food_engine_response(
+    query: str,
+    food_result: dict = None,
+    context_domain: str = None,
+    truly_unknown: list = None,
+    matched_foods: list = None,
+    known_general_foods: list = None,
+    composite_foods: list = None,
+    api_confirmed_foods: list = None,
+) -> dict:
+
+    print("🔥 FOOD ENGINE CALLED")
+
     result = food_result if food_result is not None else process_query(query)
 
     domain = result.get("domain", "unknown")
@@ -2161,49 +2234,125 @@ def build_food_engine_response(query: str, food_result: dict = None, context_dom
     scores = result.get("scores", {})
     calories = result.get("meal_calories", 0.0)
 
-    # Check INTERNAL_FOOD_BEHAVIOR for deterministic curated messages (no LLM, no USDA)
-    first_internal = next(
-        (INTERNAL_FOOD_BEHAVIOR[f.lower().strip()] for f in foods if f.lower().strip() in INTERNAL_FOOD_BEHAVIOR),
-        None,
-    )
-    truly_unknown = truly_unknown or []
+    matched_foods       = matched_foods or []
+    known_general_foods = known_general_foods or []
+    composite_foods     = composite_foods or []
+    api_confirmed_foods = api_confirmed_foods or []
+
+    food_signal_exists = bool(matched_foods or known_general_foods or composite_foods or api_confirmed_foods)
+
+    upstream_unknowns = result.get("unknown_foods", [])
+    if truly_unknown is None:
+        truly_unknown = upstream_unknowns
+    else:
+        truly_unknown = truly_unknown or []
+
+    # HARD RULE: any food signal → never clarify
+    if food_signal_exists:
+        truly_unknown = []
+        result["unknown_foods"] = []
+
+    should_clarify = bool(truly_unknown)
+
+    print("🔥 FOOD ENGINE INPUT:", {
+        "matched": matched_foods,
+        "unknown": truly_unknown,
+        "should_clarify": should_clarify
+    })
+
     needs_clarification = False
 
+    # INTERNAL curated behavior
+    first_internal = next(
+        (
+            INTERNAL_FOOD_BEHAVIOR[f.lower().strip()]
+            for f in foods
+            if f.lower().strip() in INTERNAL_FOOD_BEHAVIOR
+        ),
+        None,
+    )
+
+    # ------------------------------------------------------------
+    # DOMAIN HANDLING
+    # ------------------------------------------------------------
     if domain == "unknown":
         message = "I could not identify a known food item in that meal yet."
         top_actions = ["improve_meal"]
         top_action_labels = ["Add or clarify food items"]
         title = "Unknown Meal"
+
     elif first_internal:
         domain = first_internal["domain"]
         base_message = first_internal["message"]
+
         if context_domain == "cholesterol":
             base_message += " Since cholesterol is your focus, also watch saturated fat and add fiber."
         elif context_domain == "bp":
             base_message += " Since blood pressure is your focus, also watch sodium."
-        if truly_unknown:
+
+        if should_clarify:
             message = build_mixed_food_clarification(base_message, truly_unknown)
             needs_clarification = True
         else:
             message = base_message
+
         top_actions = ["walk_10min_now"] if domain == "glucose" else ["add_fiber_next_meal"]
         top_action_labels = ["Walk 10 Minutes"] if domain == "glucose" else ["Add Fiber Next Meal"]
         title = domain.capitalize()
+
     elif domain == "glucose":
         top_actions = ["walk_10min_now"]
         top_action_labels = ["Walk 10 Minutes"]
         title = "Glucose"
-        message = build_macro_guidance_message(result, query, context_domain)
+
+        if should_clarify:
+            message = build_unknown_food_clarification(truly_unknown)
+            needs_clarification = True
+        else:
+            message = build_macro_guidance_message(result, query, context_domain)
+
     elif domain == "cholesterol":
         top_actions = ["add_fiber_next_meal"]
         top_action_labels = ["Add Fiber Next Meal"]
         title = "Cholesterol"
-        message = build_macro_guidance_message(result, query, context_domain)
+
+        if should_clarify:
+            message = build_unknown_food_clarification(truly_unknown)
+            needs_clarification = True
+        else:
+            message = build_macro_guidance_message(result, query, context_domain)
+
     else:
         top_actions = ["improve_meal"]
         top_action_labels = ["Improve Meal"]
         title = "Meal"
-        message = build_macro_guidance_message(result, query, context_domain)
+
+        if should_clarify:
+            message = build_unknown_food_clarification(truly_unknown)
+            needs_clarification = True
+        else:
+            message = build_macro_guidance_message(result, query, context_domain)
+
+    # Low-confidence path: general/API/composite food with unknown domain
+    if food_signal_exists and not matched_foods and domain == "unknown":
+        message = build_low_confidence_food_signal_message(
+            query,
+            known_general_foods=known_general_foods,
+            api_confirmed_foods=api_confirmed_foods,
+            composite_foods=composite_foods,
+        )
+        needs_clarification = False
+        truly_unknown = []
+
+    # HARD GUARDRAIL (cannot be overridden anywhere)
+    if food_signal_exists:
+        needs_clarification = False
+        truly_unknown = []
+
+    print("🔥 FINAL OUTPUT:", {
+        "needs_clarification": needs_clarification,
+        "unknown": truly_unknown
+    })
 
     return {
         "status": "success",
@@ -2228,6 +2377,9 @@ def build_food_engine_response(query: str, food_result: dict = None, context_dom
         "has_food": True,
         "food_engine": True,
         "foods": foods,
+        "known_general_foods": known_general_foods,
+        "composite_foods": composite_foods,
+        "api_confirmed_foods": api_confirmed_foods,
         "scores": scores,
         "meal_calories": calories,
         "nutrition": nutrition,
@@ -2270,7 +2422,6 @@ def build_food_engine_response(query: str, food_result: dict = None, context_dom
         },
     }
 
-
 def build_standard_text_response(
     message: str,
     domain: str = "lifestyle",
@@ -2308,6 +2459,144 @@ def ensure_response_contract(resp: dict, default_domain: str = "lifestyle") -> d
     return resp
 
 
+def normalize_final_response(resp: dict) -> dict:
+    """
+    Final outbound response contract normalizer.
+    - UI reads only chat/text for display text.
+    - UI reads only needs_clarification===true for clarification mode.
+    - message is always null (deprecated for UI rendering).
+    - unknown_foods is empty unless clarification is truly active.
+    """
+    if resp is None:
+        resp = {}
+
+    display_text = (
+        resp.get("chat")
+        or resp.get("text")
+        or resp.get("message")
+        or ""
+    )
+
+    needs_clarification = bool(resp.get("needs_clarification", False))
+    unknown_foods = resp.get("unknown_foods", []) if needs_clarification else []
+
+    return {
+        **resp,
+        "chat": display_text,
+        "text": display_text,
+        "message": None,
+        "needs_clarification": needs_clarification,
+        "unknown_foods": unknown_foods,
+    }
+
+
+# ---------------- FOOD CLASSIFICATION LAYERS ----------------
+
+KNOWN_GENERAL_FOODS: set = {
+    # proteins
+    "beef", "mutton", "lamb", "pork", "turkey", "fish", "tilapia",
+    "shrimp", "tuna",
+    # Indian / regional vegetables
+    "sag", "saag", "spinach", "palak", "okra", "bhindi", "turnip",
+    "shalgam", "eggplant", "brinjal", "baingan", "yam", "sweet potato",
+    # grains / carbs
+    "quinoa", "millet", "poha", "upma", "idli", "dosa",
+    # legumes / beans
+    "lentils", "chickpeas", "kidney beans", "black beans", "peas",
+}
+
+COMPOSITE_FOODS: set = {
+    "salad", "burger", "pizza", "sandwich", "wrap", "bowl",
+    "soup", "curry", "smoothie", "stew", "stir fry",
+}
+
+MAX_FOOD_API_VALIDATIONS = 2
+
+
+def _food_key(food: str) -> str:
+    return (food or "").lower().strip()
+
+
+def is_known_general_food(food: str) -> bool:
+    return _food_key(food) in KNOWN_GENERAL_FOODS
+
+
+def is_composite_food(food: str) -> bool:
+    return _food_key(food) in COMPOSITE_FOODS
+
+
+def is_valid_nutrition_api_food(food: str, data: dict) -> bool:
+    if not data:
+        return False
+
+    calories = float(data.get("calories", 0) or 0)
+    carbs    = float(data.get("carbs_g", 0) or 0)
+    protein  = float(data.get("protein_g", 0) or 0)
+    fat      = float(data.get("fat_g", 0) or 0)
+
+    has_macro_signal = calories > 0 or carbs > 0 or protein > 0 or fat > 0
+
+    return has_macro_signal
+
+
+def validate_food_with_nutrition_api(food: str) -> bool:
+    try:
+        data = call_usda(food)
+    except Exception as e:
+        if TRACE_LEVEL >= 1:
+            print(f"[FOOD_API_VALIDATE_ERROR] food={food!r} error={e}")
+        return False
+    return is_valid_nutrition_api_food(food, data or {})
+
+
+def validate_unresolved_foods_with_api(unresolved: list) -> list:
+    confirmed = []
+    seen: set = set()
+
+    for food in unresolved[:MAX_FOOD_API_VALIDATIONS]:
+        key = (food or "").lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            data = call_usda(food)
+            if is_valid_nutrition_api_food(food, data or {}):
+                confirmed.append(food)
+        except Exception as e:
+            if TRACE_LEVEL >= 1:
+                print(f"[USDA_ERROR] food={food!r} error={e}")
+
+    return confirmed
+
+
+def classify_local_food_token(food: str) -> str:
+    if is_trusted_food(food):
+        return "trusted_local"
+    if is_known_general_food(food):
+        return "known_general"
+    if is_composite_food(food):
+        return "composite"
+    return "unresolved"
+
+
+def build_low_confidence_food_signal_message(
+    query: str,
+    known_general_foods: list = None,
+    api_confirmed_foods: list = None,
+    composite_foods: list = None,
+) -> str:
+    foods = (known_general_foods or []) + (api_confirmed_foods or []) + (composite_foods or [])
+    label = ", ".join(foods[:3]) if foods else "this meal"
+    return (
+        f"I recognize {label} as food, but I do not have enough precise nutrition detail yet. "
+        "Use the simple rule: pair protein with fiber, keep added fats moderate, and use Build Meal "
+        "when you want a more accurate breakdown."
+    )
+
+
+# ---------------- FOOD TRUST GATE ----------------
+
 def is_trusted_food(food: str) -> bool:
     f = (food or "").lower().strip()
     return (
@@ -2329,48 +2618,82 @@ def build_mixed_food_clarification(known_message: str, unknown_foods: list) -> s
 
 
 def resolve_domain_and_context(query: str) -> dict:
-    """
-    Resolves final domain and optional context domain.
-
-    Contract:
-    - all_foods = parser/engine candidates (for visibility)
-    - matched_foods = FOOD_DATA-backed OR curated high-impact foods (trusted for routing)
-    - has_food = True ONLY when matched_foods is non-empty
-    """
     text_domain = detect_condition(query)
     food_result = process_query(query)
     all_foods = food_result.get("foods", []) or []
-    matched_foods = [f for f in all_foods if is_trusted_food(f)]
-    truly_unknown = [f for f in all_foods if not is_trusted_food(f)]
-    has_food = bool(matched_foods)  # unchanged: only trusted foods count
+
+    matched_foods      = []
+    known_general_foods = []
+    composite_foods    = []
+    unresolved_foods   = []
+
+    for f in all_foods:
+        kind = classify_local_food_token(f)
+        if kind == "trusted_local":
+            matched_foods.append(f)
+        elif kind == "known_general":
+            known_general_foods.append(f)
+        elif kind == "composite":
+            composite_foods.append(f)
+        else:
+            unresolved_foods.append(f)
+
+    # USDA is a fallback validator only.
+    # If local classification found any food signal, do not call USDA.
+    # Never reject food locally unless USDA also fails.
+    api_confirmed_foods = []
+    should_call_usda = (
+        len(matched_foods) == 0
+        and len(known_general_foods) == 0
+        and len(composite_foods) == 0
+        and len(unresolved_foods) > 0
+    )
+
+    if should_call_usda:
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[USDA_CALL] local_food_signal=False "
+                f"unresolved_foods={unresolved_foods!r}"
+            )
+        api_confirmed_foods = validate_unresolved_foods_with_api(unresolved_foods)
+    else:
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[USDA_SKIP] local_food_signal=True "
+                f"matched={matched_foods!r} "
+                f"known_general={known_general_foods!r} "
+                f"composite={composite_foods!r} "
+                f"unresolved={unresolved_foods!r}"
+            )
+
+    truly_unknown = [f for f in unresolved_foods if f not in api_confirmed_foods]
+
+    has_food = bool(matched_foods or known_general_foods or composite_foods or api_confirmed_foods)
 
     if TRACE_LEVEL >= 1:
         print(
             f"[DOMAIN_RESOLVE] query={query!r} "
             f"all_foods={all_foods!r} matched_foods={matched_foods!r} "
+            f"known_general_foods={known_general_foods!r} "
+            f"composite_foods={composite_foods!r} "
+            f"unresolved_foods={unresolved_foods!r} "
+            f"api_confirmed_foods={api_confirmed_foods!r} "
             f"truly_unknown={truly_unknown!r} "
-            f"has_food={has_food} text_domain={text_domain!r}"
+            f"has_food={has_food} should_call_usda={should_call_usda} "
+            f"text_domain={text_domain!r}"
         )
 
-    if has_food:
-        return {
-            "has_food": True,
-            "foods": all_foods,
-            "matched_foods": matched_foods,
-            "truly_unknown": truly_unknown,
-            "food_result": food_result,
-            "domain": food_result.get("domain", "unknown"),
-            "context_domain": text_domain,
-            "text_domain": text_domain,
-        }
     return {
-        "has_food": False,
-        "foods": [],
-        "matched_foods": [],
+        "has_food": has_food,
+        "foods": all_foods,
+        "matched_foods": matched_foods,
+        "known_general_foods": known_general_foods,
+        "composite_foods": composite_foods,
+        "api_confirmed_foods": api_confirmed_foods,
         "truly_unknown": truly_unknown,
-        "food_result": None,
-        "domain": text_domain,
-        "context_domain": None,
+        "food_result": food_result if has_food else None,
+        "domain": food_result.get("domain", text_domain) if has_food else text_domain,
+        "context_domain": text_domain if has_food else None,
         "text_domain": text_domain,
     }
 
@@ -2403,19 +2726,58 @@ async def build_response(query: str, lite: bool):
 
         # ── FOOD ENGINE ROUTING ──────────────────────────────────────────────
         routing = resolve_domain_and_context(q)
+        print("🔥 ROUTING DECISION", {
+            "has_food": routing.get("has_food"),
+            "truly_unknown": routing.get("truly_unknown"),
+        })
+        
         if routing.get("has_food"):
+
+            # ✅ FIX: read from routing (NOT food_result)
+            matched = routing.get("matched_foods", [])
+            unknown = routing.get("truly_unknown", [])
+
             if TRACE_LEVEL >= 1:
                 print(
                     f"[{now_iso()}][{trace_id_var.get()}] FOOD_ENGINE_ROUTE "
-                    f"query={q!r} matched_foods={routing.get('matched_foods')!r} "
-                    f"route='food_engine' context_domain={routing.get('context_domain')!r}"
+                    f"query={q!r} matched={matched!r} unknown={unknown!r} "
+                    f"context_domain={routing.get('context_domain')!r}"
                 )
-            return build_food_engine_response(
-                q,
-                food_result=routing.get("food_result"),
-                context_domain=routing.get("context_domain"),
-            )
 
+            # 🔴 ONLY when NOTHING matched → clarify
+            if unknown and not matched:
+                if TRACE_LEVEL >= 1:
+                    print(f"[{now_iso()}][{trace_id_var.get()}] CLARIFICATION_TRIGGERED")
+
+                return _inject_trace(
+                    ensure_response_contract(
+                        {
+                            "status": "success",
+                            "message": build_unknown_food_clarification(unknown),
+                            "needs_clarification": True,
+                            "clarification_type": "unknown_food",
+                            "unknown_foods": unknown,
+                            "cleaned_query": None,
+                            "tts_text": None,
+                            "audio": None,
+                            "score": 0,
+                        },
+                        default_domain="lifestyle",
+                    )
+                )
+
+            # ✅ OTHERWISE → ALWAYS go to food engine
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] ROUTING_TO_FOOD_ENGINE")
+
+            return _inject_trace(
+                build_food_engine_response(
+                    query=q,
+                    food_result=routing.get("food_result"),
+                    context_domain=routing.get("context_domain"),
+                    truly_unknown=unknown,  # keep signal — engine will handle it
+                )
+            )
         # ✅ normalization for matching
         q_norm = q.lower().replace("-", " ")
 
@@ -3006,16 +3368,10 @@ async def normalize_food_items(req: NormalizeRequest):
 
 
 # ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
-@app.post("/query")
-async def handle_query(request: Request):
+async def existing_main_flow(request: Request):
     """
-    Single endpoint for both voice and keyboard input.
-
-    Voice path:   multipart/form-data with audio_file field
-                  Runs Whisper → validate (A→B→C→D) → LLM → TTS → returns audio
-
-    Keyboard path: application/json with {query, voice: false}
-                   Runs LLM only → audio is always null
+    Extracted V1 /query flow.
+    This function must preserve current behavior exactly.
     """
 
     incoming_trace_id = request.headers.get("x-trace-id")
@@ -3146,6 +3502,7 @@ async def handle_query(request: Request):
                 # ✅ SAME CONTRACT AS KEYBOARD
                 "text": text,
                 "chat": result.get("chat", text),
+                "query": query,
                 "score": score,
                 "domain": intent.get("domain"),
                 "need": intent.get("need"),
@@ -3161,6 +3518,7 @@ async def handle_query(request: Request):
                 "meal_calories": result.get("meal_calories", 0.0),
                 "nutrition": result.get("nutrition", {}),
                 # voice only
+                "cleaned_query": query,
                 "tts_text": tts_text if audio else None,
                 "audio": audio,
             }
@@ -3212,31 +3570,50 @@ async def handle_query(request: Request):
         # Routing is the single source of truth for food detection.
         # Run before the single-word guard so food queries are never blocked.
         kb_routing = resolve_domain_and_context(query)
-        if kb_routing.get("has_food"):
+
+        # --------------------------------------------------
+        # ONLY skip food routing when V2 is active
+        # --------------------------------------------------
+        if not USE_NEW_ROUTER and kb_routing.get("has_food"):
             food_resp = build_food_engine_response(
                 query,
                 food_result=kb_routing.get("food_result"),
                 context_domain=kb_routing.get("context_domain"),
                 truly_unknown=kb_routing.get("truly_unknown"),
             )
-            return _inject_trace(ensure_response_contract(food_resp, default_domain=food_resp.get("domain", "lifestyle")))
-
-        elif kb_routing.get("truly_unknown"):
-            clarification_msg = build_unknown_food_clarification(kb_routing["truly_unknown"])
             return _inject_trace(
                 ensure_response_contract(
-                    {
-                        "status": "success",
-                        "message": clarification_msg,
-                        "needs_clarification": True,
-                        "clarification_type": "unknown_food",
-                        "unknown_foods": kb_routing["truly_unknown"],
-                        "cleaned_query": None,
-                        "tts_text": None,
-                        "audio": None,
-                        "score": 0,
-                    },
-                    default_domain=kb_routing.get("domain", "lifestyle"),
+                    food_resp,
+                    default_domain=food_resp.get("domain", "lifestyle"),
+                )
+            )
+
+        # --------------------------------------------------
+        # UNKNOWN FOOD — ALWAYS HANDLE (even in V2)
+        # --------------------------------------------------
+        # --------------------------------------------------
+# UNKNOWN FOOD — ONLY when NOTHING matched
+# --------------------------------------------------
+        if kb_routing.get("truly_unknown") and not kb_routing.get("matched_foods"):
+            clarification_msg = build_unknown_food_clarification(
+                kb_routing["truly_unknown"]
+            )
+            return _inject_trace(
+                normalize_final_response(
+                    ensure_response_contract(
+                        {
+                            "status": "success",
+                            "message": clarification_msg,
+                            "needs_clarification": True,
+                            "clarification_type": "unknown_food",
+                            "unknown_foods": kb_routing["truly_unknown"],
+                            "cleaned_query": None,
+                            "tts_text": None,
+                            "audio": None,
+                            "score": 0,
+                        },
+                        default_domain=kb_routing.get("domain", "lifestyle"),
+                    )
                 )
             )
 
@@ -3319,36 +3696,152 @@ async def handle_query(request: Request):
             }
 
         return _inject_trace(
-            {
-                "status": "success",
-                # ✅ SINGLE SOURCE OF TRUTH
-                "text": text,
-                "chat": result.get("chat", text),
-                # ❌ REMOVE "message" (or keep temporarily for backward compatibility)
-                # "message": text,
-                "cleaned_query": None,
-                "tts_text": None,
-                "audio": None,
-                "score": score,
-                "domain": intent.get("domain"),
-                "need": intent.get("need"),
-                "lever": intent.get("lever"),
-                "sub_lever": intent.get("sub_lever"),
-                "intent": intent,
-                # unified pipeline outputs
-                "screen": screen,
-                "structured": result.get("structured", {}),
-                # food engine fields (present only when routed through food engine)
-                "has_food": result.get("has_food", False),
-                "food_engine": result.get("food_engine", False),
-                "foods": result.get("foods", []),
-                "scores": result.get("scores", {}),
-                "meal_calories": result.get("meal_calories", 0.0),
-                "nutrition": result.get("nutrition", {}),
-                "context_domain": result.get("context_domain"),
-                "macro_dominance": result.get("macro_dominance", {}),
-                "macro_totals": result.get("macro_totals", {}),
-                "needs_clarification": result.get("needs_clarification", False),
-                "unknown_foods": result.get("unknown_foods", []),
-            }
+            normalize_final_response(
+                {
+                    "status": "success",
+                    "text": text,
+                    "chat": result.get("chat", text),
+                    "query": query,
+                    "cleaned_query": None,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": score,
+                    "domain": intent.get("domain"),
+                    "need": intent.get("need"),
+                    "lever": intent.get("lever"),
+                    "sub_lever": intent.get("sub_lever"),
+                    "intent": intent,
+                    "screen": screen,
+                    "structured": result.get("structured", {}),
+                    "has_food": result.get("has_food", False),
+                    "food_engine": result.get("food_engine", False),
+                    "foods": result.get("foods", []),
+                    "scores": result.get("scores", {}),
+                    "meal_calories": result.get("meal_calories", 0.0),
+                    "nutrition": result.get("nutrition", {}),
+                    "context_domain": result.get("context_domain"),
+                    "macro_dominance": result.get("macro_dominance", {}),
+                    "macro_totals": result.get("macro_totals", {}),
+                    "needs_clarification": result.get("needs_clarification", False),
+                    "unknown_foods": result.get("unknown_foods", []),
+                }
+            )
         )
+
+
+class SessionState:
+    def __init__(self):
+        self.pending_meal = False
+        self.last_food_query = None
+
+
+STATE = SessionState()
+
+
+async def route_query_v1(request: Request):
+    return await existing_main_flow(request)
+
+
+async def route_query_v2(request: Request):
+
+    try:
+        content_type = request.headers.get("content-type", "")
+
+        if content_type.startswith("application/json"):
+            body = await request.json()
+            query = body.get("query", "") or ""
+        else:
+            return await existing_main_flow(request)
+
+    except Exception:
+        return await existing_main_flow(request)
+
+    # ------------------------------------------------------------
+    # Step 1 — FOOD (deterministic)
+    # ------------------------------------------------------------
+    routing = resolve_domain_and_context(query)
+
+    matched      = routing.get("matched_foods", [])
+    known_general = routing.get("known_general_foods", [])
+    composite    = routing.get("composite_foods", [])
+    api_confirmed = routing.get("api_confirmed_foods", [])
+    unknown      = routing.get("truly_unknown", [])
+
+    food_signal_exists = bool(matched or known_general or composite or api_confirmed)
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[{now_iso()}][{trace_id_var.get()}] V2 FOOD ROUTE "
+            f"matched={matched!r} known_general={known_general!r} "
+            f"composite={composite!r} api_confirmed={api_confirmed!r} unknown={unknown!r}"
+        )
+
+    # Clarification only when no food signal exists at all
+    if unknown and not food_signal_exists:
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] V2 CLARIFICATION")
+
+        return _inject_trace(
+            normalize_final_response(
+                ensure_response_contract(
+                    {
+                        "status": "success",
+                        "message": build_unknown_food_clarification(unknown),
+                        "needs_clarification": True,
+                        "clarification_type": "unknown_food",
+                        "unknown_foods": unknown,
+                        "has_food": False,
+                        "foods": [],
+                        "score": 0,
+                    },
+                    default_domain="lifestyle",
+                )
+            )
+        )
+
+    if routing.get("has_food"):
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] V2 → FOOD ENGINE")
+
+        return _inject_trace(
+            normalize_final_response(
+                ensure_response_contract(
+                    build_food_engine_response(
+                        query=query,
+                        food_result=routing.get("food_result"),
+                        context_domain=routing.get("context_domain"),
+                        truly_unknown=unknown,
+                        matched_foods=matched,
+                        known_general_foods=known_general,
+                        composite_foods=composite,
+                        api_confirmed_foods=api_confirmed,
+                    ),
+                    default_domain="lifestyle",
+                )
+            )
+        )
+
+    # NON-FOOD → fallback
+    return await existing_main_flow(request)
+
+async def route_query(request: Request):
+    if USE_NEW_ROUTER:
+        print("🔥 V2 HIT")
+        return await route_query_v2(request)
+    else:
+        print("🔥 V1 HIT")
+        return await route_query_v1(request)
+
+
+@app.post("/query")
+async def handle_query(request: Request):
+    """
+    Single endpoint for both voice and keyboard input.
+
+    Voice path:   multipart/form-data with audio_file field
+                  Runs Whisper → validate (A→B→C→D) → LLM → TTS → returns audio
+
+    Keyboard path: application/json with {query, voice: false}
+                   Runs LLM only → audio is always null
+    """
+    return await route_query(request)

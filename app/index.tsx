@@ -4,6 +4,7 @@ import useKeyboardVisible from "@/hooks/useKeyboardVisible";
 //import { loadUser, saveUser } from "@/utils/storage";
 import { loadUser } from "@/utils/storage";
 import { Audio } from "expo-av";
+import * as Speech from "expo-speech";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -29,6 +30,31 @@ import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/
 import { normalizeQuery, parseMealItems } from "./utils/mealParser";
 
 const BACKEND_URL = "http://192.168.40.138:8000";
+
+const MEAL_ACTION_SELECTION_TEXT = "What would you like to do?";
+
+const NOT_IMPLEMENTED_ACTION_IDS = [
+  "improve_meal", "walk_10min_now", "track_metrics",
+  "add_fiber_next_meal", "reduce_sat_fat",
+];
+const NOT_IMPLEMENTED_ACTION_LABELS = [
+  "improve meal", "walk 10 minutes", "track metrics",
+  "add fiber next meal", "walk 10min now",
+];
+const isNotImplementedAction = (value: string): boolean => {
+  const s = value.trim().toLowerCase();
+  return NOT_IMPLEMENTED_ACTION_IDS.some(id => s === id) ||
+    NOT_IMPLEMENTED_ACTION_LABELS.some(label => s === label);
+};
+const buildMealActionTitle = (meal: string | null) =>
+  meal ? `Work on this meal: ${meal}?` : "Work on this meal?";
+const MEAL_ACTION_OPTIONS = [
+  { id: "analyze", label: "Analyze" },
+  { id: "improve", label: "Improve" },
+  { id: "build", label: "Build" },
+  { id: "none", label: "None" },
+] as const;
+type MealActionId = typeof MEAL_ACTION_OPTIONS[number]["id"];
 
 
 // Voice thresholds — all configurable, no hardcoded values per spec §2.1
@@ -80,6 +106,7 @@ export default function HomeScreen() {
   const [litePromptShown, setLitePromptShown] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("IDLE");
   const [statusText, setStatusText] = useState<string | null>(null);
+  const [statusMode, setStatusMode] = useState<"NONE" | "MEAL_ACTION_SELECTION">("NONE");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
 
@@ -127,7 +154,8 @@ export default function HomeScreen() {
     if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 🧠 Routing intent:`, intent);
 
     if (intent === "glucose") {
-      setStatusText("Do you want to analyze a meal?");
+      setStatusMode("MEAL_ACTION_SELECTION");
+      setStatusText(MEAL_ACTION_SELECTION_TEXT);
       return;
     }
 
@@ -220,8 +248,27 @@ export default function HomeScreen() {
     }
   };
 
+  const stopAllAudio = async () => {
+    try {
+      Speech.stop();
+
+      if (activeSoundRef.current) {
+        try {
+          await activeSoundRef.current.stopAsync();
+          await activeSoundRef.current.unloadAsync();
+        } catch { }
+
+        activeSoundRef.current = null; // 🔥 critical
+      }
+    } catch (e) {
+      console.warn("STOP_AUDIO_FAILED", e);
+    } finally {
+      updateVoiceState("IDLE");
+    }
+  };
+
   const playAudio = async (base64: string) => {
-    await stopAnyPlayback();
+    await stopAllAudio();
 
     try {
       await Audio.setAudioModeAsync({
@@ -230,7 +277,8 @@ export default function HomeScreen() {
       });
 
       if (!base64 || typeof base64 !== "string" || base64.length < 50) {
-        if (TRACE_LEVEL >= 1) console.warn(`[${nowISO()}][no-trace] [playAudio] invalid base64 — text-only fallback`);
+        if (TRACE_LEVEL >= 1)
+          console.warn(`[${nowISO()}][no-trace] [playAudio] invalid base64 — text-only fallback`);
         updateVoiceState("IDLE");
         setStatusText(null);
         return;
@@ -244,39 +292,49 @@ export default function HomeScreen() {
       setStatusText("Playing response...");
 
       sound.setOnPlaybackStatusUpdate((status) => {
-        if (!(status as any).didJustFinish) return;
+        if (!status.isLoaded) return;
 
-        if (activeSoundRef.current === sound) {
-          activeSoundRef.current = null;
-          sound.setOnPlaybackStatusUpdate(null);
-          sound.unloadAsync().catch(() => { });
-          updateVoiceState("IDLE");
-          setStatusText(null);
+        if (status.didJustFinish) {
+          if (activeSoundRef.current === sound) {
+            activeSoundRef.current = null;
+
+            sound.setOnPlaybackStatusUpdate(null);
+            sound.unloadAsync().catch(() => { });
+
+            updateVoiceState("IDLE");
+            setStatusText(null);
+          }
         }
       });
 
+      // 🔥 THIS WAS MISSING OR MISPLACED
       await sound.playAsync();
-    } catch (err) {
-      if (TRACE_LEVEL >= 1) console.error(`[${nowISO()}][no-trace] [playAudio] load/play error:`, err);
 
-      const s = activeSoundRef.current;
-      activeSoundRef.current = null;
-
-      if (s) {
-        try {
-          s.setOnPlaybackStatusUpdate(null);
-          await s.unloadAsync();
-        } catch { }
-      }
-
+    } catch (e) {
+      console.warn("PLAY_AUDIO_FAILED", e);
       updateVoiceState("IDLE");
       setStatusText(null);
     }
   };
 
+  const speakLocalPrompt = async (text: string) => {
+    try {
+      if (!text || !text.trim()) { updateVoiceState("IDLE"); return; }
+      Speech.stop();
+      updateVoiceState("PLAYING");
+      await new Promise<void>((resolve) => {
+        let resolved = false;
+        const finish = () => { if (resolved) return; resolved = true; updateVoiceState("IDLE"); resolve(); };
+        Speech.speak(text, { rate: 0.92, pitch: 1.0, onDone: finish, onStopped: finish, onError: finish });
+      });
+    } catch (e) { console.warn("LOCAL_TTS_FAILED", e); updateVoiceState("IDLE"); }
+  };
+
   // ─── Voice query ─────────────────────────────────────────────────────────
 
   const sendVoiceQuery = async (uri: string, isMaxDuration: boolean) => {
+    await stopAllAudio();
+
     const traceId = createTraceId();
     const t0 = traceStart(traceId, "sendVoiceQuery", TRACE_LEVEL);
     logTrace(traceId, "VOICE_START");
@@ -370,10 +428,13 @@ export default function HomeScreen() {
 
       logTrace(traceId, "API_RESPONSE", data);
 
-      const cleanedQuery =
-        typeof data.cleaned_query === "string" && data.cleaned_query.trim()
-          ? data.cleaned_query
-          : "Voice input";
+      const cleanedQuery = (() => {
+        const candidate =
+          (typeof data.cleaned_query === "string" ? data.cleaned_query.trim() : "") ||
+          (typeof data.query === "string" ? data.query.trim() : "") ||
+          (typeof data.transcript === "string" ? data.transcript.trim() : "");
+        return candidate || "Voice Input";
+      })();
 
       console.log("FULL RESPONSE:", JSON.stringify(data));
       console.log("CHAT:", data.chat);
@@ -381,13 +442,11 @@ export default function HomeScreen() {
       console.log("MESSAGE:", data.message);
 
       const text =
-        (typeof data.chat === "string" && data.chat.trim())
+        (typeof data.chat === "string" && data.chat.trim().length > 0)
           ? data.chat
-          : (typeof data.text === "string" && data.text.trim())
+          : (typeof data.text === "string" && data.text.trim().length > 0)
             ? data.text
-            : (typeof data.message === "string" && data.message.trim())
-              ? data.message
-              : "No response received.";
+            : "No response received.";
 
       if (!text || text.trim() === "") {
         console.warn("Empty response", data);
@@ -405,6 +464,60 @@ export default function HomeScreen() {
         setStatusText("Say your question clearly… I’m listening.");
         updateVoiceState("IDLE");
         return;
+      }
+
+      // 🔥 VOICE MEAL GATE — same UX as keyboard raw meal gate.
+      // Buttons only. Do NOT map spoken one/two/three/four to actions.
+      console.log("VOICE CLEANED:", cleanedQuery);
+      console.log("VOICE MEAL GATE INPUT:", {
+        cleanedQuery,
+        mealLike: looksLikeMeal(cleanedQuery),
+        words: cleanedQuery.trim().split(/\s+/).filter(Boolean),
+      });
+
+      const voiceWords = cleanedQuery.trim().split(/\s+/).filter(Boolean);
+      const voiceMealLike = looksLikeMeal(cleanedQuery);
+      const voiceIsQuestion =
+        cleanedQuery.includes("?") ||
+        /^(what|how|why|when|where|is|are|can|should|could|would|do|does|will)\b/i.test(cleanedQuery.trim());
+      const voiceIsShort = voiceWords.length <= 4;
+
+      if (voiceMealLike && voiceIsShort && !voiceIsQuestion) {
+        console.log("🔥 VOICE MEAL DETECTED:", {
+          cleanedQuery,
+          voiceWords,
+          voiceMealLike,
+          voiceIsShort,
+          voiceIsQuestion,
+        });
+
+        setMessages(prev =>
+          prev.filter(m => m.id !== userMsgId && m.id !== assistantMsgId)
+        );
+
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `${Date.now()}-user`,
+            role: "user" as const,
+            text: cleanedQuery,
+            source: "voice" as const,
+            status: "complete" as const,
+          },
+        ]);
+
+        setInput("");
+        setPendingMeal(cleanedQuery);
+        setStatusMode("MEAL_ACTION_SELECTION");
+        setStatusText(null);
+
+        const mealPromptText =
+          `${buildMealActionTitle(cleanedQuery)} ` +
+          `Analyze, Improve, Build, or None.`;
+        if (TRACE_LEVEL >= 1) console.log("🔊 VOICE MEAL LOCAL TTS:", mealPromptText);
+        await speakLocalPrompt(mealPromptText);
+
+        return; // CRITICAL: prevents backend response from rendering
       }
 
       // Check if transcript is a voice intent response to the previous message
@@ -506,7 +619,7 @@ export default function HomeScreen() {
 
   // ─── Keyboard query ───────────────────────────────────────────────────────
 
-  const sendKeyboardQuery = async (query: string, traceId: string, raw?: string) => {
+  const sendKeyboardQuery = async (query: string, traceId: string, raw?: string, showUserBubble: boolean = true) => {
     const t0 = traceStart(traceId, "sendKeyboardQuery", TRACE_LEVEL);
     const displayText = raw ?? query;
     // 🔒 Debounce (FIRST)
@@ -549,8 +662,8 @@ export default function HomeScreen() {
     logTrace(traceId, "UI_UPDATE_START");
     setMessages((prev) => [
       ...prev,
-      { id: userMsgId, role: "user", text: displayText, source: "text", status: "complete" },
-      { id: assistantMsgId, role: "assistant", text: "", source: "text", status: "loading" },
+      ...(showUserBubble ? [{ id: userMsgId, role: "user" as const, text: displayText, source: "text" as const, status: "complete" as const }] : []),
+      { id: assistantMsgId, role: "assistant" as const, text: "", source: "text" as const, status: "loading" as const },
     ]);
     logTrace(traceId, "UI_UPDATE_DONE");
 
@@ -627,9 +740,7 @@ export default function HomeScreen() {
           ? data.chat
           : (typeof data.text === "string" && data.text.trim().length > 0)
             ? data.text
-            : (typeof data.message === "string" && data.message.trim().length > 0)
-              ? data.message
-              : "No response received.";
+            : "No response received.";
 
       if (!text || text.trim() === "") {
         console.warn("Empty response", data);
@@ -684,6 +795,7 @@ export default function HomeScreen() {
 
       updateVoiceState("IDLE");
       setStatusText(null);
+      return data;
 
     } catch (err: any) {
       logTrace(traceId, "ERROR", err?.message);
@@ -694,7 +806,7 @@ export default function HomeScreen() {
 
       if (discardResponseRef.current) {
         discardResponseRef.current = false;
-        return;
+        return null;
       }
 
       const message =
@@ -716,6 +828,7 @@ export default function HomeScreen() {
       setTimeout(() => {
         setStatusText((cur) => (cur === message ? null : cur));
       }, 4000);
+      return null;
     } finally {
       traceEnd(traceId, "sendKeyboardQuery", t0, TRACE_LEVEL);
     }
@@ -818,6 +931,8 @@ export default function HomeScreen() {
 
   // isMeteringEnabled: true required for silence detection — spec §13.1
   const startRecording = async () => {
+    await stopAllAudio();
+
     try {
       if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 🎤 START pressed`);
 
@@ -888,6 +1003,15 @@ export default function HomeScreen() {
 
   // ─── Input handlers ───────────────────────────────────────────────────────
 
+  const handleStopPlayback = async () => {
+    if (TRACE_LEVEL >= 1) {
+      console.log(`[${nowISO()}][no-trace] 🔇 STOP playback pressed`);
+    }
+    await stopAllAudio();
+    updateVoiceState("IDLE");
+    setStatusText(null);
+  };
+
   const handleMicPress = async () => {
     if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 🎤 MIC PRESSED, state:`, voiceStateRef.current);
 
@@ -931,10 +1055,43 @@ export default function HomeScreen() {
     const foodWords = [
       "rice", "dal", "roti", "chapati", "bread", "egg", "eggs",
       "chicken", "fish", "paneer", "tofu", "beans", "lentils",
-      "salad", "vegetable", "sabzi", "saag", "curry", "oats",
-      "idli", "dosa", "banana", "apple",
+      "salad", "vegetable", "sabzi", "sag", "saag", "curry", "oats",
+      "idli", "dosa", "banana", "apple", "beef", "mutton", "spinach",
+      "okra", "turnip", "brinjal", "eggplant",
     ];
     return foodWords.some(w => lower.includes(w));
+  };
+
+  const handleMealActionSelection = async (action: MealActionId) => {
+    if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] MEAL_ACTION_SELECTED:`, action);
+
+    setStatusMode("NONE");
+    setStatusText(null);
+
+    if (action === "none") {
+      const raw = pendingMeal;
+      setPendingMeal(null);
+      setStatusMode("NONE");
+      setStatusText(null);
+      setInput("");
+
+      if (raw) {
+        const parsed = parseMealItems(raw).join(", ");
+        const traceId = createTraceId();
+        logTrace(traceId, "KEYBOARD_FALLTHROUGH", parsed);
+        const data = await sendKeyboardQuery(parsed, traceId, undefined, false);
+        const speechText = data?.tts_text || data?.chat || data?.text || "";
+        if (speechText) { await speakLocalPrompt(speechText); }
+      }
+
+      return;
+    }
+
+    if (!pendingMeal) return;
+
+    const parsed = parseMealItems(pendingMeal).join(", ");
+    navigatedToMealRef.current = true;
+    router.push(`/meal-main?prefill=${encodeURIComponent(parsed)}&action=${action}`);
   };
 
   const handleSendPress = () => {
@@ -943,16 +1100,37 @@ export default function HomeScreen() {
     const query = input.trim();
     if (!query) return;
 
-    // 🔥 STEP 1 — detect meal BEFORE API
-    if (looksLikeMeal(query)) {
-      setPendingMeal(query);
-      setStatusText("Do you want to analyze a meal?");
-
-      // ❌ DO NOT clear input here
+    // Safety guard: 1–4 no longer maps to actions — do not send to backend
+    if (/^[1-4]$/.test(query)) {
+      setInput("");
+      setStatusText("Tap an option");
       return;
     }
 
-    // 🔥 STEP 2 — normal flow
+    // 🔥 STEP 1 — detect raw meal entry BEFORE API (questions bypass this gate)
+    const words = query.trim().split(/\s+/).filter(Boolean);
+    const mealLike = looksLikeMeal(query);
+    const isQuestion =
+      query.includes("?") ||
+      /^(what|how|why|when|where|is|are|can|should|could|would|do|does|will)\b/i.test(query.trim());
+    const isShort = words.length <= 4;
+    const isSingleFood = words.length === 1 && mealLike;
+
+    if ((mealLike && isShort && !isQuestion) || isSingleFood) {
+      setMessages(prev => [
+        ...prev,
+        { id: `${Date.now()}-user`, role: "user", text: query, status: "complete" },
+      ]);
+      setInput("");
+      setPendingMeal(query);
+      setStatusMode("MEAL_ACTION_SELECTION");
+      return;
+    }
+
+    // 🔥 STEP 2 — normal flow: reset any stale action-selection state
+    setStatusMode("NONE");
+    setStatusText(null);
+
     const traceId = createTraceId();
     logTrace(traceId, "KEYBOARD_START", query);
 
@@ -1382,27 +1560,34 @@ export default function HomeScreen() {
                             What's next?
                           </Text>
                           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                            {msg.nextActionCodes.map((code, idx) => (
-                              <TouchableOpacity
-                                key={code}
-                                onPress={() => {
-                                  const newTraceId = createTraceId();
-                                  sendKeyboardQuery(code, newTraceId);
-                                }}
-                                style={{
-                                  paddingHorizontal: 14,
-                                  paddingVertical: 7,
-                                  borderRadius: 20,
-                                  borderWidth: 1,
-                                  borderColor: "#2D3748",
-                                  backgroundColor: C.surface,
-                                }}
-                              >
-                                <Text style={{ color: C.text, fontSize: 13 }}>
-                                  {msg.nextActionLabels?.[idx] ?? code.replace(/_/g, " ")}
-                                </Text>
-                              </TouchableOpacity>
-                            ))}
+                            {msg.nextActionCodes.map((code, idx) => {
+                              const disabled = isNotImplementedAction(code);
+                              return (
+                                <TouchableOpacity
+                                  key={code}
+                                  disabled={disabled}
+                                  activeOpacity={disabled ? 1 : 0.82}
+                                  onPress={() => {
+                                    if (disabled) return;
+                                    const newTraceId = createTraceId();
+                                    sendKeyboardQuery(code, newTraceId);
+                                  }}
+                                  style={{
+                                    paddingHorizontal: 14,
+                                    paddingVertical: 7,
+                                    borderRadius: 20,
+                                    borderWidth: 1,
+                                    borderColor: "#2D3748",
+                                    backgroundColor: C.surface,
+                                    opacity: disabled ? 0.4 : 1,
+                                  }}
+                                >
+                                  <Text style={{ color: C.text, fontSize: 13, opacity: disabled ? 0.7 : 1 }}>
+                                    {msg.nextActionLabels?.[idx] ?? code.replace(/_/g, " ")}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
                           </View>
                         </View>
                       )}
@@ -1410,8 +1595,8 @@ export default function HomeScreen() {
                 ))}
               </ScrollView>
 
-              {/* STATUS */}
-              {statusText && (
+              {/* Generic status text — hidden during action selection */}
+              {statusText && statusMode !== "MEAL_ACTION_SELECTION" && (
                 <View style={{ alignItems: "center", paddingVertical: 6 }}>
                   <Text
                     style={{
@@ -1421,66 +1606,26 @@ export default function HomeScreen() {
                   >
                     {statusText}
                   </Text>
+                </View>
+              )}
 
-                  {/* 🔥 NEW: Action buttons for routing */}
-                  {statusText === "Do you want to analyze a meal?" && (
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        justifyContent: "center",
-                        marginTop: 8,
-                      }}
-                    >
+              {/* Meal action selection UI — sibling, never nested */}
+              {statusMode === "MEAL_ACTION_SELECTION" && (
+                <View style={styles.mealActionContainer}>
+                  <Text style={styles.mealActionTitle}>{buildMealActionTitle(pendingMeal)}</Text>
+                  <Text style={styles.mealActionHint}>Tap an option</Text>
+                  <View style={styles.mealActionGrid}>
+                    {MEAL_ACTION_OPTIONS.map((option) => (
                       <TouchableOpacity
-                        onPress={() => {
-                          if (!pendingMeal) return;
-
-                          setStatusText(null);
-                          navigatedToMealRef.current = true;
-
-                          const parsed = parseMealItems(pendingMeal).join(", ");
-                          router.push(
-                            `/meal-main?prefill=${encodeURIComponent(parsed)}`
-                          );
-                        }}
-                        style={{
-                          backgroundColor: C.accent,
-                          paddingHorizontal: 16,
-                          paddingVertical: 8,
-                          borderRadius: 10,
-                          marginRight: 8,
-                        }}
+                        key={option.id}
+                        style={styles.mealActionButton}
+                        onPress={() => handleMealActionSelection(option.id)}
+                        activeOpacity={0.82}
                       >
-                        <Text style={{ color: "#000", fontWeight: "600" }}>
-                          Yes
-                        </Text>
+                        <Text style={styles.mealActionButtonText}>{option.label}</Text>
                       </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={() => {
-                          const raw = pendingMeal;
-                          setStatusText(null);
-                          setPendingMeal(null);
-                          if (raw) {
-                            const parsed = parseMealItems(raw).join(", ");
-                            const traceId = createTraceId();
-                            logTrace(traceId, "KEYBOARD_START", parsed);
-                            sendKeyboardQuery(parsed, traceId, raw);
-                          }
-                        }}
-                        style={{
-                          backgroundColor: "#1E2A38",
-                          paddingHorizontal: 16,
-                          paddingVertical: 8,
-                          borderRadius: 10
-                        }}
-                      >
-                        <Text style={{ color: "#FFFFFF", fontWeight: "500" }}>
-                          No
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                  )}
+                    ))}
+                  </View>
                 </View>
               )}
 
@@ -1536,26 +1681,34 @@ export default function HomeScreen() {
                   returnKeyType="send"
                 />
 
-                <TouchableOpacity
-                  onPress={handleMicPress}
-                  disabled={isProcessing}
-                  style={{
-                    marginRight: 8,
-                    paddingHorizontal: 10,
-                    paddingVertical: 10,
-                    borderRadius: 10,
-                    backgroundColor: isRecording
-                      ? C.recordingRed
-                      : C.surfaceAlt,
-                    opacity: isProcessing ? 0.5 : 1,
-                  }}
-                >
-                  <Text style={{ color: C.text }}>
-                    {voiceState === "RECORDING" || voiceState === "PLAYING"
-                      ? "⏹"
-                      : "🎤"}
-                  </Text>
-                </TouchableOpacity>
+                {voiceState === "PLAYING" ? (
+                  <TouchableOpacity
+                    onPress={handleStopPlayback}
+                    style={styles.stopVoiceButton}
+                    activeOpacity={0.82}
+                  >
+                    <Text style={styles.stopVoiceButtonText}>Stop</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    onPress={handleMicPress}
+                    disabled={isProcessing}
+                    style={{
+                      marginRight: 8,
+                      paddingHorizontal: 10,
+                      paddingVertical: 10,
+                      borderRadius: 10,
+                      backgroundColor: isRecording
+                        ? C.recordingRed
+                        : C.surfaceAlt,
+                      opacity: isProcessing ? 0.5 : 1,
+                    }}
+                  >
+                    <Text style={{ color: C.text }}>
+                      {voiceState === "RECORDING" ? "⏹" : "🎤"}
+                    </Text>
+                  </TouchableOpacity>
+                )}
 
                 <TouchableOpacity
                   disabled={isProcessing}
@@ -1581,6 +1734,51 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  mealActionContainer: {
+    marginTop: 8,
+    marginHorizontal: 24,
+    padding: 10,
+    borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  mealActionTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: C.text,
+    marginBottom: 6,
+    textAlign: "center",
+  },
+  mealActionHint: {
+    fontSize: 13,
+    color: C.text,
+    opacity: 0.7,
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  mealActionGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+  },
+  mealActionButton: {
+    minWidth: 130,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  mealActionButtonText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: C.text,
+    textAlign: "center",
+  },
   container: {
     flex: 1,
     backgroundColor: C.background,
@@ -1621,5 +1819,21 @@ const styles = StyleSheet.create({
   error: {
     color: "red",
     marginBottom: 10,
+  },
+  stopVoiceButton: {
+    marginRight: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stopVoiceButtonText: {
+    color: C.text,
+    fontSize: 14,
+    fontWeight: "700",
   },
 });
