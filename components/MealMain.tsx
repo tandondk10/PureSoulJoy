@@ -12,10 +12,11 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  View
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -57,6 +58,74 @@ type MealResult = {
   nextMeal: string;
   lastMealGuidance?: string | null;
 };
+
+// ─── Active Meal Card Types ───────────────────────────────────────────────────
+
+type MealDomain = "glucose" | "cholesterol" | "bp" | "lifestyle" | "unknown";
+
+type MealAction = {
+  id?: string;
+  title: string;
+  detail?: string;
+  priority?: number;
+};
+
+type ActiveMealRecord = {
+  traceId: string;
+  query: string;
+  message: string;
+  cleanedQuery?: string;
+  detectedFoods?: string[];
+  domain?: MealDomain;
+  score?: number;
+  actions?: MealAction[];
+  createdAt: string;
+  source?: "keyboard" | "voice";
+};
+
+type ActiveMealHistoryItem = ActiveMealRecord;
+
+function normalizeMealRecord(args: {
+  query: string;
+  source: "keyboard" | "voice";
+  traceId: string;
+  response: any;
+}): ActiveMealRecord {
+  const { query, source, traceId, response } = args;
+  return {
+    traceId,
+    query,
+    source,
+    message:
+      response?.chat ??
+      response?.message ??
+      response?.tts_text ??
+      "I analyzed the meal, but no response message was returned.",
+    cleanedQuery: response?.cleaned_query,
+    detectedFoods:
+      response?.detected_foods ??
+      response?.foods ??
+      response?.score?.detected_foods ??
+      [],
+    domain:
+      response?.domain ??
+      response?.score?.domain ??
+      response?.score?.primary_domain ??
+      "unknown",
+    score:
+      typeof response?.score === "number"
+        ? response.score
+        : typeof response?.score?.value === "number"
+          ? response.score.value
+          : undefined,
+    actions:
+      response?.actions ??
+      response?.top_actions ??
+      response?.score?.actions ??
+      [],
+    createdAt: new Date().toISOString(),
+  };
+}
 
 // ─── Food Database ────────────────────────────────────────────────────────────
 
@@ -984,6 +1053,12 @@ export default function MealMain() {
   const [mealResult, setMealResult] = useState<MealResult | null>(null);
   const [improvements, setImprovements] = useState<string[]>([]);
 
+  // Active meal card state
+  const [activeMealResult, setActiveMealResult] = useState<ActiveMealRecord | null>(null);
+  const [mealHistory, setMealHistory] = useState<ActiveMealHistoryItem[]>([]);
+  const [isMealLoading, setIsMealLoading] = useState(false);
+  const [mealError, setMealError] = useState<string | null>(null);
+
   // 🔥 3. REFS
   const handledPrefillRef = useRef<string | null>(null);
   const handledImageRef = useRef<string | null>(null);
@@ -1153,37 +1228,71 @@ export default function MealMain() {
     setStage("result");
   };
 
+  function replaceActiveMealResult(next: ActiveMealRecord) {
+    setActiveMealResult(prev => {
+      if (prev && prev.message !== "Analyzing your meal...") {
+        setMealHistory(history => [prev, ...history]);
+      }
+      return next;
+    });
+  }
+
+  const submitMealQuery = async (query: string, source: "keyboard" | "voice" = "keyboard") => {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) return;
+
+    const traceId = `meal-${Date.now()}`;
+
+    setMealError(null);
+    setIsMealLoading(true);
+
+    replaceActiveMealResult({
+      traceId,
+      query: trimmedQuery,
+      source,
+      message: "Analyzing your meal...",
+      createdAt: new Date().toISOString(),
+    });
+
+    const apiBase = process.env.EXPO_PUBLIC_API_URL ?? "";
+
+    try {
+      const res = await fetch(`${apiBase}/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Trace-Id": traceId,
+        },
+        body: JSON.stringify({
+          query: trimmedQuery,
+          voice: false,
+          lite: true,
+          traceId,
+        }),
+      });
+
+      if (!res.ok) throw new Error(`Meal query failed: ${res.status}`);
+
+      const data = await res.json();
+
+      const normalized = normalizeMealRecord({ query: trimmedQuery, source, traceId, response: data });
+      setActiveMealResult(normalized);
+    } catch (err: any) {
+      const message = err?.message ?? "Meal query failed.";
+      setMealError(message);
+      setActiveMealResult(prev =>
+        prev ? { ...prev, message: "I could not analyze this meal. Please try again." } : null
+      );
+    } finally {
+      setIsMealLoading(false);
+    }
+  };
+
   const handleBottomSend = () => {
     const text = bottomInput.trim();
     if (!text) return;
-
-    console.log("👉 INPUT:", text);
-
-    const segments = parseMealItems(text);
-    if (segments.length === 0) {
-      setMicStatus("Couldn't understand meal. Try again.");
-      return;
-    }
-
-    // clear old result state and any stale image
-    handledImageRef.current = null;
-    setImageUri(null);
-    setNutritionSummary(null);
-    setMealResult(null);
-    setImprovements([]);
-
-    const items: MealItem[] = segments.map((seg, i) => ({
-      id: `${Date.now()}-${i}`,
-      name: seg.trim(),
-      inferred: false,
-    }));
-
-    console.log("UI items:", items.map((it) => it.name));
-
-    setMealItems(items);
-    setRawMealQuery(text);
-    setStage("confirm");
     setBottomInput("");
+    void submitMealQuery(text, "keyboard");
   };
 
   return (
@@ -1195,55 +1304,61 @@ export default function MealMain() {
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
       >
-        {/*<TouchableWithoutFeedback onPress={Keyboard.dismiss}>*/}
         <View style={{ flex: 1, backgroundColor: C.bg }}>
 
-          {/* ✅ HEADER (NON-SCROLLING) */}
-          {(() => {
-            const STAGE_HEADER: Record<Stage, { title: string; subtitle: string }> = {
-              capture: { title: "Describe your meal", subtitle: "Get instant insight before or after you eat" },
-              confirm: { title: "Review your meal", subtitle: "Adjust anything before analysis" },
-              processing: { title: "Analyzing your meal", subtitle: "Calculating impact and next steps" },
-              result: { title: "Meal Impact", subtitle: "Here's what to do next" },
-            };
-            const { title, subtitle } = STAGE_HEADER[stage];
-            return (
-              <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
-                <Text style={{ color: C.text, fontSize: 22, fontWeight: "700", marginBottom: 4 }}>
-                  {title}
-                </Text>
-                <Text style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>
-                  {subtitle}
-                </Text>
-              </View>
-            );
-          })()}
+          {/* ─── PINNED TOP AREA ─────────────────────────────────── */}
+          <View style={mealStyles.topPinnedArea}>
 
-          {/* ✅ SCROLL CONTENT ONLY */}
+            {/* Stage header — only shown during confirm/processing/result */}
+            {(stage === "confirm" || stage === "processing" || stage === "result") && (() => {
+              const STAGE_HEADER: Record<Stage, { title: string; subtitle: string }> = {
+                capture: { title: "Describe your meal", subtitle: "Get instant insight before or after you eat" },
+                confirm: { title: "Review your meal", subtitle: "Adjust anything before analysis" },
+                processing: { title: "Analyzing your meal", subtitle: "Calculating impact and next steps" },
+                result: { title: "Meal Impact", subtitle: "Here's what to do next" },
+              };
+              const { title, subtitle } = STAGE_HEADER[stage];
+              return (
+                <View style={{ paddingBottom: 8 }}>
+                  <Text style={{ color: C.text, fontSize: 20, fontWeight: "700", marginBottom: 2 }}>
+                    {title}
+                  </Text>
+                  <Text style={{ color: C.muted, fontSize: 12 }}>{subtitle}</Text>
+                </View>
+              );
+            })()}
+
+            {/* Active meal result card — pinned, always visible */}
+            <ActiveMealResultCard
+              result={activeMealResult}
+              loading={isMealLoading}
+              error={mealError}
+            />
+          </View>
+
+          {/* ─── SCROLLABLE AREA ─────────────────────────────────── */}
           <ScrollView
             ref={scrollRef}
+            style={mealStyles.historyScroll}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
-            contentContainerStyle={{
-              paddingHorizontal: 16,
-              paddingBottom: 120,
-            }}
+            contentContainerStyle={mealStyles.historyContent}
           >
-
-            {/* CAPTURE */}
-            {stage === "capture" && (
-              <Text
-                style={{
-                  color: C.muted,
-                  textAlign: "center",
-                  marginTop: 20,
+            {/* CONFIRM stage — review items before local analysis */}
+            {stage === "confirm" && (
+              <ConfirmStage
+                items={mealItems}
+                onChange={setMealItems}
+                onConfirm={() => {
+                  scrollRef.current?.scrollTo({ y: 0, animated: false });
+                  setStage("processing");
+                  void runMealProcessing(mealItems, rawMealQuery);
                 }}
-              >
-                Enter your meal or describe it…
-              </Text>
+                confirmLabel={imageUri ? "Analyze Photo" : "Analyze Meal"}
+              />
             )}
 
-            {/* PROCESSING (photo) */}
+            {/* PROCESSING (photo/manual) */}
             {stage === "processing" && (
               <View style={{ alignItems: "center", marginTop: 40 }}>
                 {imageUri && (
@@ -1260,27 +1375,14 @@ export default function MealMain() {
               </View>
             )}
 
-            {/* ✅ CONFIRM */}
-            {stage === "confirm" && (
-              <ConfirmStage
-                items={mealItems}
-                onChange={setMealItems}
-                onConfirm={() => { scrollRef.current?.scrollTo({ y: 0, animated: false }); setStage("processing"); void runMealProcessing(mealItems, rawMealQuery); }}
-                confirmLabel={imageUri ? "Analyze Photo" : "Analyze Meal"}
-              />
-            )}
-
-            {/* RESULT */}
+            {/* RESULT stage (local analysis — from Analyze/Improve/Build path) */}
             {stage === "result" && nutritionSummary && mealResult && (
               <>
                 <SectionCard
                   title="Your Meal"
                   content={
                     mealResult?.items?.length > 0
-                      ? mealResult.items
-                        .map(formatMealItemDisplay)
-                        .filter(Boolean)
-                        .join(", ")
+                      ? mealResult.items.map(formatMealItemDisplay).filter(Boolean).join(", ")
                       : "Meal not available"
                   }
                 />
@@ -1290,21 +1392,13 @@ export default function MealMain() {
                     `• ${(mealResult as any)?.sequence}\n` +
                     `• ${(mealResult as any)?.walk}\n` +
                     `• ${(mealResult as any)?.nextMeal}` +
-                    ((mealResult as any)?.lastMealGuidance
-                      ? `\n• ${(mealResult as any)?.lastMealGuidance}`
-                      : "")
+                    ((mealResult as any)?.lastMealGuidance ? `\n• ${(mealResult as any)?.lastMealGuidance}` : "")
                   }
                 />
                 {(() => {
                   const n = backendNutrition;
                   const content = n
-                    ? `Carbs: ${n.carbs_g.toFixed(1)}g\n` +
-                      `Protein: ${n.protein_g.toFixed(1)}g\n` +
-                      `Fat: ${n.fat_g.toFixed(1)}g\n` +
-                      `Saturated Fat: ${n.sat_fat_g.toFixed(1)}g\n` +
-                      `Fiber: ${n.fiber_g.toFixed(1)}g\n` +
-                      `  • Soluble: ${n.soluble_fiber_g.toFixed(1)}g\n` +
-                      `  • Insoluble: ${n.insoluble_fiber_g.toFixed(1)}g`
+                    ? `Carbs: ${n.carbs_g.toFixed(1)}g\nProtein: ${n.protein_g.toFixed(1)}g\nFat: ${n.fat_g.toFixed(1)}g\nSaturated Fat: ${n.sat_fat_g.toFixed(1)}g\nFiber: ${n.fiber_g.toFixed(1)}g\n  • Soluble: ${n.soluble_fiber_g.toFixed(1)}g\n  • Insoluble: ${n.insoluble_fiber_g.toFixed(1)}g`
                     : "Nutrition data unavailable";
                   return <SectionCard title="Nutrition Summary" content={content} />;
                 })()}
@@ -1312,12 +1406,7 @@ export default function MealMain() {
                   const r = mealResult;
                   const weightLabel = r.classification === "light" ? "Light"
                     : r.classification === "heavy" ? "Heavy" : "Very Heavy";
-                  return (
-                    <SectionCard
-                      title="Meal Impact"
-                      content={`${weightLabel} meal • ${r.glucoseImpact} glucose impact`}
-                    />
-                  );
+                  return <SectionCard title="Meal Impact" content={`${weightLabel} meal • ${r.glucoseImpact} glucose impact`} />;
                 })()}
                 {(mealResult.classification === "light" || mealResult.highSolubleFiber) && (
                   <SectionCard
@@ -1332,10 +1421,7 @@ export default function MealMain() {
                   />
                 )}
                 {improvements.length > 0 && (
-                  <SectionCard
-                    title="Improvements"
-                    content={improvements.map((s) => `• ${s}`).join("\n")}
-                  />
+                  <SectionCard title="Improvements" content={improvements.map((s) => `• ${s}`).join("\n")} />
                 )}
                 <SectionCard
                   title="Meal Score"
@@ -1343,6 +1429,9 @@ export default function MealMain() {
                 />
               </>
             )}
+
+            {/* History — previous backend meal checks */}
+            <MealHistoryList history={mealHistory} />
 
           </ScrollView>
 
@@ -1467,3 +1556,214 @@ export default function MealMain() {
     </SafeAreaView>
   );
 }
+
+// ─── Active Meal Result Card ──────────────────────────────────────────────────
+
+function ActiveMealResultCard({
+  result,
+  loading,
+  error,
+}: {
+  result: ActiveMealRecord | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (!result && !loading && !error) {
+    return (
+      <View style={mealStyles.emptyMealCard}>
+        <Text style={mealStyles.emptyMealTitle}>Ask about your meal</Text>
+        <Text style={mealStyles.emptyMealText}>
+          Enter what you ate and I'll show the likely glucose/cholesterol impact and top actions.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={mealStyles.activeMealCard}>
+      <Text style={mealStyles.activeMealLabel}>Current meal</Text>
+
+      {result?.query ? (
+        <Text style={mealStyles.activeMealQuery}>{result.query}</Text>
+      ) : null}
+
+      {loading ? (
+        <Text style={mealStyles.activeMealLoading}>Analyzing...</Text>
+      ) : null}
+
+      {error ? (
+        <Text style={mealStyles.activeMealError}>{error}</Text>
+      ) : null}
+
+      {result?.message && result.message !== "Analyzing your meal..." ? (
+        <Text style={mealStyles.activeMealMessage}>{result.message}</Text>
+      ) : null}
+
+      {result?.detectedFoods?.length ? (
+        <Text style={mealStyles.activeMealMeta}>
+          Foods: {result.detectedFoods.join(", ")}
+        </Text>
+      ) : null}
+
+      {result?.domain && result.domain !== "unknown" ? (
+        <Text style={mealStyles.activeMealMeta}>Focus: {result.domain}</Text>
+      ) : null}
+
+      {result?.actions?.length ? (
+        <View style={mealStyles.actionList}>
+          {result.actions.slice(0, 3).map((action, index) => (
+            <Text
+              key={action.id ?? `${action.title}-${index}`}
+              style={mealStyles.actionItem}
+            >
+              {index + 1}. {action.title}
+              {action.detail ? ` — ${action.detail}` : ""}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// ─── Meal History List ────────────────────────────────────────────────────────
+
+function MealHistoryList({ history }: { history: ActiveMealHistoryItem[] }) {
+  if (!history.length) return null;
+
+  return (
+    <View style={mealStyles.historySection}>
+      <Text style={mealStyles.historyTitle}>Previous meal checks</Text>
+      {history.map(item => (
+        <View key={item.traceId} style={mealStyles.historyItem}>
+          <Text style={mealStyles.historyQuery}>{item.query}</Text>
+          <Text numberOfLines={2} style={mealStyles.historyMessage}>
+            {item.message}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ─── Meal Card Styles ─────────────────────────────────────────────────────────
+
+const mealStyles = StyleSheet.create({
+  topPinnedArea: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 10,
+    backgroundColor: C.bg,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+  },
+  activeMealCard: {
+    marginTop: 8,
+    padding: 14,
+    borderRadius: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    shadowColor: "#000",
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+  },
+  emptyMealCard: {
+    marginTop: 8,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: C.surfaceAlt,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  emptyMealTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: C.text,
+  },
+  emptyMealText: {
+    marginTop: 4,
+    fontSize: 13,
+    color: C.muted,
+    lineHeight: 19,
+  },
+  activeMealLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: C.muted,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  activeMealQuery: {
+    marginTop: 4,
+    fontSize: 15,
+    fontWeight: "700",
+    color: C.text,
+  },
+  activeMealLoading: {
+    marginTop: 6,
+    fontSize: 13,
+    color: C.muted,
+  },
+  activeMealError: {
+    marginTop: 6,
+    fontSize: 13,
+    color: C.error,
+  },
+  activeMealMessage: {
+    marginTop: 8,
+    fontSize: 14,
+    lineHeight: 21,
+    color: C.text,
+  },
+  activeMealMeta: {
+    marginTop: 6,
+    fontSize: 12,
+    color: C.muted,
+  },
+  actionList: {
+    marginTop: 8,
+  },
+  actionItem: {
+    fontSize: 13,
+    lineHeight: 20,
+    color: C.text,
+  },
+  historyScroll: {
+    flex: 1,
+  },
+  historyContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 32,
+  },
+  historySection: {
+    marginTop: 16,
+  },
+  historyTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: C.muted,
+    marginBottom: 8,
+  },
+  historyItem: {
+    padding: 12,
+    marginBottom: 10,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  historyQuery: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: C.text,
+  },
+  historyMessage: {
+    marginTop: 4,
+    fontSize: 12,
+    color: C.muted,
+    lineHeight: 17,
+  },
+});

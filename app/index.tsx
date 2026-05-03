@@ -26,6 +26,7 @@ import { useUser } from "@/context/UserContext";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { getNormalizedUser } from "../utils/normalizeUser";
 import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
 import { normalizeQuery, parseMealItems } from "./utils/mealParser";
 
@@ -115,7 +116,7 @@ export default function HomeScreen() {
   const router = useRouter();
   const { user, setUser } = useUser();
   const [checkingUser, setCheckingUser] = useState(true);
-  const [pendingMeal, setPendingMeal] = useState<string | null>(null);
+  const [pendingMeal, setPendingMeal] = useState<PendingMeal | null>(null);
   const [pendingMealTraceId, setPendingMealTraceId] = useState<string | null>(null);
 
   // other refs and state...
@@ -708,6 +709,7 @@ export default function HomeScreen() {
     try {
       if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query keyboard`);
       logTrace(traceId, "API_REQUEST_BODY", { query, voice: false, hasUserProfile: !!(user) });
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-trace-id": traceId },
@@ -715,11 +717,21 @@ export default function HomeScreen() {
           query,
           voice: false,
           lite: liteMode === true,
-          user_profile: user ?? {},
+          user_profile: getNormalizedUser(user),
           traceId,
 
           // 🔥 ADD THIS
-          pending_meal: pendingMeal || null
+          pending_meal: pendingMeal
+            ? typeof pendingMeal === "string"
+              ? {
+                items: [pendingMeal],
+                estimated_carbs: null
+              }
+              : {
+                items: pendingMeal.items ?? [],
+                estimated_carbs: pendingMeal.estimated_carbs ?? null
+              }
+            : null
         }),
         signal: controller.signal,
       });

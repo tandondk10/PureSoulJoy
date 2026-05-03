@@ -3993,6 +3993,10 @@ async def route_query_v2(request: Request):
         if is_none_meal_flow(query):
             stored_query = STATE.last_food_query
 
+            # 🔥 FIX HERE
+            if isinstance(stored_query, dict):
+                stored_query = " ".join(stored_query.get("items", []))
+
             if TRACE_LEVEL >= 2:
                 print(f"[{now_iso()}][{trace_id_var.get()}] TS9_ROUTE_TO_LLM stored_query={stored_query!r}")
 
@@ -4038,6 +4042,11 @@ async def route_query_v2(request: Request):
 
             STATE.pending_meal = False
             STATE.last_food_query = None
+
+            stored_query = STATE.last_food_query
+
+            if isinstance(stored_query, dict):
+                stored_query = " ".join(stored_query.get("items", []))
 
             return await run_llm_flow(stored_query, body, request)
 
