@@ -10,7 +10,7 @@ import asyncio
 import base64
 import difflib
 import sqlite3
-
+import json
 
 from litellm import completion
 from dotenv import load_dotenv
@@ -19,7 +19,7 @@ from intervention_engine import get_intervention
 from context_patterns import detect_context_pattern
 from lever_mapping import CONTEXT_LEVERS, LEVER_ACTIONS, DEFAULT_LEVERS
 from utils.trace import create_trace_id
-from food_engine import SEED_FOOD_ITEMS, process_query, detect_foods, UNKNOWN_FOODS, classify_macro_confidence, FOOD_DATA, CURATED_HIGH_IMPACT_FOODS, INTERNAL_FOOD_BEHAVIOR, call_usda
+from food_engine import SEED_FOOD_ITEMS, process_query, detect_foods, UNKNOWN_FOODS, classify_macro_confidence, FOOD_DATA, CURATED_HIGH_IMPACT_FOODS, INTERNAL_FOOD_BEHAVIOR, call_usda, STOPWORDS
 from typing import Optional, List
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
@@ -806,6 +806,12 @@ FOOD_WORDS = {
     "yogurt",
 }
 
+STOP_WORDS = {
+    "i", "ate", "had", "eat", "eating",
+    "is", "was", "are", "am",
+    "the", "a", "an",
+    "and", "with", "just",
+}
 
 def is_single_food_phrase(q: str) -> bool:
     words = q.lower().split()
@@ -2171,15 +2177,30 @@ def ask_food_intent():
     }
 
 
-# ---------------- EXIT MEAL FLOW DETECTOR ----------------
-def is_exit_meal_flow(query: str) -> bool:
+# ---------------- CANCEL MEAL FLOW DETECTOR ----------------
+def is_cancel_meal_flow(query: str) -> bool:
     if not query:
         return False
 
-    q = query.lower().strip()
+    q = query.strip().lower()
+    result = q in ["cancel", "no", "nope", "nah", "skip", "not now"]
 
-    exit_terms = ["no", "nope", "nah", "skip", "cancel", "not now", "none"]
-    return q in exit_terms
+    print("DEBUG CANCEL CHECK:", q, result)
+
+    return result
+
+
+# ---------------- NONE MEAL FLOW DETECTOR ----------------
+def is_none_meal_flow(query: str) -> bool:
+    if not query:
+        return False
+
+    q = query.strip().lower()
+    result = q == "none"
+
+    print("DEBUG NONE CHECK:", q, result)
+
+    return result
 
 
 # ---------------- FOOD INTENT RESOLVER ----------------
@@ -2206,10 +2227,111 @@ def resolve_food_intent(query: str):
 
     build_terms = ["build", "create", "plan", "make"]
     meal_context_terms = ["meal", "food", "plate", "breakfast", "lunch", "dinner", "snack", "eating", "eat"]
-    if any(term in q for term in build_terms) and any(ctx in q for ctx in meal_context_terms):
+    if any(term in q for term in build_terms):
         return "build"
 
     return None
+def route_food_intent(intent: str, query: str, food_result: dict, state):
+    if intent == "analyze":
+        return existing_main_flow(
+            query=query,
+            voice=False,
+            user_profile=None,
+            traceId=None,
+            audio_file=None,
+        )
+
+    if intent == "improve":
+        return existing_main_flow(
+            query=query,
+            voice=False,
+            user_profile=None,
+            traceId=None,
+            audio_file=None,
+        )
+
+    if intent == "build":
+        return existing_main_flow(
+            query=query,
+            voice=False,
+            user_profile=None,
+            traceId=None,
+            audio_file=None,
+        )
+
+    return {
+        "status": "success",
+        "chat": "Unable to process request.",
+        "text": "Unable to process request.",
+        "domain": "lifestyle",
+        "has_food": False,
+        "foods": [],
+        "context_domain": None,
+        "needs_clarification": False,
+        "unknown_foods": [],
+        "score": 50,
+    }
+
+# ---------------- FOOD FLOW V2 ----------------
+def handle_food_flow_v2(query: str, food_result: dict):
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_ENTER query={query!r}")
+
+    # Step 1: detect intent
+    intent = resolve_food_intent(query)
+
+    if TRACE_LEVEL >= 2:
+        print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_INTENT intent={intent!r}")
+
+    # Step 2: if intent exists → stub (temporary)
+    # Step 2: if intent exists → route via TS10
+    if intent:
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_ROUTE intent={intent!r}")
+
+        # 🔥 ANALYZE → go to food engine directly
+        if intent == "analyze":
+            return build_food_engine_response(
+                query=query,
+                food_result=food_result.get("food_result"),
+                context_domain=food_result.get("context_domain"),
+            )
+
+        # 🔥 IMPROVE → deterministic response (no LLM)
+        if intent == "improve":
+            return {
+                "status": "success",
+                "chat": "Add protein or fiber to improve this meal.",
+                "text": "Add protein or fiber to improve this meal.",
+                "domain": "lifestyle",
+            }
+
+        # 🔥 BUILD → future flow (keep simple for now)
+        if intent == "build":
+            return {
+                "status": "success",
+                "chat": "Let’s build a better meal. What are your preferences?",
+                "text": "Let’s build a better meal. What are your preferences?",
+                "domain": "lifestyle",
+            }
+
+    # Step 3: no intent → ask user
+    STATE.pending_meal = True
+    STATE.retry_used = False
+    STATE.last_food_query = query
+    STATE.last_food_result = food_result
+    print("🔥 STATE SET:", {
+        "pending": STATE.pending_meal,
+        "query": STATE.last_food_query
+    })
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_SET_STATE "
+            f"pending=True last_food_query={query!r}"
+        )
+
+    return ask_food_intent()
 
 
 # ---------------- FOOD ENGINE RESPONSE ----------------
@@ -2228,16 +2350,29 @@ def build_food_engine_response(
 
     result = food_result if food_result is not None else process_query(query)
 
-    domain = result.get("domain", "unknown")
+    raw_domain = result.get("domain", "unknown")
+    # Map food_engine domain → system domain
+    if raw_domain in ["glucose", "cholesterol", "bp"]:
+        domain = raw_domain
+    else:
+        domain = "lifestyle"
+        
     foods = result.get("foods", [])
     nutrition = result.get("nutrition", {})
     scores = result.get("scores", {})
     calories = result.get("meal_calories", 0.0)
 
-    matched_foods       = matched_foods or []
-    known_general_foods = known_general_foods or []
-    composite_foods     = composite_foods or []
-    api_confirmed_foods = api_confirmed_foods or []
+    matched_foods = result.get("foods", [])
+    known_general_foods = []
+    composite_foods = []
+    api_confirmed_foods = []
+    
+    print("DEBUG RECEIVED:", {
+        "matched": matched_foods,
+        "known_general": known_general_foods,
+        "composite": composite_foods,
+        "api": api_confirmed_foods
+    })
 
     food_signal_exists = bool(matched_foods or known_general_foods or composite_foods or api_confirmed_foods)
 
@@ -2617,16 +2752,47 @@ def build_mixed_food_clarification(known_message: str, unknown_foods: list) -> s
     return known_message + " " + build_unknown_food_clarification(unknown_foods)
 
 
+def filter_real_unknown_foods(unknowns: list) -> list:
+    result = []
+    for item in unknowns or []:
+        key = (item or "").lower().strip()
+        if not key:
+            continue
+        if key in STOPWORDS:
+            continue
+        result.append(item)
+    return list(dict.fromkeys(result))
+
+
+def build_mixed_known_unknown_food_clarification(
+    known_foods: list,
+    unknown_foods: list,
+) -> str:
+    known_label = ", ".join(known_foods[:3]) if known_foods else "part of your meal"
+    unknown_label = ", ".join(unknown_foods[:2])
+    return (
+        f"I recognize {known_label}, but I don't want to guess on {unknown_label}. "
+        "Was it mostly carbs like rice/bread, protein like chicken/paneer, fat like cheese/oil, or vegetables?"
+    )
+
+
 def resolve_domain_and_context(query: str) -> dict:
     text_domain = detect_condition(query)
     food_result = process_query(query)
-    all_foods = food_result.get("foods", []) or []
+    raw_foods = food_result.get("foods", []) or []
 
-    matched_foods      = []
+    # 🔥 CLEAN ONCE (dedupe only)
+    all_foods = [
+        f for f in dict.fromkeys(raw_foods)
+        if isinstance(f, str) and f.strip()
+    ]
+
+    matched_foods       = []
     known_general_foods = []
-    composite_foods    = []
-    unresolved_foods   = []
+    composite_foods     = []
+    unresolved_foods    = []
 
+    # 🔥 CLASSIFY FIRST (correct order)
     for f in all_foods:
         kind = classify_local_food_token(f)
         if kind == "trusted_local":
@@ -2638,54 +2804,65 @@ def resolve_domain_and_context(query: str) -> dict:
         else:
             unresolved_foods.append(f)
 
-    # USDA is a fallback validator only.
-    # If local classification found any food signal, do not call USDA.
-    # Never reject food locally unless USDA also fails.
+    local_food_signal = bool(matched_foods or known_general_foods or composite_foods)
+
+    # USDA fallback only if NO local signal
     api_confirmed_foods = []
     should_call_usda = (
-        len(matched_foods) == 0
-        and len(known_general_foods) == 0
-        and len(composite_foods) == 0
+        not local_food_signal
         and len(unresolved_foods) > 0
     )
 
     if should_call_usda:
         if TRACE_LEVEL >= 1:
             print(
-                f"[USDA_CALL] local_food_signal=False "
+                f"[USDA_CALL] local_food_signal={local_food_signal} "
                 f"unresolved_foods={unresolved_foods!r}"
             )
         api_confirmed_foods = validate_unresolved_foods_with_api(unresolved_foods)
     else:
         if TRACE_LEVEL >= 1:
             print(
-                f"[USDA_SKIP] local_food_signal=True "
+                f"[USDA_SKIP] local_food_signal={local_food_signal} "
                 f"matched={matched_foods!r} "
                 f"known_general={known_general_foods!r} "
                 f"composite={composite_foods!r} "
                 f"unresolved={unresolved_foods!r}"
             )
 
-    truly_unknown = [f for f in unresolved_foods if f not in api_confirmed_foods]
+    truly_unknown = [
+        f for f in unresolved_foods
+        if f not in api_confirmed_foods
+    ]
 
-    has_food = bool(matched_foods or known_general_foods or composite_foods or api_confirmed_foods)
+    # api_confirmed_foods are real foods — include them in final set.
+    final_foods = matched_foods + known_general_foods + composite_foods + api_confirmed_foods
+    food_result["foods"] = final_foods
+
+    has_food = bool(final_foods)
+    high_confidence_food = bool(matched_foods)
 
     if TRACE_LEVEL >= 1:
         print(
             f"[DOMAIN_RESOLVE] query={query!r} "
-            f"all_foods={all_foods!r} matched_foods={matched_foods!r} "
+            f"all_foods={all_foods!r} "
+            f"final_foods={final_foods!r} "
+            f"matched_foods={matched_foods!r} "
             f"known_general_foods={known_general_foods!r} "
             f"composite_foods={composite_foods!r} "
             f"unresolved_foods={unresolved_foods!r} "
             f"api_confirmed_foods={api_confirmed_foods!r} "
             f"truly_unknown={truly_unknown!r} "
-            f"has_food={has_food} should_call_usda={should_call_usda} "
+            f"has_food={has_food} "
+            f"high_confidence_food={high_confidence_food} "
+            f"should_call_usda={should_call_usda} "
             f"text_domain={text_domain!r}"
         )
 
     return {
         "has_food": has_food,
-        "foods": all_foods,
+        "high_confidence_food": high_confidence_food,
+        "foods": final_foods,  # 🔥 STRICT (NO LEAK)
         "matched_foods": matched_foods,
         "known_general_foods": known_general_foods,
         "composite_foods": composite_foods,
@@ -2733,49 +2910,35 @@ async def build_response(query: str, lite: bool):
         
         if routing.get("has_food"):
 
-            # ✅ FIX: read from routing (NOT food_result)
             matched = routing.get("matched_foods", [])
             unknown = routing.get("truly_unknown", [])
 
-            if TRACE_LEVEL >= 1:
-                print(
-                    f"[{now_iso()}][{trace_id_var.get()}] FOOD_ENGINE_ROUTE "
-                    f"query={q!r} matched={matched!r} unknown={unknown!r} "
-                    f"context_domain={routing.get('context_domain')!r}"
-                )
+            # ❌ OLD LOGIC (REMOVE THIS THINKING)
+            # if unknown and not matched:
 
-            # 🔴 ONLY when NOTHING matched → clarify
-            if unknown and not matched:
-                if TRACE_LEVEL >= 1:
-                    print(f"[{now_iso()}][{trace_id_var.get()}] CLARIFICATION_TRIGGERED")
-
+            # ✅ NEW RULE (YOUR DECISION)
+            # If ANY matched food exists → NEVER clarify
+            if not matched:
                 return _inject_trace(
                     ensure_response_contract(
                         {
                             "status": "success",
                             "message": build_unknown_food_clarification(unknown),
                             "needs_clarification": True,
-                            "clarification_type": "unknown_food",
                             "unknown_foods": unknown,
-                            "cleaned_query": None,
-                            "tts_text": None,
-                            "audio": None,
                             "score": 0,
                         },
                         default_domain="lifestyle",
                     )
                 )
 
-            # ✅ OTHERWISE → ALWAYS go to food engine
-            if TRACE_LEVEL >= 1:
-                print(f"[{now_iso()}][{trace_id_var.get()}] ROUTING_TO_FOOD_ENGINE")
-
+            # ✅ ALWAYS go to food engine if matched exists
             return _inject_trace(
                 build_food_engine_response(
                     query=q,
                     food_result=routing.get("food_result"),
                     context_domain=routing.get("context_domain"),
-                    truly_unknown=unknown,  # keep signal — engine will handle it
+                    truly_unknown=unknown,
                 )
             )
         # ✅ normalization for matching
@@ -3366,7 +3529,35 @@ async def normalize_food_items(req: NormalizeRequest):
     finally:
         trace_end("normalize_food_items", t0_func)
 
+async def run_llm_flow(query: str, body: dict, request: Request):
+    lite = body.get("lite", False)
 
+    print("🔥 RUN_LLM_FLOW EXECUTED WITH:", query)
+
+    result = await build_response(query, lite)
+
+    return _inject_trace(
+        normalize_final_response(
+            {
+                "status": "success",
+                "text": result.get("text", ""),
+                "chat": result.get("chat", ""),
+                "query": query,
+                "score": result.get("score", 0),
+                "domain": result.get("intent", {}).get("domain"),
+                "intent": result.get("intent", {}),
+                "screen": result.get("screen"),
+                "structured": result.get("structured", {}),
+                "has_food": result.get("has_food", False),
+                "food_engine": result.get("food_engine", False),
+                "foods": result.get("foods", []),
+                "scores": result.get("scores", {}),
+                "meal_calories": result.get("meal_calories", 0.0),
+                "nutrition": result.get("nutrition", {}),
+            }
+        )
+    )
+    
 # ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
 async def existing_main_flow(request: Request):
     """
@@ -3574,19 +3765,18 @@ async def existing_main_flow(request: Request):
         # --------------------------------------------------
         # ONLY skip food routing when V2 is active
         # --------------------------------------------------
-        if not USE_NEW_ROUTER and kb_routing.get("has_food"):
-            food_resp = build_food_engine_response(
-                query,
-                food_result=kb_routing.get("food_result"),
-                context_domain=kb_routing.get("context_domain"),
-                truly_unknown=kb_routing.get("truly_unknown"),
-            )
+        if kb_routing.get("has_food"):
             return _inject_trace(
                 ensure_response_contract(
-                    food_resp,
-                    default_domain=food_resp.get("domain", "lifestyle"),
+                    build_food_engine_response(
+                        query,
+                        food_result=kb_routing.get("food_result"),
+                        context_domain=kb_routing.get("context_domain"),
+                        truly_unknown=kb_routing.get("truly_unknown"),
+                    ),
+                    default_domain=kb_routing.get("domain", "lifestyle"),
                 )
-            )
+            )   
 
         # --------------------------------------------------
         # UNKNOWN FOOD — ALWAYS HANDLE (even in V2)
@@ -3733,6 +3923,8 @@ class SessionState:
     def __init__(self):
         self.pending_meal = False
         self.last_food_query = None
+        self.last_food_result = None
+        self.retry_used = False
 
 
 STATE = SessionState()
@@ -3749,16 +3941,122 @@ async def route_query_v2(request: Request):
 
         if content_type.startswith("application/json"):
             body = await request.json()
-            query = body.get("query", "") or ""
+            query = (body.get("query") or "").strip().lower()
+
+            # 🔥 ADD THIS (state injection)
+            pending_meal = body.get("pending_meal")
+
+            if pending_meal and not STATE.pending_meal:
+                STATE.pending_meal = True
+                STATE.last_food_query = pending_meal
+                print("DEBUG AFTER INJECTION:", STATE.last_food_query)
+                if TRACE_LEVEL >= 1:
+                    print(f"[{now_iso()}][{trace_id_var.get()}] STATE_INJECTED pending_meal={pending_meal!r}")
+            
         else:
-            return await existing_main_flow(request)
+            body = {}
+            query = ""
 
     except Exception:
+        body = {}
+        query = ""
+
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] V2_QUERY_EXTRACTED query={query!r} pending={STATE.pending_meal}")
+
+    # ------------------------------------------------------------
+    # STATE.pending_meal branch — TS9
+    # ------------------------------------------------------------
+    if TRACE_LEVEL >= 2:
+        print(f"[{now_iso()}][{trace_id_var.get()}] V2_STATE_CHECK pending={STATE.pending_meal} query={query!r}")
+
+    # 🔥 TS9 START
+    print("DEBUG BEFORE TS9:", STATE.last_food_query)
+    
+    if STATE.pending_meal:
+
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][{trace_id_var.get()}] TS9_ENTER query={query!r}")
+
+        # 🔴 1. CANCEL (true exit)
+        if is_cancel_meal_flow(query):
+            if TRACE_LEVEL >= 2:
+                print(f"[{now_iso()}][{trace_id_var.get()}] TS9_CANCEL")
+
+            STATE.pending_meal = False
+            STATE.last_food_query = None
+            STATE.last_food_result = None
+
+            return build_standard_text_response("Got it. Cancelled.")
+
+        # 🟢 2. NONE → process stored meal
+        if is_none_meal_flow(query):
+            stored_query = STATE.last_food_query
+
+            if TRACE_LEVEL >= 2:
+                print(f"[{now_iso()}][{trace_id_var.get()}] TS9_ROUTE_TO_LLM stored_query={stored_query!r}")
+
+            STATE.pending_meal = False
+            STATE.last_food_query = None
+
+            return await run_llm_flow(
+                query=stored_query,
+                body=body,
+                request=request
+            )
+
+        # 🟡 3. NEW MEAL OVERRIDE
+        fresh_routing = resolve_domain_and_context(query)
+        if fresh_routing.get("has_food") and not resolve_food_intent(query):
+
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] TS9_NEW_MEAL_OVERRIDE "
+                    f"old_pending={STATE.last_food_query!r} new_query={query!r}"
+                )
+
+            STATE.pending_meal = False
+            STATE.last_food_query = None
+            STATE.last_food_result = None
+
+            return handle_food_flow_v2(
+                query=query,
+                food_result=fresh_routing,
+            )
+
+        # 🔵 4. INTENT HANDLING
+        pending_intent = resolve_food_intent(query)
+
+        if pending_intent:
+            stored_query = STATE.last_food_query
+
+            if TRACE_LEVEL >= 2:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] "
+                    f"TS9_INTENT_ROUTE stored_query={stored_query!r}"
+                )
+
+            STATE.pending_meal = False
+            STATE.last_food_query = None
+
+            return await run_llm_flow(stored_query, body, request)
+
+        # ⚫ 5. FALLBACK
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][{trace_id_var.get()}] TS9_FALLBACK query={query!r}")
+
+        return await existing_main_flow(request)
+
+    # Non-JSON and parse-error requests have no pending meal — hand off.
+    if not query:
         return await existing_main_flow(request)
 
     # ------------------------------------------------------------
     # Step 1 — FOOD (deterministic)
     # ------------------------------------------------------------
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_ROUTE_START query={query!r}")
+
     routing = resolve_domain_and_context(query)
 
     matched      = routing.get("matched_foods", [])
@@ -3769,15 +4067,53 @@ async def route_query_v2(request: Request):
 
     food_signal_exists = bool(matched or known_general or composite or api_confirmed)
 
+    real_unknown = filter_real_unknown_foods(unknown)
+    known_food_signal = matched + known_general + composite + api_confirmed
+
     if TRACE_LEVEL >= 1:
         print(
-            f"[{now_iso()}][{trace_id_var.get()}] V2 FOOD ROUTE "
+            f"[{now_iso()}][{trace_id_var.get()}] FOOD_ROUTE_RESULT "
+            f"has_food={routing.get('has_food')} "
             f"matched={matched!r} known_general={known_general!r} "
-            f"composite={composite!r} api_confirmed={api_confirmed!r} unknown={unknown!r}"
+            f"composite={composite!r} api_confirmed={api_confirmed!r} "
+            f"unknown={unknown!r} real_unknown={real_unknown!r}"
+        )
+
+    # Mixed known + real unknown → ask one targeted clarification.
+    if known_food_signal and real_unknown:
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] V2 MIXED_FOOD_CLARIFICATION "
+                f"known={known_food_signal!r} unknown={real_unknown!r}"
+            )
+
+        STATE.pending_meal = False
+        STATE.last_food_query = None
+        STATE.retry_used = False
+
+        return _inject_trace(
+            normalize_final_response(
+                ensure_response_contract(
+                    {
+                        "status": "success",
+                        "message": build_mixed_known_unknown_food_clarification(
+                            known_food_signal,
+                            real_unknown,
+                        ),
+                        "needs_clarification": True,
+                        "clarification_type": "mixed_known_unknown_food",
+                        "unknown_foods": real_unknown,
+                        "has_food": True,
+                        "foods": known_food_signal,
+                        "score": 0,
+                    },
+                    default_domain=routing.get("domain", "lifestyle"),
+                )
+            )
         )
 
     # Clarification only when no food signal exists at all
-    if unknown and not food_signal_exists:
+    if real_unknown and not food_signal_exists:
         if TRACE_LEVEL >= 1:
             print(f"[{now_iso()}][{trace_id_var.get()}] V2 CLARIFICATION")
 
@@ -3786,10 +4122,10 @@ async def route_query_v2(request: Request):
                 ensure_response_contract(
                     {
                         "status": "success",
-                        "message": build_unknown_food_clarification(unknown),
+                        "message": build_unknown_food_clarification(real_unknown),
                         "needs_clarification": True,
                         "clarification_type": "unknown_food",
-                        "unknown_foods": unknown,
+                        "unknown_foods": real_unknown,
                         "has_food": False,
                         "foods": [],
                         "score": 0,
@@ -3801,35 +4137,29 @@ async def route_query_v2(request: Request):
 
     if routing.get("has_food"):
         if TRACE_LEVEL >= 1:
-            print(f"[{now_iso()}][{trace_id_var.get()}] V2 → FOOD ENGINE")
+            print(f"[{now_iso()}][{trace_id_var.get()}] V2 → FOOD FLOW")
 
-        return _inject_trace(
-            normalize_final_response(
-                ensure_response_contract(
-                    build_food_engine_response(
-                        query=query,
-                        food_result=routing.get("food_result"),
-                        context_domain=routing.get("context_domain"),
-                        truly_unknown=unknown,
-                        matched_foods=matched,
-                        known_general_foods=known_general,
-                        composite_foods=composite,
-                        api_confirmed_foods=api_confirmed,
-                    ),
-                    default_domain="lifestyle",
-                )
-            )
+        return handle_food_flow_v2(
+            query=query,
+            food_result=routing,
         )
 
     # NON-FOOD → fallback
     return await existing_main_flow(request)
 
 async def route_query(request: Request):
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_ENTRY USE_NEW_ROUTER={USE_NEW_ROUTER}")
+
     if USE_NEW_ROUTER:
         print("🔥 V2 HIT")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_SELECTED V2")
         return await route_query_v2(request)
     else:
         print("🔥 V1 HIT")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_SELECTED V1")
         return await route_query_v1(request)
 
 

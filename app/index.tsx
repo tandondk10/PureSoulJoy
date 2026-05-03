@@ -52,7 +52,8 @@ const MEAL_ACTION_OPTIONS = [
   { id: "analyze", label: "Analyze" },
   { id: "improve", label: "Improve" },
   { id: "build", label: "Build" },
-  { id: "none", label: "None" },
+  { id: "none", label: "Continue with this meal" }, // 🔥 clarity
+  { id: "cancel", label: "Cancel" },
 ] as const;
 type MealActionId = typeof MEAL_ACTION_OPTIONS[number]["id"];
 
@@ -87,6 +88,7 @@ type Message = {
   nextActionLabels?: string[];
   nextActionCodes?: string[];
   traceId?: string;
+  context?: string;
   feedbackSent?: "helpful" | "not_helpful";
   actionTaken?: boolean;
 };
@@ -114,6 +116,7 @@ export default function HomeScreen() {
   const { user, setUser } = useUser();
   const [checkingUser, setCheckingUser] = useState(true);
   const [pendingMeal, setPendingMeal] = useState<string | null>(null);
+  const [pendingMealTraceId, setPendingMealTraceId] = useState<string | null>(null);
 
   // other refs and state...
 
@@ -446,7 +449,9 @@ export default function HomeScreen() {
           ? data.chat
           : (typeof data.text === "string" && data.text.trim().length > 0)
             ? data.text
-            : "No response received.";
+            : (typeof data.message === "string" && data.message.trim().length > 0)
+              ? data.message
+              : "No response received.";
 
       if (!text || text.trim() === "") {
         console.warn("Empty response", data);
@@ -619,7 +624,13 @@ export default function HomeScreen() {
 
   // ─── Keyboard query ───────────────────────────────────────────────────────
 
-  const sendKeyboardQuery = async (query: string, traceId: string, raw?: string, showUserBubble: boolean = true) => {
+  const sendKeyboardQuery = async (
+    query: string,
+    traceId: string,
+    raw?: string,
+    showUserBubble: boolean = true,
+    context?: string   // ✅ ADD THIS
+  ) => {
     const t0 = traceStart(traceId, "sendKeyboardQuery", TRACE_LEVEL);
     const displayText = raw ?? query;
     // 🔒 Debounce (FIRST)
@@ -656,15 +667,34 @@ export default function HomeScreen() {
     const userMsgId = `${traceId}-user`;
     const assistantMsgId = `${traceId}-assistant`;
 
-    lastScrollIdRef.current = null;
+    lastScrollIdRef.current = assistantMsgId;
 
     setInput("");
     logTrace(traceId, "UI_UPDATE_START");
-    setMessages((prev) => [
+
+    setMessages(prev => [
       ...prev,
-      ...(showUserBubble ? [{ id: userMsgId, role: "user" as const, text: displayText, source: "text" as const, status: "complete" as const }] : []),
-      { id: assistantMsgId, role: "assistant" as const, text: "", source: "text" as const, status: "loading" as const },
+      ...(showUserBubble
+        ? [{
+          id: userMsgId,
+          role: "user" as const,
+          text: displayText,
+          source: "text" as const,
+          status: "complete" as const,
+          traceId
+        }]
+        : []),
+      {
+        id: assistantMsgId,
+        role: "assistant" as const,
+        text: "",
+        source: "text" as const,
+        status: "loading" as const,
+        traceId,
+        context: context || undefined
+      },
     ]);
+
     logTrace(traceId, "UI_UPDATE_DONE");
 
     // 🌐 API setup
@@ -677,6 +707,7 @@ export default function HomeScreen() {
 
     try {
       if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query keyboard`);
+      logTrace(traceId, "API_REQUEST_BODY", { query, voice: false, hasUserProfile: !!(user) });
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-trace-id": traceId },
@@ -686,6 +717,9 @@ export default function HomeScreen() {
           lite: liteMode === true,
           user_profile: user ?? {},
           traceId,
+
+          // 🔥 ADD THIS
+          pending_meal: pendingMeal || null
         }),
         signal: controller.signal,
       });
@@ -722,6 +756,14 @@ export default function HomeScreen() {
         }
       );
 
+      logTrace(traceId, "API_RESPONSE_SUMMARY", {
+        status: data?.status,
+        domain: data?.domain,
+        has_food: data?.has_food,
+        needs_clarification: data?.needs_clarification,
+        unknown_foods: data?.unknown_foods,
+        chat: data?.chat || data?.text || data?.message,
+      });
       logTrace(traceId, "API_STATUS_SUCCESS");
 
       const cleanedQuery =
@@ -740,7 +782,9 @@ export default function HomeScreen() {
           ? data.chat
           : (typeof data.text === "string" && data.text.trim().length > 0)
             ? data.text
-            : "No response received.";
+            : (typeof data.message === "string" && data.message.trim().length > 0)
+              ? data.message
+              : "No response received.";
 
       if (!text || text.trim() === "") {
         console.warn("Empty response", data);
@@ -1062,28 +1106,47 @@ export default function HomeScreen() {
     return foodWords.some(w => lower.includes(w));
   };
 
-  const handleMealActionSelection = async (action: MealActionId) => {
-    if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] MEAL_ACTION_SELECTED:`, action);
+  const handleMealExit = (action: "cancel" | "none") => {
+    if (!pendingMealTraceId) {
+      console.warn(`Missing traceId for ${action}`);
+      return;
+    }
 
+    const traceId = pendingMealTraceId;
+
+    logTrace(traceId, `MEAL_ACTION_${action.toUpperCase()}`, {
+      action,
+      pendingMeal
+    });
+
+    // 🔥 CRITICAL: pass context explicitly
+    sendKeyboardQuery(
+      action,
+      traceId,
+      undefined,
+      false,
+      pendingMeal ?? undefined   // ✅ FIX
+    );
+
+    // clear AFTER send
+    setPendingMeal(null);
+    setPendingMealTraceId(null);
     setStatusMode("NONE");
     setStatusText(null);
+    setInput("");
+  };
+
+  const handleMealActionSelection = async (action: MealActionId) => {
+    const actionTraceId = createTraceId();
+    logTrace(actionTraceId, "MEAL_ACTION_SELECTED", { action, pendingMeal, statusMode });
+
+    if (action === "cancel") {
+      handleMealExit("cancel");
+      return;
+    }
 
     if (action === "none") {
-      const raw = pendingMeal;
-      setPendingMeal(null);
-      setStatusMode("NONE");
-      setStatusText(null);
-      setInput("");
-
-      if (raw) {
-        const parsed = parseMealItems(raw).join(", ");
-        const traceId = createTraceId();
-        logTrace(traceId, "KEYBOARD_FALLTHROUGH", parsed);
-        const data = await sendKeyboardQuery(parsed, traceId, undefined, false);
-        const speechText = data?.tts_text || data?.chat || data?.text || "";
-        if (speechText) { await speakLocalPrompt(speechText); }
-      }
-
+      handleMealExit("none");
       return;
     }
 
@@ -1095,19 +1158,24 @@ export default function HomeScreen() {
   };
 
   const handleSendPress = () => {
+
+    // 🔥 RESET if user ignores selection and types new query
+    if (pendingMeal && statusMode === "MEAL_ACTION_SELECTION") {
+      setPendingMeal(null);
+      setStatusMode("NONE");
+    }
+
     if (voiceStateRef.current === "PROCESSING") return;
 
     const query = input.trim();
     if (!query) return;
 
-    // Safety guard: 1–4 no longer maps to actions — do not send to backend
     if (/^[1-4]$/.test(query)) {
       setInput("");
       setStatusText("Tap an option");
       return;
     }
 
-    // 🔥 STEP 1 — detect raw meal entry BEFORE API (questions bypass this gate)
     const words = query.trim().split(/\s+/).filter(Boolean);
     const mealLike = looksLikeMeal(query);
     const isQuestion =
@@ -1116,20 +1184,36 @@ export default function HomeScreen() {
     const isShort = words.length <= 4;
     const isSingleFood = words.length === 1 && mealLike;
 
+    // ✅ ONLY HERE we show meal UI
     if ((mealLike && isShort && !isQuestion) || isSingleFood) {
+      const traceId = createTraceId();
+      logTrace(traceId, "MEAL_INPUT_DETECTED", { query });
+
       setMessages(prev => [
         ...prev,
-        { id: `${Date.now()}-user`, role: "user", text: query, status: "complete" },
+        {
+          id: `${Date.now()}-user`,
+          role: "user",
+          text: query,
+          status: "complete",
+          traceId
+        },
       ]);
+
       setInput("");
+
       setPendingMeal(query);
+      setPendingMealTraceId(traceId);
       setStatusMode("MEAL_ACTION_SELECTION");
+      setStatusText(null);
+
       return;
     }
 
-    // 🔥 STEP 2 — normal flow: reset any stale action-selection state
+    // ✅ NORMAL FLOW
     setStatusMode("NONE");
     setStatusText(null);
+    setPendingMeal(null);
 
     const traceId = createTraceId();
     logTrace(traceId, "KEYBOARD_START", query);
@@ -1439,6 +1523,14 @@ export default function HomeScreen() {
                     )}
 
                     {/* Assistant loading */}
+                    {msg.role === "assistant" && msg.context && (
+                      <View style={{ paddingHorizontal: 10, marginTop: 6 }}>
+                        <Text style={{ color: "#888", fontSize: 12 }}>
+                          {msg.context}
+                        </Text>
+                      </View>
+                    )}
+
                     {msg.role === "assistant" && msg.status === "loading" && (
                       <View style={{ padding: 10 }}>
                         <ActivityIndicator color={C.accent} />

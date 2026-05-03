@@ -1,4 +1,5 @@
 import { parseMealItems } from "@/app/utils/mealParser";
+import { createTraceId, logTrace } from "../utils/trace";
 import AppHeader from "@/components/AppHeader";
 import SectionCard from "@/components/SectionCard";
 import { C } from "@/constants/colors";
@@ -986,6 +987,7 @@ export default function MealMain() {
   // 🔥 3. REFS
   const handledPrefillRef = useRef<string | null>(null);
   const handledImageRef = useRef<string | null>(null);
+  const mealTraceIdRef = useRef<string>(createTraceId());
 
   // 🔥 4. DEBUG EFFECTS
   useEffect(() => {
@@ -998,6 +1000,7 @@ export default function MealMain() {
 
   useEffect(() => {
     console.log("🚨 MealMain mounted");
+    logTrace(mealTraceIdRef.current, "MEAL_SCREEN_ENTER", { prefill, image });
   }, []);
 
   // 🔥 5. PREFILL EFFECT
@@ -1032,6 +1035,7 @@ export default function MealMain() {
     }));
 
     setMealItems(items);
+    logTrace(mealTraceIdRef.current, "MEAL_SCREEN_INITIAL_MEAL", { rawMeal: normalized, parsedItems: segments });
     setStage("confirm");
 
     requestAnimationFrame(() => {
@@ -1101,6 +1105,7 @@ export default function MealMain() {
   };
 
   const runMealProcessing = async (items: MealItem[], rawQuery?: string) => {
+    logTrace(mealTraceIdRef.current, "MEAL_ANALYZE_SUBMIT", { items: items.map(i => i.name) });
     const rawNames = items.map((i) => i.name);
     console.log("RAW:", rawNames);
     const normalizedNames = await normalizeItems(rawNames);
@@ -1140,6 +1145,11 @@ export default function MealMain() {
     setNutritionSummary({ ...nutrition, score } as any);
     setMealResult({ ...result, score, ...behavior, items: parsedItems });
     setImprovements(suggestions);
+    logTrace(mealTraceIdRef.current, "MEAL_ANALYZE_RESPONSE", {
+      classification: result.classification,
+      score,
+      hasNutrition: !!nutrition,
+    });
     setStage("result");
   };
 

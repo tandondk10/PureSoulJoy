@@ -320,6 +320,23 @@ STOPWORDS.update({
     "today", "tomorrow",
 })
 
+STOPWORDS.update({
+    # pronouns
+    "i", "me", "we", "you",
+    # meal-reporting verbs
+    "ate", "eat", "eating", "eaten",
+    "had", "have", "having",
+    "consumed", "took",
+    # vague quantity / context words
+    "some", "something", "anything",
+    # time words not already covered
+    "yesterday", "tonight", "now", "just",
+    # non-food product/query words
+    "price", "cost", "calorie",
+    # generic meal words not already in set
+    "dish",
+})
+
 UNIT_PATTERN = re.compile(r"^\d+(\.\d+)?\s*(g|gram|grams|ml|oz|ounce|ounces|cup|cups)?$")
 
 # Add entries ONLY after verifying the canonical key exists in FOOD_DATA.
@@ -376,6 +393,16 @@ def is_food_like(token: str) -> bool:
         return False
     return True
 
+def is_part_of_detected_food(token: str, foods: list) -> bool:
+    t = (token or "").lower().strip()
+    if not t:
+        return False
+    for food in foods or []:
+        f = (food or "").lower()
+        if t in f:
+            return True
+    return False
+
 
 def detect_foods(query: str) -> list:
     query, phrase_foods = normalize_phrases(query)
@@ -396,7 +423,11 @@ def detect_foods(query: str) -> list:
                 detected.append(food)
                 matched = True
                 break
-        if not matched and is_food_like(token):
+        if (
+            not matched
+            and is_food_like(token)
+            and not is_noise_token(token)   # 🔥 ADD THIS GUARD
+        ):
             unknown.append(token)
 
     seen = set()
@@ -632,6 +663,9 @@ def call_usda(food: str) -> Optional[dict]:
 
 
 def get_nutrition(food: str) -> dict:
+    if is_noise_token(food):   # 🔥 HARD STOP
+        return empty_nutrition()
+    
     if food in FOOD_DATA:
         print(f"[NUTRITION] FOOD_DATA hit: {food}")
         return FOOD_DATA[food]
@@ -676,15 +710,34 @@ def process_query(query: str) -> dict:
     query = normalize_input(query)
     foods = detect_foods(query)
 
+    # 🔥 ALWAYS capture unknowns (critical fix)
+    tokens = tokenize(query)
+    known_set = {f.lower() for f in foods}
+
+    for t in tokens:
+        if (
+            is_food_like(t)
+            and t.lower() not in known_set
+            and not is_part_of_detected_food(t, foods)
+        ):
+            UNKNOWN_FOODS.add(t.lower())
+
     if not foods:
-        UNKNOWN_FOODS.add(query.lower())
         return {
             "foods": [],
             "scores": {"glucose": 0, "cholesterol": 0, "lifestyle": 0},
             "domain": "unknown",
             "meal_calories": 0.0,
-            "macro_dominance": {"dominance": "balanced", "carb_cal": 0.0,
-                                "fat_cal": 0.0, "carb_ratio": 0.0, "fat_ratio": 0.0},
+            "nutrition": {},
+            "macro_dominance": {
+                "dominance": "balanced",
+                "carb_cal": 0.0,
+                "fat_cal": 0.0,
+                "protein_cal": 0.0,
+                "carb_ratio": 0.0,
+                "fat_ratio": 0.0,
+                "protein_ratio": 0.0,
+            },
             "macro_totals": {},
         }
 
@@ -694,6 +747,7 @@ def process_query(query: str) -> dict:
     domain_result = determine_domain_from_foods_and_query(query, foods)
     calories = compute_meal_calories(foods, multiplier)
     nutrition = compute_nutrition_summary(foods, multiplier)
+
     return {
         "foods": foods,
         "scores": domain_result["scores"],
