@@ -709,6 +709,9 @@ export default function HomeScreen() {
     try {
       if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query keyboard`);
       logTrace(traceId, "API_REQUEST_BODY", { query, voice: false, hasUserProfile: !!(user) });
+
+      console.log("🔥 USER_PROFILE:", getNormalizedUser(user));
+      console.log("🔥 USER_PROFILE SENT:", JSON.stringify(getNormalizedUser(user)));
       const timeoutId = setTimeout(() => controller.abort(), 20000);
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
@@ -720,18 +723,20 @@ export default function HomeScreen() {
           user_profile: getNormalizedUser(user),
           traceId,
 
-          // 🔥 ADD THIS
-          pending_meal: pendingMeal
-            ? typeof pendingMeal === "string"
-              ? {
-                items: [pendingMeal],
-                estimated_carbs: null
-              }
-              : {
-                items: pendingMeal.items ?? [],
-                estimated_carbs: pendingMeal.estimated_carbs ?? null
-              }
-            : null
+          ...(pendingMeal
+            ? {
+              pending_meal:
+                typeof pendingMeal === "string"
+                  ? {
+                    items: [pendingMeal],
+                    estimated_carbs: null
+                  }
+                  : {
+                    items: pendingMeal.items ?? [],
+                    estimated_carbs: pendingMeal.estimated_carbs ?? null
+                  }
+            }
+            : {})
         }),
         signal: controller.signal,
       });

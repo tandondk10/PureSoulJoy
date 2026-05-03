@@ -2273,7 +2273,7 @@ def route_food_intent(intent: str, query: str, food_result: dict, state):
     }
 
 # ---------------- FOOD FLOW V2 ----------------
-def handle_food_flow_v2(query: str, food_result: dict):
+def handle_food_flow_v2(query: str, food_result: dict, session: dict):
     if TRACE_LEVEL >= 1:
         print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_ENTER query={query!r}")
 
@@ -2316,13 +2316,12 @@ def handle_food_flow_v2(query: str, food_result: dict):
             }
 
     # Step 3: no intent → ask user
-    STATE.pending_meal = True
-    STATE.retry_used = False
-    STATE.last_food_query = query
-    STATE.last_food_result = food_result
-    print("🔥 STATE SET:", {
-        "pending": STATE.pending_meal,
-        "query": STATE.last_food_query
+    session["pending_meal"] = True
+    session["last_food_query"] = query
+    session["last_food_result"] = food_result
+    print("🔥 SESSION SET:", {
+        "pending": session["pending_meal"],
+        "query": session["last_food_query"],
     })
 
     if TRACE_LEVEL >= 1:
@@ -3919,15 +3918,17 @@ async def existing_main_flow(request: Request):
         )
 
 
-class SessionState:
-    def __init__(self):
-        self.pending_meal = False
-        self.last_food_query = None
-        self.last_food_result = None
-        self.retry_used = False
+USER_SESSIONS: dict = {}
 
 
-STATE = SessionState()
+def get_session(user_id: str) -> dict:
+    if user_id not in USER_SESSIONS:
+        USER_SESSIONS[user_id] = {
+            "pending_meal": False,
+            "last_food_query": None,
+            "last_food_result": None,
+        }
+    return USER_SESSIONS[user_id]
 
 
 async def route_query_v1(request: Request):
@@ -3936,6 +3937,11 @@ async def route_query_v1(request: Request):
 
 async def route_query_v2(request: Request):
 
+    # ---- Safe defaults (prevents undefined errors) ----
+    body = {}
+    query = ""
+    user_id = "anonymous"
+
     try:
         content_type = request.headers.get("content-type", "")
 
@@ -3943,162 +3949,141 @@ async def route_query_v2(request: Request):
             body = await request.json()
             query = (body.get("query") or "").strip().lower()
 
-            # 🔥 ADD THIS (state injection)
-            pending_meal = body.get("pending_meal")
+            user_id = (body.get("user_profile") or {}).get("user_id")
 
-            if pending_meal and not STATE.pending_meal:
-                STATE.pending_meal = True
-                STATE.last_food_query = pending_meal
-                print("DEBUG AFTER INJECTION:", STATE.last_food_query)
-                if TRACE_LEVEL >= 1:
-                    print(f"[{now_iso()}][{trace_id_var.get()}] STATE_INJECTED pending_meal={pending_meal!r}")
-            
-        else:
-            body = {}
-            query = ""
+            if not user_id:
+                user_id = request.headers.get("x-user-id")
+
+            if not user_id:
+                user_id = request.headers.get("x-trace-id")
+
+            if not user_id:
+                user_id = "anonymous"
+
+            if not user_id:
+                user_id = request.headers.get("x-trace-id") or trace_id_var.get()
 
     except Exception:
-        body = {}
-        query = ""
+        pass
+
+    # ---- Always create session AFTER try ----
+    session = get_session(user_id)
+
+    # ---- 🔥 SESSION INJECTION (CRITICAL) ----
+    pending_meal = body.get("pending_meal")
+
+    if pending_meal is not None:
+        session["pending_meal"] = True
+        session["last_food_query"] = (
+            pending_meal if isinstance(pending_meal, dict)
+            else {"items": [pending_meal]}
+        )
+
+        print("🔥 SESSION SET:", user_id, session)
 
     if TRACE_LEVEL >= 1:
-        print(f"[{now_iso()}][{trace_id_var.get()}] V2_QUERY_EXTRACTED query={query!r} pending={STATE.pending_meal}")
+        print(
+            f"[{now_iso()}][{trace_id_var.get()}] "
+            f"V2_QUERY_EXTRACTED query={query!r} "
+            f"pending={session['pending_meal']} user={user_id!r}"
+        )
 
     # ------------------------------------------------------------
-    # STATE.pending_meal branch — TS9
+    # TS9: pending meal flow
     # ------------------------------------------------------------
     if TRACE_LEVEL >= 2:
-        print(f"[{now_iso()}][{trace_id_var.get()}] V2_STATE_CHECK pending={STATE.pending_meal} query={query!r}")
+        print(
+            f"[{now_iso()}][{trace_id_var.get()}] "
+            f"V2_STATE_CHECK pending={session['pending_meal']} query={query!r}"
+        )
 
-    # 🔥 TS9 START
-    print("DEBUG BEFORE TS9:", STATE.last_food_query)
-    
-    if STATE.pending_meal:
+    if session["pending_meal"]:
 
         if TRACE_LEVEL >= 2:
             print(f"[{now_iso()}][{trace_id_var.get()}] TS9_ENTER query={query!r}")
 
-        # 🔴 1. CANCEL (true exit)
+        # 🔴 CANCEL
         if is_cancel_meal_flow(query):
-            if TRACE_LEVEL >= 2:
-                print(f"[{now_iso()}][{trace_id_var.get()}] TS9_CANCEL")
-
-            STATE.pending_meal = False
-            STATE.last_food_query = None
-            STATE.last_food_result = None
-
+            session["pending_meal"] = False
+            session["last_food_query"] = None
+            session["last_food_result"] = None
             return build_standard_text_response("Got it. Cancelled.")
 
-        # 🟢 2. NONE → process stored meal
+        # 🟢 NONE → process stored meal
         if is_none_meal_flow(query):
-            stored_query = STATE.last_food_query
+            stored_query = session["last_food_query"]
 
-            # 🔥 FIX HERE
             if isinstance(stored_query, dict):
                 stored_query = " ".join(stored_query.get("items", []))
 
-            if TRACE_LEVEL >= 2:
-                print(f"[{now_iso()}][{trace_id_var.get()}] TS9_ROUTE_TO_LLM stored_query={stored_query!r}")
+            session["pending_meal"] = False
+            session["last_food_query"] = None
 
-            STATE.pending_meal = False
-            STATE.last_food_query = None
-
+            # 🔥 IMPORTANT: still using LLM (next step remove this)
             return await run_llm_flow(
                 query=stored_query,
                 body=body,
-                request=request
+                request=request,
             )
 
-        # 🟡 3. NEW MEAL OVERRIDE
+        # 🟡 NEW MEAL override
         fresh_routing = resolve_domain_and_context(query)
+
         if fresh_routing.get("has_food") and not resolve_food_intent(query):
-
-            if TRACE_LEVEL >= 1:
-                print(
-                    f"[{now_iso()}][{trace_id_var.get()}] TS9_NEW_MEAL_OVERRIDE "
-                    f"old_pending={STATE.last_food_query!r} new_query={query!r}"
-                )
-
-            STATE.pending_meal = False
-            STATE.last_food_query = None
-            STATE.last_food_result = None
+            session["pending_meal"] = False
+            session["last_food_query"] = None
+            session["last_food_result"] = None
 
             return handle_food_flow_v2(
                 query=query,
                 food_result=fresh_routing,
+                session=session,
             )
 
-        # 🔵 4. INTENT HANDLING
+        # 🔵 INTENT handling
         pending_intent = resolve_food_intent(query)
 
         if pending_intent:
-            stored_query = STATE.last_food_query
-
-            if TRACE_LEVEL >= 2:
-                print(
-                    f"[{now_iso()}][{trace_id_var.get()}] "
-                    f"TS9_INTENT_ROUTE stored_query={stored_query!r}"
-                )
-
-            STATE.pending_meal = False
-            STATE.last_food_query = None
-
-            stored_query = STATE.last_food_query
+            stored_query = session["last_food_query"]
 
             if isinstance(stored_query, dict):
                 stored_query = " ".join(stored_query.get("items", []))
 
+            session["pending_meal"] = False
+            session["last_food_query"] = None
+
             return await run_llm_flow(stored_query, body, request)
 
-        # ⚫ 5. FALLBACK
-        if TRACE_LEVEL >= 2:
-            print(f"[{now_iso()}][{trace_id_var.get()}] TS9_FALLBACK query={query!r}")
-
+        # ⚫ fallback
         return await existing_main_flow(request)
 
-    # Non-JSON and parse-error requests have no pending meal — hand off.
+    # ------------------------------------------------------------
+    # NORMAL FLOW
+    # ------------------------------------------------------------
     if not query:
         return await existing_main_flow(request)
 
-    # ------------------------------------------------------------
-    # Step 1 — FOOD (deterministic)
-    # ------------------------------------------------------------
     if TRACE_LEVEL >= 1:
         print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_ROUTE_START query={query!r}")
 
     routing = resolve_domain_and_context(query)
 
-    matched      = routing.get("matched_foods", [])
+    matched = routing.get("matched_foods", [])
     known_general = routing.get("known_general_foods", [])
-    composite    = routing.get("composite_foods", [])
+    composite = routing.get("composite_foods", [])
     api_confirmed = routing.get("api_confirmed_foods", [])
-    unknown      = routing.get("truly_unknown", [])
+    unknown = routing.get("truly_unknown", [])
 
     food_signal_exists = bool(matched or known_general or composite or api_confirmed)
 
     real_unknown = filter_real_unknown_foods(unknown)
     known_food_signal = matched + known_general + composite + api_confirmed
 
-    if TRACE_LEVEL >= 1:
-        print(
-            f"[{now_iso()}][{trace_id_var.get()}] FOOD_ROUTE_RESULT "
-            f"has_food={routing.get('has_food')} "
-            f"matched={matched!r} known_general={known_general!r} "
-            f"composite={composite!r} api_confirmed={api_confirmed!r} "
-            f"unknown={unknown!r} real_unknown={real_unknown!r}"
-        )
-
-    # Mixed known + real unknown → ask one targeted clarification.
+    # ---- Mixed clarification ----
     if known_food_signal and real_unknown:
-        if TRACE_LEVEL >= 1:
-            print(
-                f"[{now_iso()}][{trace_id_var.get()}] V2 MIXED_FOOD_CLARIFICATION "
-                f"known={known_food_signal!r} unknown={real_unknown!r}"
-            )
-
-        STATE.pending_meal = False
-        STATE.last_food_query = None
-        STATE.retry_used = False
+        session["pending_meal"] = False
+        session["last_food_query"] = None
+        session["last_food_result"] = None
 
         return _inject_trace(
             normalize_final_response(
@@ -4121,11 +4106,8 @@ async def route_query_v2(request: Request):
             )
         )
 
-    # Clarification only when no food signal exists at all
+    # ---- Unknown only ----
     if real_unknown and not food_signal_exists:
-        if TRACE_LEVEL >= 1:
-            print(f"[{now_iso()}][{trace_id_var.get()}] V2 CLARIFICATION")
-
         return _inject_trace(
             normalize_final_response(
                 ensure_response_contract(
@@ -4144,16 +4126,14 @@ async def route_query_v2(request: Request):
             )
         )
 
+    # ---- FOOD FLOW ----
     if routing.get("has_food"):
-        if TRACE_LEVEL >= 1:
-            print(f"[{now_iso()}][{trace_id_var.get()}] V2 → FOOD FLOW")
-
         return handle_food_flow_v2(
             query=query,
             food_result=routing,
+            session=session,
         )
 
-    # NON-FOOD → fallback
     return await existing_main_flow(request)
 
 async def route_query(request: Request):
