@@ -58,6 +58,15 @@ const MEAL_ACTION_OPTIONS = [
 ] as const;
 type MealActionId = typeof MEAL_ACTION_OPTIONS[number]["id"];
 
+const ACTION_TEXT_MAP: Record<string, string> = {
+  walk_10min_now: "Take a 10-minute walk now",
+  drink_water_now: "Drink a glass of water",
+  next_meal_add_protein_and_fiber: "Add protein and fiber to your next meal",
+  avoid_simple_carbs_now: "Avoid simple carbs for now",
+  take_a_10min_walk: "Take a 10-minute walk",
+  check_your_last_meal: "Review your last meal",
+};
+
 
 // Voice thresholds — all configurable, no hardcoded values per spec §2.1
 const SILENCE_DB_THRESHOLD = -40; // dBFS — below = silence
@@ -542,17 +551,16 @@ export default function HomeScreen() {
       }
 
       const sections = parseSections(text);
-      const topActions: string[] =
-        data.screen?.top_action_labels ||
-        data.structured?.top_action_labels ||
-        data.screen?.top_actions ||
-        data.structured?.top_actions ||
-        [];
-      const topActionCodes: string[] =
-        data.screen?.top_actions ||
-        data.structured?.top_actions ||
-        [];
-      console.log("PARSED ACTION CODES:", topActionCodes);
+      // 🔥 NEW BACKEND CONTRACT (ROOT LEVEL)
+      const topActionCodes: string[] = response?.actions || data?.actions || [];
+
+      // 🔥 BUILD HUMAN READABLE ACTIONS
+      const topActions: string[] = topActionCodes.map(
+        (code) => ACTION_TEXT_MAP[code] || code
+      );
+      console.log("🔥 ACTIONS FROM API:", topActionCodes);
+      console.log("🔥 FINAL ACTION TEXT:", topActions);
+
       const nextActionCodes: string[] =
         data.screen?.next_actions ||
         data.structured?.next_actions ||
@@ -808,16 +816,18 @@ export default function HomeScreen() {
       }
 
       const sections = parseSections(text);
-      const topActions: string[] =
-        data.screen?.top_action_labels ||
-        data.structured?.top_action_labels ||
-        data.screen?.top_actions ||
-        data.structured?.top_actions ||
-        [];
-      const topActionCodes: string[] =
-        data.screen?.top_actions ||
-        data.structured?.top_actions ||
-        [];
+      // 🔥 NEW BACKEND CONTRACT (ROOT LEVEL ONLY)
+      const topActionCodes: string[] = data?.actions || [];
+
+      // 🔥 BUILD HUMAN READABLE TEXT
+      const topActions: string[] = topActionCodes.map(
+        (code) => ACTION_TEXT_MAP[code] || code
+      );
+
+      // 🔥 DEBUG
+      console.log("[KB] ACTION CODES:", topActionCodes);
+      console.log("[KB] DISPLAY ACTIONS:", topActions);
+
       const nextActionCodes: string[] =
         data.screen?.next_actions ||
         data.structured?.next_actions ||

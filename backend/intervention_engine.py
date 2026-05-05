@@ -195,19 +195,29 @@ INTERVENTION_MAP = {
 }
 
 
-def get_intervention(domain: Optional[str], need: str, context: dict) -> list:
+def get_intervention(domain: Optional[str], need: str, context: Optional[dict] = None) -> list:
     """
     Deterministic rule-based intervention selection.
-    Resolution order: (domain+need+ctx) → (domain+need) → (None+need+ctx) → (None+need) → default.
-    ctx_flag priority: post_meal > high_reading > None.
+    Resolution order:
+    (domain+need+ctx) → (domain+need) → (None+need+ctx) → (None+need) → default.
     """
+
+    # 🔥 SAFETY FIX (critical)
+    if context is None:
+        context = {}
+
+    # 🔥 NORMALIZE CONTEXT (single source of truth)
     if context.get("after_meal"):
         ctx_flag = "post_meal"
-    elif context.get("high"):
+    elif context.get("high_reading"):
         ctx_flag = "high_reading"
     else:
         ctx_flag = None
 
+    # 🔥 TRACE (helps debugging massively)
+    print(f"[INTERVENTION] domain={domain} need={need} ctx_flag={ctx_flag}")
+
+    # 🔥 PRIORITY RESOLUTION
     if ctx_flag and (domain, need, ctx_flag) in INTERVENTION_MAP:
         return list(INTERVENTION_MAP[(domain, need, ctx_flag)])
 
@@ -220,4 +230,11 @@ def get_intervention(domain: Optional[str], need: str, context: dict) -> list:
     if (None, need, None) in INTERVENTION_MAP:
         return list(INTERVENTION_MAP[(None, need, None)])
 
-    return ["take_a_10min_walk", "drink_water_now", "check_your_last_meal"]
+    # 🔥 LAST RESORT (explicit fallback)
+    print("[INTERVENTION] ⚠️ FALLBACK HIT")
+
+    return [
+        "take_a_10min_walk",
+        "drink_water_now",
+        "check_your_last_meal"
+    ]
