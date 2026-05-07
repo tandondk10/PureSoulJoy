@@ -32,6 +32,22 @@ import { normalizeQuery } from "../utils/mealParser";
 const BACKEND_URL = "http://10.0.0.6:8003";
 
 
+function getVoiceDisplayText(data?: any): string {
+  return (typeof data?.transcript === "string" && data.transcript.trim().length > 0)
+    ? data.transcript.trim()
+    : "🎤 Voice input";
+}
+
+function getResponseText(data: any): string {
+  return (typeof data?.chat === "string" && data.chat.trim().length > 0)
+    ? data.chat
+    : (typeof data?.text === "string" && data.text.trim().length > 0)
+      ? data.text
+      : (typeof data?.message === "string" && data.message.trim().length > 0)
+        ? data.message
+        : "I could not prepare a response. Please try again.";
+}
+
 const ACTION_TEXT_MAP: Record<string, string> = {
   walk_10min_now: "Take a 10-minute walk now",
   drink_water_now: "Drink a glass of water",
@@ -320,11 +336,12 @@ export default function HomeScreen() {
     const assistantMsgId = `${traceId}-assistant`;
     lastScrollIdRef.current = null;
 
+    if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] VOICE_UI_INSERT`, { userMsgId, assistantMsgId });
     setMessages((prev) => {
       if (prev.find((m) => m.id === userMsgId)) return prev;
       return [
         ...prev,
-        { id: userMsgId, role: "user", text: "🎤 Voice input...", source: "voice", status: "complete", traceId },
+        { id: userMsgId, role: "user", text: "🎤 Voice input", source: "voice", status: "complete", traceId },
         { id: assistantMsgId, role: "assistant", text: "", source: "voice", status: "loading" },
       ];
     });
@@ -472,9 +489,12 @@ export default function HomeScreen() {
         data.structured?.next_action_labels ||
         [];
 
+      const voiceDisplayText = getVoiceDisplayText(data);
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] VOICE_UI_UPDATE`, { userMsgId, assistantMsgId, voiceDisplayText, assistantText: text });
+
       setMessages((prev) =>
         prev.map((m) => {
-          if (m.id === userMsgId) return { ...m, text: cleanedQuery || m.text };
+          if (m.id === userMsgId) return { ...m, text: voiceDisplayText };
           if (m.id === assistantMsgId) return {
             ...m,
             status: "complete",
