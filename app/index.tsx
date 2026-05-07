@@ -7,7 +7,8 @@ import { Audio } from "expo-av";
 import * as Speech from "expo-speech";
 import React, { useEffect, useRef, useState } from "react";
 import {
-  AppState, // ✅ ADD THIS LINE
+  ActivityIndicator,
+  AppState,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -633,9 +634,6 @@ export default function HomeScreen() {
       if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query keyboard`);
       logTrace(traceId, "API_REQUEST_BODY", { query, voice: false, hasUserProfile: !!(user) });
 
-      console.log("🔥 USER_PROFILE:", getNormalizedUser(user));
-      console.log("🔥 USER_PROFILE SENT:", JSON.stringify(getNormalizedUser(user)));
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
       const res = await fetch(`${BACKEND_URL}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-trace-id": traceId },
