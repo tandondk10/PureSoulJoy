@@ -23,40 +23,14 @@ import {
 
 import AppHeader from "@/components/AppHeader";
 import { useUser } from "@/context/UserContext";
-import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getNormalizedUser } from "../utils/normalizeUser";
 import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
-import { normalizeQuery, parseMealItems } from "./utils/mealParser";
+import { normalizeQuery } from "./utils/mealParser";
 
-const BACKEND_URL = "http://192.168.40.138:8000";
+const BACKEND_URL = "http://10.0.0.6:8003";
 
-const MEAL_ACTION_SELECTION_TEXT = "What would you like to do?";
-
-const NOT_IMPLEMENTED_ACTION_IDS = [
-  "improve_meal", "walk_10min_now", "track_metrics",
-  "add_fiber_next_meal", "reduce_sat_fat",
-];
-const NOT_IMPLEMENTED_ACTION_LABELS = [
-  "improve meal", "walk 10 minutes", "track metrics",
-  "add fiber next meal", "walk 10min now",
-];
-const isNotImplementedAction = (value: string): boolean => {
-  const s = value.trim().toLowerCase();
-  return NOT_IMPLEMENTED_ACTION_IDS.some(id => s === id) ||
-    NOT_IMPLEMENTED_ACTION_LABELS.some(label => s === label);
-};
-const buildMealActionTitle = (meal: string | null) =>
-  meal ? `Work on this meal: ${meal}?` : "Work on this meal?";
-const MEAL_ACTION_OPTIONS = [
-  { id: "analyze", label: "Analyze" },
-  { id: "improve", label: "Improve" },
-  { id: "build", label: "Build" },
-  { id: "none", label: "Continue with this meal" }, // 🔥 clarity
-  { id: "cancel", label: "Cancel" },
-] as const;
-type MealActionId = typeof MEAL_ACTION_OPTIONS[number]["id"];
 
 const ACTION_TEXT_MAP: Record<string, string> = {
   walk_10min_now: "Take a 10-minute walk now",
@@ -118,15 +92,12 @@ export default function HomeScreen() {
   const [litePromptShown, setLitePromptShown] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("IDLE");
   const [statusText, setStatusText] = useState<string | null>(null);
-  const [statusMode, setStatusMode] = useState<"NONE" | "MEAL_ACTION_SELECTION">("NONE");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
 
   const router = useRouter();
   const { user, setUser } = useUser();
   const [checkingUser, setCheckingUser] = useState(true);
-  const [pendingMeal, setPendingMeal] = useState<PendingMeal | null>(null);
-  const [pendingMealTraceId, setPendingMealTraceId] = useState<string | null>(null);
 
   // other refs and state...
 
@@ -140,8 +111,6 @@ export default function HomeScreen() {
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const discardResponseRef = useRef(false);
-
-  const navigatedToMealRef = useRef(false);
 
   const scrollRef = useRef<ScrollView>(null);
   const blockRefs = useRef<Record<string, View | null>>({});
@@ -161,20 +130,6 @@ export default function HomeScreen() {
     if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] [VoiceState] ${current} → ${next}`);
     voiceStateRef.current = next;
     setVoiceState(next);
-  };
-
-  const handleIntentRouting = (intent: string, data: any) => {
-    if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] 🧠 Routing intent:`, intent);
-
-    if (intent === "glucose") {
-      setStatusMode("MEAL_ACTION_SELECTION");
-      setStatusText(MEAL_ACTION_SELECTION_TEXT);
-      return;
-    }
-
-    // future:
-    // cholesterol → meal-main?intent=cholesterol
-    // weight → meal-main?intent=weight
   };
 
   // ─── Utilities ───────────────────────────────────────────────────────────
@@ -436,9 +391,6 @@ export default function HomeScreen() {
 
       const data = await res.json();
 
-      const intent = data.intent || "general";
-      handleIntentRouting(intent, data);
-
       logTrace(traceId, "API_RESPONSE", data);
 
       const cleanedQuery = (() => {
@@ -481,60 +433,6 @@ export default function HomeScreen() {
         return;
       }
 
-      // 🔥 VOICE MEAL GATE — same UX as keyboard raw meal gate.
-      // Buttons only. Do NOT map spoken one/two/three/four to actions.
-      console.log("VOICE CLEANED:", cleanedQuery);
-      console.log("VOICE MEAL GATE INPUT:", {
-        cleanedQuery,
-        mealLike: looksLikeMeal(cleanedQuery),
-        words: cleanedQuery.trim().split(/\s+/).filter(Boolean),
-      });
-
-      const voiceWords = cleanedQuery.trim().split(/\s+/).filter(Boolean);
-      const voiceMealLike = looksLikeMeal(cleanedQuery);
-      const voiceIsQuestion =
-        cleanedQuery.includes("?") ||
-        /^(what|how|why|when|where|is|are|can|should|could|would|do|does|will)\b/i.test(cleanedQuery.trim());
-      const voiceIsShort = voiceWords.length <= 4;
-
-      if (voiceMealLike && voiceIsShort && !voiceIsQuestion) {
-        console.log("🔥 VOICE MEAL DETECTED:", {
-          cleanedQuery,
-          voiceWords,
-          voiceMealLike,
-          voiceIsShort,
-          voiceIsQuestion,
-        });
-
-        setMessages(prev =>
-          prev.filter(m => m.id !== userMsgId && m.id !== assistantMsgId)
-        );
-
-        setMessages(prev => [
-          ...prev,
-          {
-            id: `${Date.now()}-user`,
-            role: "user" as const,
-            text: cleanedQuery,
-            source: "voice" as const,
-            status: "complete" as const,
-          },
-        ]);
-
-        setInput("");
-        setPendingMeal(cleanedQuery);
-        setStatusMode("MEAL_ACTION_SELECTION");
-        setStatusText(null);
-
-        const mealPromptText =
-          `${buildMealActionTitle(cleanedQuery)} ` +
-          `Analyze, Improve, Build, or None.`;
-        if (TRACE_LEVEL >= 1) console.log("🔊 VOICE MEAL LOCAL TTS:", mealPromptText);
-        await speakLocalPrompt(mealPromptText);
-
-        return; // CRITICAL: prevents backend response from rendering
-      }
-
       // Check if transcript is a voice intent response to the previous message
       const lastAssistant = [...messages].reverse().find(m => m.role === "assistant" && m.status === "complete");
       const voiceIntent = parseVoiceIntent(cleanedQuery);
@@ -552,7 +450,10 @@ export default function HomeScreen() {
 
       const sections = parseSections(text);
       // 🔥 NEW BACKEND CONTRACT (ROOT LEVEL)
-      const topActionCodes: string[] = response?.actions || data?.actions || [];
+      const topActionCodes: string[] =
+        data?.top_actions ||
+        data?.actions ||
+        [];
 
       // 🔥 BUILD HUMAN READABLE ACTIONS
       const topActions: string[] = topActionCodes.map(
@@ -730,21 +631,6 @@ export default function HomeScreen() {
           lite: liteMode === true,
           user_profile: getNormalizedUser(user),
           traceId,
-
-          ...(pendingMeal
-            ? {
-              pending_meal:
-                typeof pendingMeal === "string"
-                  ? {
-                    items: [pendingMeal],
-                    estimated_carbs: null
-                  }
-                  : {
-                    items: pendingMeal.items ?? [],
-                    estimated_carbs: pendingMeal.estimated_carbs ?? null
-                  }
-            }
-            : {})
         }),
         signal: controller.signal,
       });
@@ -816,8 +702,12 @@ export default function HomeScreen() {
       }
 
       const sections = parseSections(text);
+
       // 🔥 NEW BACKEND CONTRACT (ROOT LEVEL ONLY)
-      const topActionCodes: string[] = data?.actions || [];
+      const topActionCodes: string[] =
+        data?.top_actions ||
+        data?.actions ||
+        [];
 
       // 🔥 BUILD HUMAN READABLE TEXT
       const topActions: string[] = topActionCodes.map(
@@ -1107,140 +997,11 @@ export default function HomeScreen() {
     // PROCESSING → ignore
   };
 
-  // 🔥 MEAL DETECTOR — dual detection on raw input
-  const looksLikeMeal = (text: string): boolean => {
-    const lower = text.toLowerCase();
-
-    // Signal 1: consumption phrases
-    const consumptionPhrases = [
-      /\bi (just )?(ate|had|consumed)\b/i,
-      /\bmy meal was\b/i,
-      /\bfor (breakfast|lunch|dinner)\b/i,
-    ];
-    if (consumptionPhrases.some(p => p.test(lower))) return true;
-
-    // Signal 2: parseMealItems returns multiple distinct items
-    if (parseMealItems(text).length >= 2) return true;
-
-    // Signal 3: fallback single food keyword
-    const foodWords = [
-      "rice", "dal", "roti", "chapati", "bread", "egg", "eggs",
-      "chicken", "fish", "paneer", "tofu", "beans", "lentils",
-      "salad", "vegetable", "sabzi", "sag", "saag", "curry", "oats",
-      "idli", "dosa", "banana", "apple", "beef", "mutton", "spinach",
-      "okra", "turnip", "brinjal", "eggplant",
-    ];
-    return foodWords.some(w => lower.includes(w));
-  };
-
-  const handleMealExit = (action: "cancel" | "none") => {
-    if (!pendingMealTraceId) {
-      console.warn(`Missing traceId for ${action}`);
-      return;
-    }
-
-    const traceId = pendingMealTraceId;
-
-    logTrace(traceId, `MEAL_ACTION_${action.toUpperCase()}`, {
-      action,
-      pendingMeal
-    });
-
-    // 🔥 CRITICAL: pass context explicitly
-    sendKeyboardQuery(
-      action,
-      traceId,
-      undefined,
-      false,
-      pendingMeal ?? undefined   // ✅ FIX
-    );
-
-    // clear AFTER send
-    setPendingMeal(null);
-    setPendingMealTraceId(null);
-    setStatusMode("NONE");
-    setStatusText(null);
-    setInput("");
-  };
-
-  const handleMealActionSelection = async (action: MealActionId) => {
-    const actionTraceId = createTraceId();
-    logTrace(actionTraceId, "MEAL_ACTION_SELECTED", { action, pendingMeal, statusMode });
-
-    if (action === "cancel") {
-      handleMealExit("cancel");
-      return;
-    }
-
-    if (action === "none") {
-      handleMealExit("none");
-      return;
-    }
-
-    if (!pendingMeal) return;
-
-    const parsed = parseMealItems(pendingMeal).join(", ");
-    navigatedToMealRef.current = true;
-    router.push(`/meal-main?prefill=${encodeURIComponent(parsed)}&action=${action}`);
-  };
-
   const handleSendPress = () => {
-
-    // 🔥 RESET if user ignores selection and types new query
-    if (pendingMeal && statusMode === "MEAL_ACTION_SELECTION") {
-      setPendingMeal(null);
-      setStatusMode("NONE");
-    }
-
     if (voiceStateRef.current === "PROCESSING") return;
 
     const query = input.trim();
     if (!query) return;
-
-    if (/^[1-4]$/.test(query)) {
-      setInput("");
-      setStatusText("Tap an option");
-      return;
-    }
-
-    const words = query.trim().split(/\s+/).filter(Boolean);
-    const mealLike = looksLikeMeal(query);
-    const isQuestion =
-      query.includes("?") ||
-      /^(what|how|why|when|where|is|are|can|should|could|would|do|does|will)\b/i.test(query.trim());
-    const isShort = words.length <= 4;
-    const isSingleFood = words.length === 1 && mealLike;
-
-    // ✅ ONLY HERE we show meal UI
-    if ((mealLike && isShort && !isQuestion) || isSingleFood) {
-      const traceId = createTraceId();
-      logTrace(traceId, "MEAL_INPUT_DETECTED", { query });
-
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `${Date.now()}-user`,
-          role: "user",
-          text: query,
-          status: "complete",
-          traceId
-        },
-      ]);
-
-      setInput("");
-
-      setPendingMeal(query);
-      setPendingMealTraceId(traceId);
-      setStatusMode("MEAL_ACTION_SELECTION");
-      setStatusText(null);
-
-      return;
-    }
-
-    // ✅ NORMAL FLOW
-    setStatusMode("NONE");
-    setStatusText(null);
-    setPendingMeal(null);
 
     const traceId = createTraceId();
     logTrace(traceId, "KEYBOARD_START", query);
@@ -1322,16 +1083,6 @@ export default function HomeScreen() {
 
     return () => sub.remove();
   }, []);
-
-  useFocusEffect(
-    React.useCallback(() => {
-      if (navigatedToMealRef.current) {
-        setInput("");
-        setPendingMeal(null);
-        navigatedToMealRef.current = false;
-      }
-    }, [])
-  );
 
   useEffect(() => {
     if (messages.length === 0) return;
@@ -1679,34 +1430,28 @@ export default function HomeScreen() {
                             What's next?
                           </Text>
                           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                            {msg.nextActionCodes.map((code, idx) => {
-                              const disabled = isNotImplementedAction(code);
-                              return (
-                                <TouchableOpacity
-                                  key={code}
-                                  disabled={disabled}
-                                  activeOpacity={disabled ? 1 : 0.82}
-                                  onPress={() => {
-                                    if (disabled) return;
-                                    const newTraceId = createTraceId();
-                                    sendKeyboardQuery(code, newTraceId);
-                                  }}
-                                  style={{
-                                    paddingHorizontal: 14,
-                                    paddingVertical: 7,
-                                    borderRadius: 20,
-                                    borderWidth: 1,
-                                    borderColor: "#2D3748",
-                                    backgroundColor: C.surface,
-                                    opacity: disabled ? 0.4 : 1,
-                                  }}
-                                >
-                                  <Text style={{ color: C.text, fontSize: 13, opacity: disabled ? 0.7 : 1 }}>
-                                    {msg.nextActionLabels?.[idx] ?? code.replace(/_/g, " ")}
-                                  </Text>
-                                </TouchableOpacity>
-                              );
-                            })}
+                            {msg.nextActionCodes.map((code, idx) => (
+                              <TouchableOpacity
+                                key={code}
+                                activeOpacity={0.82}
+                                onPress={() => {
+                                  const newTraceId = createTraceId();
+                                  sendKeyboardQuery(code, newTraceId);
+                                }}
+                                style={{
+                                  paddingHorizontal: 14,
+                                  paddingVertical: 7,
+                                  borderRadius: 20,
+                                  borderWidth: 1,
+                                  borderColor: "#2D3748",
+                                  backgroundColor: C.surface,
+                                }}
+                              >
+                                <Text style={{ color: C.text, fontSize: 13 }}>
+                                  {msg.nextActionLabels?.[idx] ?? code.replace(/_/g, " ")}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
                           </View>
                         </View>
                       )}
@@ -1714,8 +1459,8 @@ export default function HomeScreen() {
                 ))}
               </ScrollView>
 
-              {/* Generic status text — hidden during action selection */}
-              {statusText && statusMode !== "MEAL_ACTION_SELECTION" && (
+              {/* Generic status text */}
+              {statusText && (
                 <View style={{ alignItems: "center", paddingVertical: 6 }}>
                   <Text
                     style={{
@@ -1728,26 +1473,6 @@ export default function HomeScreen() {
                 </View>
               )}
 
-              {/* Meal action selection UI — sibling, never nested */}
-              {statusMode === "MEAL_ACTION_SELECTION" && (
-                <View style={styles.mealActionContainer}>
-                  <Text style={styles.mealActionTitle}>{buildMealActionTitle(pendingMeal)}</Text>
-                  <Text style={styles.mealActionHint}>Tap an option</Text>
-                  <View style={styles.mealActionGrid}>
-                    {MEAL_ACTION_OPTIONS.map((option) => (
-                      <TouchableOpacity
-                        key={option.id}
-                        style={styles.mealActionButton}
-                        onPress={() => handleMealActionSelection(option.id)}
-                        activeOpacity={0.82}
-                      >
-                        <Text style={styles.mealActionButtonText}>{option.label}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                </View>
-              )}
-
               {/* CAPTURE BUTTON */}
               {!isKeyboardVisible && (
                 <View
@@ -1757,8 +1482,7 @@ export default function HomeScreen() {
                   <View style={{ width: 260 }} pointerEvents="box-none">
                     <TouchableOpacity
                       onPress={() => {
-                        navigatedToMealRef.current = true;
-                        router.push("/meal-capture");
+                        console.log("Capture disabled for Day-1 platform test");
                       }}
                       style={{
                         backgroundColor: C.accent,
@@ -1791,7 +1515,7 @@ export default function HomeScreen() {
               >
                 <TextInput
                   value={input}
-                  onChangeText={(v) => { setInput(v); if (pendingMeal) setPendingMeal(null); }}
+                  onChangeText={setInput}
                   editable={!isProcessing}
                   placeholder='Ask or speak… say “Go BuildJoy”'
                   placeholderTextColor={C.muted}
@@ -1848,56 +1572,11 @@ export default function HomeScreen() {
           </TouchableWithoutFeedback>
         </KeyboardAvoidingView>
       </View>
-    </SafeAreaView>
+    </SafeAreaView >
   );
 }
 
 const styles = StyleSheet.create({
-  mealActionContainer: {
-    marginTop: 8,
-    marginHorizontal: 24,
-    padding: 10,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,0.05)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-  },
-  mealActionTitle: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: C.text,
-    marginBottom: 6,
-    textAlign: "center",
-  },
-  mealActionHint: {
-    fontSize: 13,
-    color: C.text,
-    opacity: 0.7,
-    textAlign: "center",
-    marginBottom: 8,
-  },
-  mealActionGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "center",
-  },
-  mealActionButton: {
-    minWidth: 130,
-    paddingVertical: 9,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
-    backgroundColor: "rgba(255,255,255,0.08)",
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  mealActionButtonText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: C.text,
-    textAlign: "center",
-  },
   container: {
     flex: 1,
     backgroundColor: C.background,
