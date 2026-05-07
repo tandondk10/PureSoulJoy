@@ -1,13 +1,14 @@
 import { C } from "@/constants/colors";
+import { AssistantMessage } from "@/components/AssistantMessage";
+import { UserMessage } from "@/components/UserMessage";
+import { ActionCards } from "@/components/ActionCards";
 import { profiles } from "@/data/profiles";
 import useKeyboardVisible from "@/hooks/useKeyboardVisible";
-//import { loadUser, saveUser } from "@/utils/storage";
 import { loadUser } from "@/utils/storage";
 import { Audio } from "expo-av";
 import * as Speech from "expo-speech";
 import React, { useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   AppState,
   Keyboard,
   KeyboardAvoidingView,
@@ -28,34 +29,20 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { normalizeQuery } from "../utils/mealParser";
 import { getNormalizedUser } from "../utils/normalizeUser";
 import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
+import type { ChatMessage } from "./types/coaching";
+import {
+  assistantCompleteFromResponse,
+  assistantError,
+  getVoiceUserText,
+  getSafeErrorMessage,
+  makeAssistantLoadingMessage,
+  makeUserMessage,
+} from "./utils/messageLifecycle";
+import { sendKeyboardCoachingQuery, sendVoiceCoachingQuery } from "./services/coachingApi";
 
 const BACKEND_URL = "http://192.168.86.52:8003";
 
 
-function getVoiceDisplayText(data?: any): string {
-  return (typeof data?.transcript === "string" && data.transcript.trim().length > 0)
-    ? data.transcript.trim()
-    : "🎤 Voice input";
-}
-
-function getResponseText(data: any): string {
-  return (typeof data?.chat === "string" && data.chat.trim().length > 0)
-    ? data.chat
-    : (typeof data?.text === "string" && data.text.trim().length > 0)
-      ? data.text
-      : (typeof data?.message === "string" && data.message.trim().length > 0)
-        ? data.message
-        : "I could not prepare a response. Please try again.";
-}
-
-const ACTION_TEXT_MAP: Record<string, string> = {
-  walk_10min_now: "Take a 10-minute walk now",
-  drink_water_now: "Drink a glass of water",
-  next_meal_add_protein_and_fiber: "Add protein and fiber to your next meal",
-  avoid_simple_carbs_now: "Avoid simple carbs for now",
-  take_a_10min_walk: "Take a 10-minute walk",
-  check_your_last_meal: "Review your last meal",
-};
 
 
 // Voice thresholds — all configurable, no hardcoded values per spec §2.1
@@ -72,27 +59,6 @@ if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] UX_RUNMODE:`, UX_RUNM
 
 type VoiceState = "IDLE" | "RECORDING" | "PROCESSING" | "PLAYING";
 
-type Section = { title: string; content: string };
-
-type Message = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-  status?: "loading" | "complete" | "error";
-  source?: "voice" | "text";
-  sections?: Section[];
-  rawText?: string;
-  errorMessage?: string;
-  topActions?: string[];
-  topActionCodes?: string[];
-  nextActionLabels?: string[];
-  nextActionCodes?: string[];
-  traceId?: string;
-  context?: string;
-  feedbackSent?: "helpful" | "not_helpful";
-  actionTaken?: boolean;
-};
-
 // Valid state transitions per spec §4.2
 // IDLE → PROCESSING added to support keyboard submit from IDLE
 const VALID_TRANSITIONS: Record<VoiceState, VoiceState[]> = {
@@ -108,7 +74,7 @@ export default function HomeScreen() {
   const [litePromptShown, setLitePromptShown] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("IDLE");
   const [statusText, setStatusText] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
 
   const router = useRouter();
@@ -159,20 +125,7 @@ export default function HomeScreen() {
     return null;
   };
 
-  const parseSections = (text: string): Section[] | null => {
-    if (!text || !text.includes("##")) return null;
-    return text
-      .split("## ")
-      .filter(Boolean)
-      .map((p) => {
-        const lines = p.split("\n");
-        return {
-          title: String(lines[0] || "").trim(),
-          content: String(lines.slice(1).join("\n") || "").trim(),
-        };
-      });
-  };
-  const scrollToBlock = () => { }
+  const scrollToBlock = (_id?: string) => { }
 
   //  const scrollToBlock = (id: string) => {
   //    requestAnimationFrame(() => {
@@ -338,12 +291,11 @@ export default function HomeScreen() {
 
     setMessages((prev) => {
       if (prev.find((m) => m.id === userMsgId || m.id === assistantMsgId)) return prev;
-      const next = [
+      return [
         ...prev,
-        { id: userMsgId, role: "user", text: "🎤 Voice input", source: "voice", status: "complete", traceId },
-        { id: assistantMsgId, role: "assistant", text: "Thinking...", source: "voice", status: "loading", traceId },
+        makeUserMessage({ id: userMsgId, text: "🎤 Voice input", source: "voice", traceId }),
+        makeAssistantLoadingMessage({ id: assistantMsgId, source: "voice", traceId }),
       ];
-      return next;
     });
 
     const initialStatus = isMaxDuration
@@ -353,13 +305,8 @@ export default function HomeScreen() {
     setStatusText(initialStatus);
 
     const processingTimer = setTimeout(() => {
-      if (
-        voiceStateRef.current === "PROCESSING" &&
-        !discardResponseRef.current
-      ) {
-        setStatusText((cur) =>
-          cur === "Transcribing..." ? "Processing..." : cur
-        );
+      if (voiceStateRef.current === "PROCESSING" && !discardResponseRef.current) {
+        setStatusText((cur) => cur === "Transcribing..." ? "Processing..." : cur);
       }
     }, 5000);
 
@@ -371,24 +318,17 @@ export default function HomeScreen() {
     const startTime = Date.now();
 
     try {
-      const isCAF = uri.endsWith(".caf");
-
-      const formData = new FormData();
-      formData.append("audio_file", {
-        uri,
-        name: isCAF ? "audio.caf" : "audio.m4a",
-        type: isCAF ? "audio/x-caf" : "audio/m4a",
-      } as any);
-
-      formData.append("lite", liteMode === true ? "true" : "false");
-      formData.append("traceId", traceId);
-      formData.append("user_profile", JSON.stringify(user ?? {}));
-
       if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query/voice`);
-      const res = await fetch(`${BACKEND_URL}/query/voice`, {
-        method: "POST",
-        headers: { "x-trace-id": traceId },
-        body: formData,
+
+      const data = await sendVoiceCoachingQuery({
+        backendUrl: BACKEND_URL,
+        audioUri: uri,
+        traceId,
+        extraFields: {
+          lite: liteMode === true ? "true" : "false",
+          traceId,
+          user_profile: JSON.stringify(user ?? {}),
+        },
         signal: controller.signal,
       });
 
@@ -402,56 +342,28 @@ export default function HomeScreen() {
 
       if (discardResponseRef.current) {
         discardResponseRef.current = false;
+        setMessages(prev => prev.filter(m => m.id !== userMsgId && m.id !== assistantMsgId));
         return;
-      }
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-
-      logTrace(traceId, "API_RESPONSE", data);
-
-      const cleanedQuery = (() => {
-        const candidate =
-          (typeof data.cleaned_query === "string" ? data.cleaned_query.trim() : "") ||
-          (typeof data.query === "string" ? data.query.trim() : "") ||
-          (typeof data.transcript === "string" ? data.transcript.trim() : "");
-        return candidate || "Voice Input";
-      })();
-
-      if (TRACE_LEVEL >= 2) {
-        console.log("CHAT:", data.chat);
-        console.log("TEXT:", data.text);
-      }
-
-      const text =
-        (typeof data.chat === "string" && data.chat.trim().length > 0)
-          ? data.chat
-          : (typeof data.text === "string" && data.text.trim().length > 0)
-            ? data.text
-            : (typeof data.message === "string" && data.message.trim().length > 0)
-              ? data.message
-              : "No response received.";
-
-      if (!text || text.trim() === "") {
-        console.warn("Empty response", data);
       }
 
       if (data.status === "error") {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantMsgId
-              ? { ...m, status: "error", errorMessage: "🎤 Didn’t catch that. Try again." }
+              ? assistantError({ existing: m, errorMessage: "🎤 Didn’t catch that. Try again." })
               : m
           )
         );
-
         setStatusText("Say your question clearly… I’m listening.");
         updateVoiceState("IDLE");
         return;
       }
+
+      const cleanedQuery =
+        (typeof data.cleaned_query === "string" && data.cleaned_query.trim()) ||
+        (typeof data.query === "string" && data.query.trim()) ||
+        (typeof data.transcript === "string" && data.transcript.trim()) ||
+        "Voice Input";
 
       // Check if transcript is a voice intent response to the previous message
       const lastAssistant = [...messages].reverse().find(m => m.role === "assistant" && m.status === "complete");
@@ -468,47 +380,13 @@ export default function HomeScreen() {
         return;
       }
 
-      const sections = parseSections(text);
-
-      const rawActions: any[] = data?.top_actions || data?.actions || [];
-      const topActionCodes: string[] = rawActions
-        .map((a: any) => (typeof a === "string" ? a : (a.id ?? "")))
-        .filter(Boolean);
-      const topActions: string[] = rawActions.map((a: any) => {
-        if (typeof a === "string") return ACTION_TEXT_MAP[a] || a;
-        return a.label ?? ACTION_TEXT_MAP[a.id] ?? a.id ?? "Action";
-      });
-
-      const nextActionCodes: string[] =
-        data.screen?.next_actions ||
-        data.structured?.next_actions ||
-        [];
-      const nextActionLabels: string[] =
-        data.screen?.next_action_labels ||
-        data.structured?.next_action_labels ||
-        [];
-
-      const voiceDisplayText = getVoiceDisplayText(data);
-
-      setMessages((prev) => {
-        const next = prev.map((m) => {
-          if (m.id === userMsgId) return { ...m, text: voiceDisplayText };
-          if (m.id === assistantMsgId) return {
-            ...m,
-            status: "complete",
-            text,
-            sections: liteMode === true ? undefined : sections ?? undefined,
-            rawText: liteMode === true ? text : (sections ? undefined : text),
-            topActions,
-            topActionCodes,
-            nextActionCodes,
-            nextActionLabels,
-            traceId,
-          };
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id === userMsgId) return { ...m, text: getVoiceUserText(data) };
+          if (m.id === assistantMsgId) return assistantCompleteFromResponse({ existing: m, response: data, liteMode });
           return m;
-        });
-        return next;
-      });
+        })
+      );
 
       if (data.audio) {
         playAudio(data.audio);
@@ -526,21 +404,17 @@ export default function HomeScreen() {
 
       if (discardResponseRef.current) {
         discardResponseRef.current = false;
+        setMessages(prev => prev.filter(m => m.id !== userMsgId && m.id !== assistantMsgId));
         return;
       }
 
-      const message =
-        err.name === "AbortError"
-          ? "Connection timed out. Please try again."
-          : "Connection issue. Please try again.";
-
+      const errMsg = getSafeErrorMessage(err);
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantMsgId ? { ...m, status: "error", errorMessage: message } : m
+          m.id === assistantMsgId ? assistantError({ existing: m, errorMessage: errMsg }) : m
         )
       );
-
-      setStatusText(message);
+      setStatusText(errMsg);
       updateVoiceState("IDLE");
     } finally {
       traceEnd(traceId, "sendVoiceQuery", t0, TRACE_LEVEL);
@@ -600,24 +474,9 @@ export default function HomeScreen() {
     setMessages(prev => [
       ...prev,
       ...(showUserBubble
-        ? [{
-          id: userMsgId,
-          role: "user" as const,
-          text: displayText,
-          source: "text" as const,
-          status: "complete" as const,
-          traceId
-        }]
+        ? [makeUserMessage({ id: userMsgId, text: displayText, source: "keyboard", traceId })]
         : []),
-      {
-        id: assistantMsgId,
-        role: "assistant" as const,
-        text: "Thinking...",
-        source: "text" as const,
-        status: "loading" as const,
-        traceId,
-        context: context || undefined
-      },
+      makeAssistantLoadingMessage({ id: assistantMsgId, source: "keyboard", traceId, context: context || undefined }),
     ]);
 
     logTrace(traceId, "UI_UPDATE_DONE");
@@ -634,16 +493,15 @@ export default function HomeScreen() {
       if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query keyboard`);
       logTrace(traceId, "API_REQUEST_BODY", { query, voice: false, hasUserProfile: !!(user) });
 
-      const res = await fetch(`${BACKEND_URL}/query`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-trace-id": traceId },
-        body: JSON.stringify({
+      const data = await sendKeyboardCoachingQuery({
+        backendUrl: BACKEND_URL,
+        request: {
           query,
           voice: false,
           lite: liteMode === true,
           user_profile: getNormalizedUser(user),
           traceId,
-        }),
+        },
         signal: controller.signal,
       });
 
@@ -655,102 +513,24 @@ export default function HomeScreen() {
       clearThinkingTimer();
       abortControllerRef.current = null;
 
-      // 🚫 Ignore if cancelled
       if (discardResponseRef.current) {
         discardResponseRef.current = false;
-        return;
+        setMessages(prev => prev.filter(m => m.id !== userMsgId && m.id !== assistantMsgId));
+        return null;
       }
-
-      if (!res.ok) {
-        logTrace(traceId, "API_HTTP_ERROR", res.status);
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-
-      logTrace(
-        traceId,
-        "RESPONSE_PARSED",
-        {
-          ...data,
-          _trace: data._trace
-            ? JSON.stringify(data._trace, null, 2)
-            : null,
-        }
-      );
 
       logTrace(traceId, "API_RESPONSE_SUMMARY", {
         status: data?.status,
         input_domain: data?.input_domain,
-        condition_focus: data?.condition_focus,
-        timing: data?.timing,
         foods: data?.foods ?? [],
-        levers: data?.levers ?? [],
-        has_food: data?.has_food,
       });
-      logTrace(traceId, "API_STATUS_SUCCESS");
-
-      const cleanedQuery =
-        typeof data.cleaned_query === "string" &&
-          data.cleaned_query.trim().length > 0
-          ? data.cleaned_query
-          : query;
-
-      if (TRACE_LEVEL >= 2) {
-        console.log("CHAT:", data.chat);
-        console.log("TEXT:", data.text);
-      }
-
-      const text =
-        (typeof data.chat === "string" && data.chat.trim().length > 0)
-          ? data.chat
-          : (typeof data.text === "string" && data.text.trim().length > 0)
-            ? data.text
-            : (typeof data.message === "string" && data.message.trim().length > 0)
-              ? data.message
-              : "No response received.";
-
-      if (!text || text.trim() === "") {
-        console.warn("Empty response", data);
-      }
-
-      const sections = parseSections(text);
-
-      const rawActions: any[] = data?.top_actions || data?.actions || [];
-      const topActionCodes: string[] = rawActions
-        .map((a: any) => (typeof a === "string" ? a : (a.id ?? "")))
-        .filter(Boolean);
-      const topActions: string[] = rawActions.map((a: any) => {
-        if (typeof a === "string") return ACTION_TEXT_MAP[a] || a;
-        return a.label ?? ACTION_TEXT_MAP[a.id] ?? a.id ?? "Action";
-      });
-
-      const nextActionCodes: string[] =
-        data.screen?.next_actions ||
-        data.structured?.next_actions ||
-        [];
-      const nextActionLabels: string[] =
-        data.screen?.next_action_labels ||
-        data.structured?.next_action_labels ||
-        [];
 
       logTrace(traceId, "UI_UPDATE_START");
 
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsgId
-            ? {
-              ...m,
-              status: "complete",
-              text,
-              sections: liteMode ? undefined : sections ?? undefined,
-              rawText: liteMode ? text : (sections ? undefined : text),
-              topActions,
-              topActionCodes,
-              nextActionCodes,
-              nextActionLabels,
-              traceId,
-            }
+            ? assistantCompleteFromResponse({ existing: m, response: data, liteMode })
             : m
         )
       );
@@ -770,27 +550,24 @@ export default function HomeScreen() {
 
       if (discardResponseRef.current) {
         discardResponseRef.current = false;
+        setMessages(prev => prev.filter(m => m.id !== userMsgId && m.id !== assistantMsgId));
         return null;
       }
 
-      const message =
-        err.name === "AbortError"
-          ? "Connection timed out. Please try again."
-          : "Connection issue. Please try again.";
-
+      const errMsg = getSafeErrorMessage(err);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsgId
-            ? { ...m, status: "error", errorMessage: message }
+            ? assistantError({ existing: m, errorMessage: errMsg })
             : m
         )
       );
 
-      setStatusText(message);
+      setStatusText(errMsg);
       updateVoiceState("IDLE");
 
       setTimeout(() => {
-        setStatusText((cur) => (cur === message ? null : cur));
+        setStatusText((cur) => (cur === errMsg ? null : cur));
       }, 4000);
       return null;
     } finally {
@@ -1028,11 +805,12 @@ export default function HomeScreen() {
       const id = await loadUser();
       if (TRACE_LEVEL >= 1) console.log(`[${nowISO()}][no-trace] LOADED USER:`, id);
 
-      if (!id || !profiles[id]) {
+      const p = id ? (profiles as Record<string, any>)[id] : null;
+      if (!p) {
         setUser(null);
         router.replace("/login");
       } else {
-        setUser(profiles[id]);
+        setUser(p);
       }
 
       setCheckingUser(false);
@@ -1103,7 +881,7 @@ export default function HomeScreen() {
     setLitePromptShown(true);
   }, [checkingUser]);
 
-  const sendFeedback = async (msg: Message, feedback: "helpful" | "not_helpful") => {
+  const sendFeedback = async (msg: ChatMessage, feedback: "helpful" | "not_helpful") => {
     if (!msg.traceId || !msg.topActionCodes?.length) return;
     setMessages(prev => prev.map(m =>
       m.id === msg.id ? { ...m, feedbackSent: feedback } : m
@@ -1126,7 +904,7 @@ export default function HomeScreen() {
     }
   };
 
-  const sendActionTaken = async (msg: Message) => {
+  const sendActionTaken = async (msg: ChatMessage) => {
     if (!msg.traceId || !msg.topActionCodes?.length) return;
     setMessages(prev => prev.map(m =>
       m.id === msg.id ? { ...m, actionTaken: true } : m
@@ -1166,71 +944,6 @@ export default function HomeScreen() {
       setMessages([]);
       setShowModePrompt(false);
     }
-  };
-
-  // ─── Assistant renderer ──────────────────────────────────────────────────
-
-  const getAssistantDisplayText = (msg: Message): string => {
-    if (msg.status === "loading") return "Thinking...";
-    if (msg.status === "error") return msg.errorMessage || "Something went wrong.";
-    const raw =
-      typeof msg.rawText === "string" && msg.rawText.trim().length > 0
-        ? msg.rawText.trim()
-        : typeof msg.text === "string" && msg.text.trim().length > 0
-          ? msg.text.trim()
-          : "";
-    return raw;
-  };
-
-  const renderAssistantMessage = (msg: Message) => {
-    const isLoading = msg.status === "loading";
-    const isError = msg.status === "error";
-    const displayText = getAssistantDisplayText(msg);
-
-    return (
-      <View
-        style={{
-          alignSelf: "flex-start",
-          backgroundColor: isError ? "#3A1A1A" : C.surfaceAlt,
-          padding: 12,
-          borderRadius: 14,
-          marginVertical: 6,
-          maxWidth: "85%",
-        }}
-      >
-        {msg.context ? (
-          <Text style={{ color: C.muted, fontSize: 12, marginBottom: 6 }}>
-            {msg.context}
-          </Text>
-        ) : null}
-
-        {isLoading ? (
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <ActivityIndicator color={C.accent} />
-            <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-              Thinking...
-            </Text>
-          </View>
-        ) : isError ? (
-          <Text style={{ color: C.error, fontSize: 16, lineHeight: 22 }}>
-            {displayText}
-          </Text>
-        ) : msg.sections && msg.sections.length > 0 ? (
-          <View>
-            {msg.sections.map((s, i) => (
-              <View key={`${msg.id}-s${i}`} style={{ marginBottom: i < msg.sections!.length - 1 ? 10 : 0 }}>
-                <Text style={{ color: "white", fontWeight: "700", marginBottom: 4 }}>{s.title}</Text>
-                <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>{s.content}</Text>
-              </View>
-            ))}
-          </View>
-        ) : (
-          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-            {displayText || "I could not prepare a response. Please try again."}
-          </Text>
-        )}
-      </View>
-    );
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────
@@ -1332,7 +1045,7 @@ export default function HomeScreen() {
                                 paddingVertical: 10,
                                 borderRadius: 10,
                                 borderWidth: 1,
-                                borderColor: action === "Try Lite" ? C.accent : C.border,
+                                borderColor: action === "Try Lite" ? C.accent : "#2D3748",
                               }}
                             >
                               <Text style={{ color: action === "Try Lite" ? "#000" : C.text, fontWeight: "600", fontSize: 14 }}>
@@ -1348,130 +1061,25 @@ export default function HomeScreen() {
 
                 {/* CONVERSATION MODE — messages exist */}
                 {messages.map((msg) => (
-                  <View
-                    key={msg.id}
-                  >
-                    {/* User bubble */}
+                  <View key={msg.id}>
                     {msg.role === "user" && (
-                      <View
-                        style={{
-                          alignSelf: "flex-end",
-                          backgroundColor: msg.source === "voice" ? "#CDEBCC" : C.userBubble,
-                          paddingVertical: 6,
-                          paddingHorizontal: 10,
-                          borderRadius: 14,
-                          marginVertical: 3,
-                          maxWidth: "80%",
-                        }}
-                      >
-                        <Text style={{ color: C.textDark }}>{msg.text}</Text>
-                      </View>
+                      <UserMessage msg={msg} colors={C} />
                     )}
-
-                    {/* Assistant message — loading, error, sections, raw text */}
-                    {msg.role === "assistant" && renderAssistantMessage(msg)}
-
-                    {/* Actions block — deterministic from backend, never from LLM */}
-                    {msg.role === "assistant" && msg.status === "complete" &&
-                      msg.topActions && msg.topActions.length > 0 && (
-                        <View
-                          style={{
-                            backgroundColor: C.surface,
-                            borderRadius: 14,
-                            padding: 12,
-                            marginTop: 8,
+                    {msg.role === "assistant" && (
+                      <>
+                        <AssistantMessage msg={msg} colors={C} />
+                        <ActionCards
+                          msg={msg}
+                          colors={C}
+                          onFeedback={sendFeedback}
+                          onActionTaken={sendActionTaken}
+                          onNextAction={(code) => {
+                            const newTraceId = createTraceId();
+                            sendKeyboardQuery(code, newTraceId);
                           }}
-                        >
-                          <Text style={{ color: C.muted, fontSize: 13, marginBottom: 6, fontWeight: "600" }}>
-                            Do this now:
-                          </Text>
-                          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-                            {msg.topActions.join("\n")}
-                          </Text>
-                        </View>
-                      )}
-
-                    {/* Feedback buttons */}
-                    {msg.role === "assistant" && msg.status === "complete" &&
-                      msg.topActions && msg.topActions.length > 0 && (
-                        <View style={{ flexDirection: "row", marginTop: 8, gap: 8 }}>
-                          {msg.feedbackSent ? (
-                            <Text style={{ color: C.muted, fontSize: 13 }}>
-                              {msg.feedbackSent === "helpful" ? "Thanks for the feedback!" : "Got it, we'll improve."}
-                            </Text>
-                          ) : (
-                            <>
-                              <TouchableOpacity
-                                onPress={() => sendFeedback(msg, "helpful")}
-                                style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
-                              >
-                                <Text style={{ color: C.text, fontSize: 14 }}>👍 Helpful</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                onPress={() => sendFeedback(msg, "not_helpful")}
-                                style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#2D3748" }}
-                              >
-                                <Text style={{ color: C.text, fontSize: 14 }}>👎 Not helpful</Text>
-                              </TouchableOpacity>
-                            </>
-                          )}
-                        </View>
-                      )}
-
-                    {/* Action commitment button */}
-                    {msg.role === "assistant" && msg.status === "complete" &&
-                      msg.topActionCodes && msg.topActionCodes.length > 0 && (
-                        <TouchableOpacity
-                          onPress={() => sendActionTaken(msg)}
-                          disabled={msg.actionTaken}
-                          style={{
-                            marginTop: 8,
-                            paddingHorizontal: 16,
-                            paddingVertical: 8,
-                            borderRadius: 20,
-                            backgroundColor: msg.actionTaken ? "#1A2A1A" : "#1A3A1A",
-                            alignSelf: "flex-start",
-                          }}
-                        >
-                          <Text style={{ color: msg.actionTaken ? C.muted : "#4ADE80", fontSize: 14, fontWeight: "600" }}>
-                            {msg.actionTaken ? "✔ You committed — start now" : "⚡ I'll do this"}
-                          </Text>
-                        </TouchableOpacity>
-                      )}
-
-                    {/* Next actions — continuation options */}
-                    {msg.role === "assistant" && msg.status === "complete" &&
-                      msg.nextActionCodes && msg.nextActionCodes.length > 0 && (
-                        <View style={{ marginTop: 12 }}>
-                          <Text style={{ color: C.muted, fontSize: 12, marginBottom: 6, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 }}>
-                            What's next?
-                          </Text>
-                          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                            {msg.nextActionCodes.map((code, idx) => (
-                              <TouchableOpacity
-                                key={code}
-                                activeOpacity={0.82}
-                                onPress={() => {
-                                  const newTraceId = createTraceId();
-                                  sendKeyboardQuery(code, newTraceId);
-                                }}
-                                style={{
-                                  paddingHorizontal: 14,
-                                  paddingVertical: 7,
-                                  borderRadius: 20,
-                                  borderWidth: 1,
-                                  borderColor: "#2D3748",
-                                  backgroundColor: C.surface,
-                                }}
-                              >
-                                <Text style={{ color: C.text, fontSize: 13 }}>
-                                  {msg.nextActionLabels?.[idx] ?? code.replace(/_/g, " ")}
-                                </Text>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        </View>
-                      )}
+                        />
+                      </>
+                    )}
                   </View>
                 ))}
               </ScrollView>
@@ -1596,7 +1204,7 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.background,
+    backgroundColor: C.bg,
     padding: 16,
   },
   form: {

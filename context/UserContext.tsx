@@ -1,9 +1,14 @@
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useState, ReactNode } from "react";
 
-const UserContext = createContext(null);
+type UserContextType = {
+  user: any;
+  setUser: React.Dispatch<React.SetStateAction<any>>;
+};
 
-export const UserProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
+const UserContext = createContext<UserContextType>({ user: null, setUser: () => {} });
+
+export const UserProvider = ({ children }: { children: ReactNode }) => {
+  const [user, setUser] = useState<any>(null);
 
   return (
     <UserContext.Provider value={{ user, setUser }}>
