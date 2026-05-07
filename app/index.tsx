@@ -27,7 +27,7 @@ import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getNormalizedUser } from "../utils/normalizeUser";
 import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
-import { normalizeQuery } from "./utils/mealParser";
+import { normalizeQuery } from "../utils/mealParser";
 
 const BACKEND_URL = "http://10.0.0.6:8003";
 
@@ -449,18 +449,15 @@ export default function HomeScreen() {
       }
 
       const sections = parseSections(text);
-      // 🔥 NEW BACKEND CONTRACT (ROOT LEVEL)
-      const topActionCodes: string[] =
-        data?.top_actions ||
-        data?.actions ||
-        [];
 
-      // 🔥 BUILD HUMAN READABLE ACTIONS
-      const topActions: string[] = topActionCodes.map(
-        (code) => ACTION_TEXT_MAP[code] || code
-      );
-      console.log("🔥 ACTIONS FROM API:", topActionCodes);
-      console.log("🔥 FINAL ACTION TEXT:", topActions);
+      const rawActions: any[] = data?.top_actions || data?.actions || [];
+      const topActionCodes: string[] = rawActions
+        .map((a: any) => (typeof a === "string" ? a : (a.id ?? "")))
+        .filter(Boolean);
+      const topActions: string[] = rawActions.map((a: any) => {
+        if (typeof a === "string") return ACTION_TEXT_MAP[a] || a;
+        return a.label ?? ACTION_TEXT_MAP[a.id] ?? a.id ?? "Action";
+      });
 
       const nextActionCodes: string[] =
         data.screen?.next_actions ||
@@ -470,11 +467,6 @@ export default function HomeScreen() {
         data.screen?.next_action_labels ||
         data.structured?.next_action_labels ||
         [];
-
-      // TODO: remove after validation
-      console.log("VOICE HANDLER HIT");
-      console.log("[VOICE] ACTION CODES:", topActionCodes);
-      console.log("[VOICE] DISPLAY ACTIONS:", topActions);
 
       setMessages((prev) =>
         prev.map((m) => {
@@ -669,11 +661,12 @@ export default function HomeScreen() {
 
       logTrace(traceId, "API_RESPONSE_SUMMARY", {
         status: data?.status,
-        domain: data?.domain,
+        input_domain: data?.input_domain,
+        condition_focus: data?.condition_focus,
+        timing: data?.timing,
+        foods: data?.foods ?? [],
+        levers: data?.levers ?? [],
         has_food: data?.has_food,
-        needs_clarification: data?.needs_clarification,
-        unknown_foods: data?.unknown_foods,
-        chat: data?.chat || data?.text || data?.message,
       });
       logTrace(traceId, "API_STATUS_SUCCESS");
 
@@ -703,20 +696,14 @@ export default function HomeScreen() {
 
       const sections = parseSections(text);
 
-      // 🔥 NEW BACKEND CONTRACT (ROOT LEVEL ONLY)
-      const topActionCodes: string[] =
-        data?.top_actions ||
-        data?.actions ||
-        [];
-
-      // 🔥 BUILD HUMAN READABLE TEXT
-      const topActions: string[] = topActionCodes.map(
-        (code) => ACTION_TEXT_MAP[code] || code
-      );
-
-      // 🔥 DEBUG
-      console.log("[KB] ACTION CODES:", topActionCodes);
-      console.log("[KB] DISPLAY ACTIONS:", topActions);
+      const rawActions: any[] = data?.top_actions || data?.actions || [];
+      const topActionCodes: string[] = rawActions
+        .map((a: any) => (typeof a === "string" ? a : (a.id ?? "")))
+        .filter(Boolean);
+      const topActions: string[] = rawActions.map((a: any) => {
+        if (typeof a === "string") return ACTION_TEXT_MAP[a] || a;
+        return a.label ?? ACTION_TEXT_MAP[a.id] ?? a.id ?? "Action";
+      });
 
       const nextActionCodes: string[] =
         data.screen?.next_actions ||
@@ -726,10 +713,6 @@ export default function HomeScreen() {
         data.screen?.next_action_labels ||
         data.structured?.next_action_labels ||
         [];
-
-      // TODO: remove after validation
-      console.log("[KB] ACTION CODES:", topActionCodes);
-      console.log("[KB] DISPLAY ACTIONS:", topActions);
 
       logTrace(traceId, "UI_UPDATE_START");
 
@@ -1338,8 +1321,7 @@ export default function HomeScreen() {
                       ))}
 
                     {/* Assistant raw text (lite mode) */}
-                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText &&
-                      (() => { console.log("RAW:", msg.rawText); console.log("SECTIONS:", msg.sections); return true; })() && (
+                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText && (
                         <View
                           style={{
                             backgroundColor: C.surfaceAlt,

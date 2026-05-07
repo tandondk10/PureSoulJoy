@@ -1,4 +1,4 @@
-import { parseMealItems } from "@/app/utils/mealParser";
+import { parseMealItems } from "@/utils/mealParser";
 import { createTraceId, logTrace } from "../utils/trace";
 import AppHeader from "@/components/AppHeader";
 import SectionCard from "@/components/SectionCard";
