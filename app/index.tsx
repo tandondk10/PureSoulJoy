@@ -122,6 +122,7 @@ export default function HomeScreen() {
 
   const updateVoiceState = (next: VoiceState) => {
     const current = voiceStateRef.current;
+    if (current === next) return;
     const allowed = VALID_TRANSITIONS[current];
     if (!allowed.includes(next)) {
       if (TRACE_LEVEL >= 1) console.warn(`[${nowISO()}][no-trace] [VoiceState] Invalid transition: ${current} → ${next} — ignored`);
@@ -231,7 +232,9 @@ export default function HomeScreen() {
     } catch (e) {
       console.warn("STOP_AUDIO_FAILED", e);
     } finally {
-      updateVoiceState("IDLE");
+      if (voiceStateRef.current !== "PROCESSING") {
+        updateVoiceState("IDLE");
+      }
     }
   };
 
@@ -321,7 +324,7 @@ export default function HomeScreen() {
       if (prev.find((m) => m.id === userMsgId)) return prev;
       return [
         ...prev,
-        { id: userMsgId, role: "user", text: "🎤 Voice input...", source: "voice", status: "complete" },
+        { id: userMsgId, role: "user", text: "🎤 Voice input...", source: "voice", status: "complete", traceId },
         { id: assistantMsgId, role: "assistant", text: "", source: "voice", status: "loading" },
       ];
     });
@@ -364,8 +367,8 @@ export default function HomeScreen() {
       formData.append("traceId", traceId);
       formData.append("user_profile", JSON.stringify(user ?? {}));
 
-      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query voice`);
-      const res = await fetch(`${BACKEND_URL}/query`, {
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] → /query/voice`);
+      const res = await fetch(`${BACKEND_URL}/query/voice`, {
         method: "POST",
         headers: { "x-trace-id": traceId },
         body: formData,
@@ -373,7 +376,7 @@ export default function HomeScreen() {
       });
 
       const latency = Date.now() - startTime;
-      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] ← /query ${latency}ms`);
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][API][${traceId}] ← /query/voice ${latency}ms`);
       logTrace(traceId, "API_LATENCY_MS", latency);
 
       clearTimeout(processingTimer);
@@ -401,10 +404,11 @@ export default function HomeScreen() {
         return candidate || "Voice Input";
       })();
 
-      console.log("FULL RESPONSE:", JSON.stringify(data));
-      console.log("CHAT:", data.chat);
-      console.log("TEXT:", data.text);
-      console.log("MESSAGE:", data.message);
+      if (TRACE_LEVEL >= 2) {
+        console.log("FULL RESPONSE:", JSON.stringify(data));
+        console.log("CHAT:", data.chat);
+        console.log("TEXT:", data.text);
+      }
 
       const text =
         (typeof data.chat === "string" && data.chat.trim().length > 0)
@@ -676,10 +680,11 @@ export default function HomeScreen() {
           ? data.cleaned_query
           : query;
 
-      console.log("FULL RESPONSE:", JSON.stringify(data));
-      console.log("CHAT:", data.chat);
-      console.log("TEXT:", data.text);
-      console.log("MESSAGE:", data.message);
+      if (TRACE_LEVEL >= 2) {
+        console.log("FULL RESPONSE:", JSON.stringify(data));
+        console.log("CHAT:", data.chat);
+        console.log("TEXT:", data.text);
+      }
 
       const text =
         (typeof data.chat === "string" && data.chat.trim().length > 0)
