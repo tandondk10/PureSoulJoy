@@ -44,6 +44,20 @@ export function makeAssistantLoadingMessage(args: {
   };
 }
 
+export function getResponseDisplayText(response: CoachingResponse): string {
+  if (
+    response.needs_clarification === true &&
+    typeof response.clarification_question === "string" &&
+    response.clarification_question.trim().length > 0
+  ) {
+    return response.clarification_question.trim();
+  }
+  if (typeof response.chat === "string" && response.chat.trim().length > 0) return response.chat.trim();
+  if (typeof response.text === "string" && response.text.trim().length > 0) return response.text.trim();
+  if (typeof response.message === "string" && response.message.trim().length > 0) return response.message.trim();
+  return "I could not prepare a response. Please try again.";
+}
+
 export function assistantCompleteFromResponse(args: {
   existing: ChatMessage;
   response: CoachingResponse;
@@ -51,18 +65,14 @@ export function assistantCompleteFromResponse(args: {
 }): ChatMessage {
   const { response, liteMode } = args;
 
-  const text =
-    (typeof response.chat === "string" && response.chat.trim().length > 0)
-      ? response.chat
-      : (typeof response.text === "string" && response.text.trim().length > 0)
-        ? response.text
-        : (typeof response.message === "string" && response.message.trim().length > 0)
-          ? response.message
-          : "I could not prepare a response. Please try again.";
-
+  const text = getResponseDisplayText(response);
   const sections = parseSections(text);
 
-  const rawActions = response.top_actions || response.actions || [];
+  const isClarification = response.needs_clarification === true;
+  const rawActions = isClarification
+    ? []
+    : response.top_actions || response.actions || [];
+
   const topActionCodes: string[] = rawActions
     .map((a: any) => (typeof a === "string" ? a : (a.id ?? "")))
     .filter(Boolean);
@@ -87,6 +97,9 @@ export function assistantCompleteFromResponse(args: {
     nextActionCodes,
     nextActionLabels,
     traceId: response.trace_id || args.existing.traceId,
+    foods: response.foods || [],
+    unknownFoods: response.unknown_foods || [],
+    needsClarification: isClarification,
     updatedAt: Date.now(),
   };
 }

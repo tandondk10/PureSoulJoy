@@ -6,6 +6,7 @@ import {
   assistantCancelled,
   getSafeErrorMessage,
   getVoiceUserText,
+  getResponseDisplayText,
 } from "../app/utils/messageLifecycle";
 import type { ChatMessage, CoachingResponse } from "../app/types/coaching";
 
@@ -143,4 +144,68 @@ test("returns transcript when available", () => {
 
 test("falls back to voice placeholder when transcript absent", () => {
   expect(getVoiceUserText({})).toBe("🎤 Voice input");
+});
+
+// ─── USDA clarification ───────────────────────────────────────────────────────
+
+test("clarification response uses clarification_question as display text", () => {
+  const loading = BASE_LOADING();
+  const complete = assistantCompleteFromResponse({
+    existing: loading,
+    response: {
+      status: "ok",
+      chat: "Generic fallback",
+      text: "Generic fallback",
+      needs_clarification: true,
+      clarification_question: "I don't recognize 'xxxxx' yet. What food is closest to it?",
+      top_actions: ["walk_10min_now"],
+    },
+  });
+  expect(complete.status).toBe("complete");
+  expect(complete.text).toContain("xxxxx");
+  expect(complete.needsClarification).toBe(true);
+});
+
+test("clarification response does not produce action cards", () => {
+  const loading = BASE_LOADING();
+  const complete = assistantCompleteFromResponse({
+    existing: loading,
+    response: {
+      needs_clarification: true,
+      clarification_question: "What food was that?",
+      top_actions: ["walk_10min_now"],
+    },
+  });
+  expect(complete.topActions).toEqual([]);
+  expect(complete.topActionCodes).toEqual([]);
+});
+
+test("response stores foods and unknownFoods for debug rendering", () => {
+  const loading = BASE_LOADING();
+  const complete = assistantCompleteFromResponse({
+    existing: loading,
+    response: {
+      chat: "After rajma, walk 10 minutes.",
+      foods: ["rajma"],
+      unknown_foods: [],
+    },
+  });
+  expect(complete.foods).toEqual(["rajma"]);
+  expect(complete.unknownFoods).toEqual([]);
+});
+
+test("USDA-resolved food response still resolves action labels", () => {
+  const loading = BASE_LOADING();
+  const complete = assistantCompleteFromResponse({
+    existing: loading,
+    response: {
+      chat: "After rajma, take a 10-minute walk now.",
+      foods: ["rajma"],
+      has_food: true,
+      needs_clarification: false,
+      top_actions: ["walk_10min_now", "protein_fiber_next_meal"],
+    },
+  });
+  expect(complete.topActions).toContain("Take a 10-minute walk now");
+  expect(complete.topActionCodes).toEqual(["walk_10min_now", "protein_fiber_next_meal"]);
 });

@@ -22,6 +22,22 @@ export type CoachingRequest = {
   traceId?: string;
 };
 
+export type FoodSource = "internal" | "usda" | "cache" | "unknown";
+
+export type NormalizedFoodDebug = {
+  canonical_name?: string;
+  display_name?: string;
+  source?: FoodSource;
+  confidence?: number;
+  calories?: number;
+  carbs_g?: number;
+  protein_g?: number;
+  fat_g?: number;
+  sat_fat_g?: number;
+  fiber_g?: number;
+  external_id?: string;
+};
+
 export type CoachingResponse = {
   contract_version?: string;
   status?: "ok" | "error" | "clarification";
@@ -51,6 +67,8 @@ export type CoachingResponse = {
   query?: string;
   transcript?: string;
   has_food?: boolean;
+  normalized_foods?: NormalizedFoodDebug[];
+  debug?: Record<string, unknown>;
 };
 
 export type ChatMessage = {
@@ -70,6 +88,9 @@ export type ChatMessage = {
   context?: string;
   feedbackSent?: "helpful" | "not_helpful";
   actionTaken?: boolean;
+  foods?: string[];
+  unknownFoods?: string[];
+  needsClarification?: boolean;
   createdAt: number;
   updatedAt?: number;
 };

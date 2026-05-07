@@ -17,6 +17,7 @@ type Props = {
 };
 
 export function ActionCards({ msg, colors, onFeedback, onActionTaken, onNextAction }: Props) {
+  if (msg.needsClarification) return null;
   if (msg.status !== "complete") return null;
 
   const hasActions = msg.topActions && msg.topActions.length > 0;

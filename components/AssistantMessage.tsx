@@ -18,6 +18,7 @@ export function AssistantMessage({ msg, colors }: Props) {
   const isLoading = msg.status === "loading";
   const isError = msg.status === "error";
   const isCancelled = msg.status === "cancelled";
+  const isClarification = msg.needsClarification === true;
   const displayText = getDisplayText(msg);
 
   return (
@@ -29,9 +30,15 @@ export function AssistantMessage({ msg, colors }: Props) {
         borderRadius: 14,
         marginVertical: 6,
         maxWidth: "85%",
+        borderWidth: isClarification ? 1 : 0,
+        borderColor: isClarification ? colors.accent : "transparent",
       }}
     >
-      {msg.context ? (
+      {isClarification ? (
+        <Text style={{ color: colors.muted, fontSize: 12, marginBottom: 6 }}>
+          Quick clarification
+        </Text>
+      ) : msg.context ? (
         <Text style={{ color: colors.muted, fontSize: 12, marginBottom: 6 }}>
           {msg.context}
         </Text>
