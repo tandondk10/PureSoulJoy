@@ -336,14 +336,17 @@ export default function HomeScreen() {
     const assistantMsgId = `${traceId}-assistant`;
     lastScrollIdRef.current = null;
 
-    if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] VOICE_UI_INSERT`, { userMsgId, assistantMsgId });
     setMessages((prev) => {
-      if (prev.find((m) => m.id === userMsgId)) return prev;
-      return [
+      if (prev.find((m) => m.id === userMsgId || m.id === assistantMsgId)) return prev;
+      const next = [
         ...prev,
         { id: userMsgId, role: "user", text: "🎤 Voice input", source: "voice", status: "complete", traceId },
-        { id: assistantMsgId, role: "assistant", text: "", source: "voice", status: "loading" },
+        { id: assistantMsgId, role: "assistant", text: "", source: "voice", status: "loading", traceId },
       ];
+      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] MESSAGES_AFTER_VOICE_INSERT`,
+        next.map((m: any) => ({ id: m.id, role: m.role, source: m.source, status: m.status, text: m.text, traceId: m.traceId }))
+      );
+      return next;
     });
 
     const initialStatus = isMaxDuration
@@ -490,10 +493,9 @@ export default function HomeScreen() {
         [];
 
       const voiceDisplayText = getVoiceDisplayText(data);
-      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] VOICE_UI_UPDATE`, { userMsgId, assistantMsgId, voiceDisplayText, assistantText: text });
 
-      setMessages((prev) =>
-        prev.map((m) => {
+      setMessages((prev) => {
+        const next = prev.map((m) => {
           if (m.id === userMsgId) return { ...m, text: voiceDisplayText };
           if (m.id === assistantMsgId) return {
             ...m,
@@ -508,8 +510,12 @@ export default function HomeScreen() {
             traceId,
           };
           return m;
-        })
-      );
+        });
+        if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] MESSAGES_AFTER_VOICE_UPDATE`,
+          next.map((m: any) => ({ id: m.id, role: m.role, source: m.source, status: m.status, text: m.text, traceId: m.traceId }))
+        );
+        return next;
+      });
 
       if (data.audio) {
         playAudio(data.audio);
