@@ -228,6 +228,9 @@ def trace(func):
 
     return wrapper
 
+def now_iso():
+    return datetime.utcnow().isoformat() + "Z"
+
 def expand_query(query):
     base = query.lower()
 
@@ -1114,6 +1117,7 @@ def process_query(query: str) -> dict:
 
     for f in foods:
         n = get_nutrition(f)
+        
         print("[DEBUG_NUTRITION]", f, n)
 
         # 🔥 ACCEPT IF ANY REAL SIGNAL EXISTS

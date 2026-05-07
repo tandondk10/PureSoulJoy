@@ -11,6 +11,7 @@ import base64
 import difflib
 import sqlite3
 import json
+import functools
 
 
 from litellm import completion
@@ -71,6 +72,42 @@ print("TRACE_LEVEL:", TRACE_LEVEL)
 print("TRACE_TARGETS:", TRACE_TARGETS)
 print("DEBUGE:", DEBUG)
 print("USE_NEW_ROUTER :", USE_NEW_ROUTER)
+
+import uuid
+import inspect
+from functools import wraps
+
+def trace(func):
+    @wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        trace_id = kwargs.get("trace_id") or str(uuid.uuid4())[:8]
+
+        print(f"\n🔍 [TRACE {trace_id}] ENTER {func.__name__}")
+        print(f"[TRACE {trace_id}] INPUT:", args, kwargs)
+
+        result = await func(*args, **kwargs)
+
+        print(f"✅ [TRACE {trace_id}] EXIT {func.__name__}")
+        print(f"[TRACE {trace_id}] OUTPUT:", str(result)[:300])
+
+        return result
+
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        trace_id = kwargs.get("trace_id") or str(uuid.uuid4())[:8]
+
+        print(f"\n🔍 [TRACE {trace_id}] ENTER {func.__name__}")
+        print(f"[TRACE {trace_id}] INPUT:", args, kwargs)
+
+        result = func(*args, **kwargs)
+
+        print(f"✅ [TRACE {trace_id}] EXIT {func.__name__}")
+        print(f"[TRACE {trace_id}] OUTPUT:", str(result)[:300])
+
+        return result
+
+    # 👇 KEY LINE
+    return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
 
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
@@ -322,7 +359,7 @@ def is_lifestyle_query(query: str) -> bool:
     tokens = set(q.replace("?", "").replace(",", "").split())
     return any(term in tokens for term in LIFESTYLE_QUERY_TERMS)
 
-
+@trace
 def is_food_logging_query(query: str) -> bool:
     """
     True only when the query looks like an actual meal/food being logged.
@@ -359,7 +396,7 @@ def is_food_logging_query(query: str) -> bool:
 
     return False
 
-
+@trace
 def classify_query_type(query: str) -> str:
     """
     Proto-Layer 2 query classifier.
@@ -1617,6 +1654,7 @@ def extract_text(res):
 
 
 # ---------------- CALL LLM ----------------
+@trace
 def call_llm(prompt: str) -> str:
     model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
     res = completion(
@@ -3104,6 +3142,7 @@ def resolve_domain_and_context(query: str) -> dict:
 
 
 # ---------------- BUILD RESPONSE ----------------
+@trace
 async def build_response(query: str, lite: bool):
     t0_func = trace_start("build_response")
     try:
@@ -4227,7 +4266,7 @@ async def route_query_v1(request: Request):
 # --------------------------------------------
 # 🔥 ROUTER
 # --------------------------------------------
-
+@trace
 async def route_query_v2(request: Request):
 
     # ---- Safe defaults ----
@@ -4571,6 +4610,7 @@ async def route_query_v2(request: Request):
     return finalize_response(resp)
 
 async def route_query(request: Request):
+
     if TRACE_LEVEL >= 1:
         print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_ENTRY USE_NEW_ROUTER={USE_NEW_ROUTER}")
 
@@ -4585,8 +4625,8 @@ async def route_query(request: Request):
             print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_SELECTED V1")
         return await route_query_v1(request)
 
-
 @app.post("/query", response_model=QueryResponse)
+@trace
 async def handle_query(request: Request):
     """
     Single endpoint for both voice and keyboard input.
@@ -4597,8 +4637,9 @@ async def handle_query(request: Request):
     Keyboard path: application/json with {query, voice: false}
                    Runs LLM only → audio is always null
     """
+    
     response = await route_query(request)
-
+    
     print("FINAL RESPONSE:", response)
 
     if not isinstance(response, dict):

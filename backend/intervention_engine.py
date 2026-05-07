@@ -1,4 +1,7 @@
 from typing import Optional
+import functools
+from datetime import datetime
+import time
 
 # (domain, need, context_key) → ordered list of intervention identifiers
 # context_key: "post_meal" | "high_reading" | None
@@ -193,8 +196,29 @@ INTERVENTION_MAP = {
         "share_with_doctor",
     ],
 }
+def trace(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.time()
 
+        print(f"\n🔍 [TRACE_ENTER] {func.__name__}")
+        print(f"   args={args} kwargs={kwargs}")
 
+        result = func(*args, **kwargs)
+
+        end = time.time()
+
+        print(f"✅ [TRACE_EXIT] {func.__name__} ({(end-start)*1000:.2f} ms)")
+        print(f"   result={result}")
+
+        return result
+
+    return wrapper
+
+def now_iso():
+    return datetime.utcnow().isoformat() + "Z"
+
+@trace
 def get_intervention(domain: Optional[str], need: str, context: Optional[dict] = None) -> list:
     """
     Deterministic rule-based intervention selection.

@@ -9,7 +9,43 @@ USDA_SYNONYMS = {
     "black eyed peas": ["cowpeas", "blackeye beans"],
     "kidney beans": ["red kidney beans"],
 }
+import uuid
+import inspect
+from functools import wraps
 
+def trace(func):
+    @wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        trace_id = kwargs.get("trace_id") or str(uuid.uuid4())[:8]
+
+        print(f"\n🔍 [TRACE {trace_id}] ENTER {func.__name__}")
+        print(f"[TRACE {trace_id}] INPUT:", args, kwargs)
+
+        result = await func(*args, **kwargs)
+
+        print(f"✅ [TRACE {trace_id}] EXIT {func.__name__}")
+        print(f"[TRACE {trace_id}] OUTPUT:", str(result)[:300])
+
+        return result
+
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        trace_id = kwargs.get("trace_id") or str(uuid.uuid4())[:8]
+
+        print(f"\n🔍 [TRACE {trace_id}] ENTER {func.__name__}")
+        print(f"[TRACE {trace_id}] INPUT:", args, kwargs)
+
+        result = func(*args, **kwargs)
+
+        print(f"✅ [TRACE {trace_id}] EXIT {func.__name__}")
+        print(f"[TRACE {trace_id}] OUTPUT:", str(result)[:300])
+
+        return result
+
+    # 👇 KEY LINE
+    return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+
+@trace
 def call_usda(food: str, trace_id=None):
     try:
         resolved = resolve_usda(food, trace_id)
