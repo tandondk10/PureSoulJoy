@@ -7,7 +7,6 @@ import { Audio } from "expo-av";
 import * as Speech from "expo-speech";
 import React, { useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   AppState, // ✅ ADD THIS LINE
   Keyboard,
   KeyboardAvoidingView,
@@ -18,18 +17,18 @@ import {
   TextInput,
   TouchableOpacity,
   TouchableWithoutFeedback,
-  View,
+  View
 } from "react-native";
 
 import AppHeader from "@/components/AppHeader";
 import { useUser } from "@/context/UserContext";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { normalizeQuery } from "../utils/mealParser";
 import { getNormalizedUser } from "../utils/normalizeUser";
 import { createTraceId, logTrace, nowISO, traceEnd, traceStart } from "../utils/trace";
-import { normalizeQuery } from "../utils/mealParser";
 
-const BACKEND_URL = "http://10.0.0.6:8003";
+const BACKEND_URL = "http://192.168.86.52:8003";
 
 
 function getVoiceDisplayText(data?: any): string {
@@ -341,11 +340,8 @@ export default function HomeScreen() {
       const next = [
         ...prev,
         { id: userMsgId, role: "user", text: "🎤 Voice input", source: "voice", status: "complete", traceId },
-        { id: assistantMsgId, role: "assistant", text: "", source: "voice", status: "loading", traceId },
+        { id: assistantMsgId, role: "assistant", text: "Thinking...", source: "voice", status: "loading", traceId },
       ];
-      if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] MESSAGES_AFTER_VOICE_INSERT`,
-        next.map((m: any) => ({ id: m.id, role: m.role, source: m.source, status: m.status, text: m.text, traceId: m.traceId }))
-      );
       return next;
     });
 
@@ -425,7 +421,6 @@ export default function HomeScreen() {
       })();
 
       if (TRACE_LEVEL >= 2) {
-        console.log("FULL RESPONSE:", JSON.stringify(data));
         console.log("CHAT:", data.chat);
         console.log("TEXT:", data.text);
       }
@@ -511,9 +506,6 @@ export default function HomeScreen() {
           };
           return m;
         });
-        if (TRACE_LEVEL >= 2) console.log(`[${nowISO()}][FE][${traceId}] MESSAGES_AFTER_VOICE_UPDATE`,
-          next.map((m: any) => ({ id: m.id, role: m.role, source: m.source, status: m.status, text: m.text, traceId: m.traceId }))
-        );
         return next;
       });
 
@@ -619,7 +611,7 @@ export default function HomeScreen() {
       {
         id: assistantMsgId,
         role: "assistant" as const,
-        text: "",
+        text: "Thinking...",
         source: "text" as const,
         status: "loading" as const,
         traceId,
@@ -707,7 +699,6 @@ export default function HomeScreen() {
           : query;
 
       if (TRACE_LEVEL >= 2) {
-        console.log("FULL RESPONSE:", JSON.stringify(data));
         console.log("CHAT:", data.chat);
         console.log("TEXT:", data.text);
       }
@@ -1179,6 +1170,71 @@ export default function HomeScreen() {
     }
   };
 
+  // ─── Assistant renderer ──────────────────────────────────────────────────
+
+  const getAssistantDisplayText = (msg: Message): string => {
+    if (msg.status === "loading") return "Thinking...";
+    if (msg.status === "error") return msg.errorMessage || "Something went wrong.";
+    const raw =
+      typeof msg.rawText === "string" && msg.rawText.trim().length > 0
+        ? msg.rawText.trim()
+        : typeof msg.text === "string" && msg.text.trim().length > 0
+          ? msg.text.trim()
+          : "";
+    return raw;
+  };
+
+  const renderAssistantMessage = (msg: Message) => {
+    const isLoading = msg.status === "loading";
+    const isError = msg.status === "error";
+    const displayText = getAssistantDisplayText(msg);
+
+    return (
+      <View
+        style={{
+          alignSelf: "flex-start",
+          backgroundColor: isError ? "#3A1A1A" : C.surfaceAlt,
+          padding: 12,
+          borderRadius: 14,
+          marginVertical: 6,
+          maxWidth: "85%",
+        }}
+      >
+        {msg.context ? (
+          <Text style={{ color: C.muted, fontSize: 12, marginBottom: 6 }}>
+            {msg.context}
+          </Text>
+        ) : null}
+
+        {isLoading ? (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <ActivityIndicator color={C.accent} />
+            <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
+              Thinking...
+            </Text>
+          </View>
+        ) : isError ? (
+          <Text style={{ color: C.error, fontSize: 16, lineHeight: 22 }}>
+            {displayText}
+          </Text>
+        ) : msg.sections && msg.sections.length > 0 ? (
+          <View>
+            {msg.sections.map((s, i) => (
+              <View key={`${msg.id}-s${i}`} style={{ marginBottom: i < msg.sections!.length - 1 ? 10 : 0 }}>
+                <Text style={{ color: "white", fontWeight: "700", marginBottom: 4 }}>{s.title}</Text>
+                <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>{s.content}</Text>
+              </View>
+            ))}
+          </View>
+        ) : (
+          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
+            {displayText || "I could not prepare a response. Please try again."}
+          </Text>
+        )}
+      </View>
+    );
+  };
+
   // ─── Render ───────────────────────────────────────────────────────────────
 
   const isProcessing = voiceState === "PROCESSING";
@@ -1314,58 +1370,8 @@ export default function HomeScreen() {
                       </View>
                     )}
 
-                    {/* Assistant loading */}
-                    {msg.role === "assistant" && msg.context && (
-                      <View style={{ paddingHorizontal: 10, marginTop: 6 }}>
-                        <Text style={{ color: "#888", fontSize: 12 }}>
-                          {msg.context}
-                        </Text>
-                      </View>
-                    )}
-
-                    {msg.role === "assistant" && msg.status === "loading" && (
-                      <View style={{ padding: 10 }}>
-                        <ActivityIndicator color={C.accent} />
-                      </View>
-                    )}
-
-                    {/* Assistant error */}
-                    {msg.role === "assistant" && msg.status === "error" && (
-                      <Text style={{ color: C.error, paddingVertical: 4 }}>
-                        {msg.errorMessage ?? "Something went wrong."}
-                      </Text>
-                    )}
-
-                    {/* Safety assertion — both should never coexist */}
-                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText && msg.sections &&
-                      (() => { console.error("INVALID STATE: both rawText and sections present", { id: msg.id }); return null; })()}
-
-                    {/* Assistant sections (full mode only — never renders when rawText is set) */}
-                    {msg.role === "assistant" && msg.status === "complete" && !msg.rawText &&
-                      msg.sections?.map((s, i) => (
-                        <View key={i} style={{ padding: 10 }}>
-                          <Text style={{ color: "white" }}>{s.title}</Text>
-                          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-                            {s.content}
-                          </Text>
-                        </View>
-                      ))}
-
-                    {/* Assistant raw text (lite mode) */}
-                    {msg.role === "assistant" && msg.status === "complete" && msg.rawText && (
-                        <View
-                          style={{
-                            backgroundColor: C.surfaceAlt,
-                            padding: 12,
-                            borderRadius: 14,
-                            marginVertical: 6,
-                          }}
-                        >
-                          <Text style={{ color: "#FFFFFF", fontSize: 16, lineHeight: 22 }}>
-                            {msg.rawText}
-                          </Text>
-                        </View>
-                      )}
+                    {/* Assistant message — loading, error, sections, raw text */}
+                    {msg.role === "assistant" && renderAssistantMessage(msg)}
 
                     {/* Actions block — deterministic from backend, never from LLM */}
                     {msg.role === "assistant" && msg.status === "complete" &&
