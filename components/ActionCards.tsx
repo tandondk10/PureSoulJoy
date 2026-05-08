@@ -23,10 +23,12 @@ export function ActionCards({ msg, colors, onFeedback, onActionTaken, onNextActi
   const hasActions = msg.topActions && msg.topActions.length > 0;
   const hasActionCodes = msg.topActionCodes && msg.topActionCodes.length > 0;
   const hasNextActions = msg.nextActionCodes && msg.nextActionCodes.length > 0;
+  // ActionList (via AssistantMessageRenderer) handles display when rich actions exist
+  const hasRichActions = Array.isArray(msg.actions) && msg.actions.length > 0;
 
   return (
     <>
-      {hasActions && (
+      {hasActions && !hasRichActions && (
         <View
           style={{
             backgroundColor: colors.surface,

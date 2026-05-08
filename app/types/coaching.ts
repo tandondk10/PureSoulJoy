@@ -1,6 +1,12 @@
+import type { UIAction } from "../../types/actions";
+import type { UIRenderContract } from "../../types/renderContract";
+
+export type { UIAction, UIRenderContract };
+
 export type MessageRole = "user" | "assistant";
 export type MessageSource = "keyboard" | "voice" | "system";
 export type MessageStatus = "loading" | "complete" | "error" | "cancelled";
+export type AssistantMessageKind = "text" | "meal_result" | "clarification" | "error";
 
 export type AssistantSection = {
   title: string;
@@ -72,6 +78,7 @@ export type CoachingResponse = {
   transcript?: string;
   has_food?: boolean;
   normalized_foods?: NormalizedFoodDebug[];
+  render_contract?: Record<string, unknown>;
   debug?: Record<string, unknown>;
 };
 
@@ -95,6 +102,9 @@ export type ChatMessage = {
   foods?: string[];
   unknownFoods?: string[];
   needsClarification?: boolean;
+  kind?: AssistantMessageKind;
+  actions?: UIAction[];
+  renderContract?: UIRenderContract;
   createdAt: number;
   updatedAt?: number;
 };

@@ -1,7 +1,7 @@
 import { C } from "@/constants/colors";
-import { AssistantMessage } from "@/components/AssistantMessage";
 import { UserMessage } from "@/components/UserMessage";
 import { ActionCards } from "@/components/ActionCards";
+import { AssistantMessageRenderer } from "@/components/chat/AssistantMessageRenderer";
 import { profiles } from "@/data/profiles";
 import useKeyboardVisible from "@/hooks/useKeyboardVisible";
 import { loadUser } from "@/utils/storage";
@@ -1067,7 +1067,7 @@ export default function HomeScreen() {
                     )}
                     {msg.role === "assistant" && (
                       <>
-                        <AssistantMessage msg={msg} colors={C} />
+                        <AssistantMessageRenderer message={msg} colors={C} />
                         <ActionCards
                           msg={msg}
                           colors={C}

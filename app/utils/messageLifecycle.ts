@@ -1,13 +1,6 @@
 import type { AssistantSection, ChatMessage, CoachingResponse, MessageSource } from "../types/coaching";
-
-const ACTION_TEXT_MAP: Record<string, string> = {
-  walk_10min_now: "Take a 10-minute walk now",
-  drink_water_now: "Drink a glass of water",
-  next_meal_add_protein_and_fiber: "Add protein and fiber to your next meal",
-  avoid_simple_carbs_now: "Avoid simple carbs for now",
-  take_a_10min_walk: "Take a 10-minute walk",
-  check_your_last_meal: "Review your last meal",
-};
+import { ACTION_TEXT_MAP } from "../../constants/actionTextMap";
+import { normalizeAction, normalizeRenderContract } from "../../services/adapters/backendResponseAdapter";
 
 const WALK_ACTION_IDS = new Set(["walk_10min_now", "walk_now", "post_meal_walk"]);
 
@@ -82,6 +75,7 @@ export function assistantCompleteFromResponse(args: {
     ? []
     : response.top_actions || response.actions || [];
 
+  // Legacy string arrays (kept for ActionCards feedback/commitment system)
   const topActionCodes: string[] = rawActions
     .map((a: any) => (typeof a === "string" ? a : (a.id ?? "")))
     .filter(Boolean);
@@ -90,10 +84,21 @@ export function assistantCompleteFromResponse(args: {
     return renderActionLabel(a);
   });
 
+  // Rich UIAction[] for ActionList rendering
+  const actions = rawActions.map((a: unknown, i: number) => normalizeAction(a, i));
+
   const nextActionCodes: string[] =
     response.screen?.next_actions || response.structured?.next_actions || [];
   const nextActionLabels: string[] =
     response.screen?.next_action_labels || response.structured?.next_action_labels || [];
+
+  const renderContract = normalizeRenderContract(response.render_contract as any);
+
+  const kind = isClarification
+    ? "clarification" as const
+    : actions.length > 0
+      ? "meal_result" as const
+      : "text" as const;
 
   return {
     ...args.existing,
@@ -109,6 +114,9 @@ export function assistantCompleteFromResponse(args: {
     foods: response.foods || [],
     unknownFoods: response.unknown_foods || [],
     needsClarification: isClarification,
+    kind,
+    actions,
+    renderContract,
     updatedAt: Date.now(),
   };
 }
@@ -121,6 +129,7 @@ export function assistantError(args: {
   return {
     ...args.existing,
     status: "error",
+    kind: "error",
     text: safeMessage,
     errorMessage: safeMessage,
     updatedAt: Date.now(),
