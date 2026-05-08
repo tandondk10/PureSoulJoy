@@ -9,6 +9,15 @@ const ACTION_TEXT_MAP: Record<string, string> = {
   check_your_last_meal: "Review your last meal",
 };
 
+const WALK_ACTION_IDS = new Set(["walk_10min_now", "walk_now", "post_meal_walk"]);
+
+function renderActionLabel(a: { id?: string; label?: string; duration_minutes?: number | null }): string {
+  if (a.duration_minutes != null && a.id && WALK_ACTION_IDS.has(a.id)) {
+    return `Take a ${a.duration_minutes}-minute walk now`;
+  }
+  return a.label ?? (a.id ? ACTION_TEXT_MAP[a.id] : undefined) ?? a.id ?? "Action";
+}
+
 export function makeUserMessage(args: {
   id: string;
   text: string;
@@ -78,7 +87,7 @@ export function assistantCompleteFromResponse(args: {
     .filter(Boolean);
   const topActions: string[] = rawActions.map((a: any) => {
     if (typeof a === "string") return ACTION_TEXT_MAP[a] || a;
-    return a.label ?? ACTION_TEXT_MAP[a.id] ?? a.id ?? "Action";
+    return renderActionLabel(a);
   });
 
   const nextActionCodes: string[] =

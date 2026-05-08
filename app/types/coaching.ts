@@ -12,6 +12,10 @@ export type CoachingAction = {
   label: string;
   lever?: string;
   priority?: number;
+  intensity?: "low" | "moderate" | "high";
+  duration_minutes?: number | null;
+  urgency?: "now" | "soon" | "today" | "next_meal";
+  reason?: string;
 };
 
 export type CoachingRequest = {
