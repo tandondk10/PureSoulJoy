@@ -1,0 +1,7 @@
+{
+    "name": "Debug FastAPI (REAL)",
+    "type": "python",
+    "request": "launch",
+    "program": "${workspaceFolder}/backend/main.py",
+    "console": "integratedTerminal"
+}

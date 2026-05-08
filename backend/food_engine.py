@@ -3,6 +3,12 @@ import re
 import requests
 import os
 from typing import List, Optional, Tuple
+import time
+import functools
+from services.usda_service import search_usda, get_usda_food_details
+from services.usda_service import call_usda
+from services.usda_service import resolve_usda
+
 
 SEED_FOOD_ITEMS = [
     {
@@ -187,6 +193,197 @@ SEED_FOOD_ITEMS = [
     },
 ]
 
+FOOD_CORRECTIONS = {
+    "back eye beans": "black-eyed peas",
+    "black eye beans": "black-eyed peas",
+    "black eyed beans": "black-eyed peas",
+    "black eye peas": "black-eyed peas",
+    "kidney beans red": "red kidney beans",
+}
+
+USDA_SYNONYMS = {
+    "black eyed peas": ["cowpeas", "blackeye beans"],
+    "kidney beans": ["red kidney beans"],
+}
+# food_engine.py
+
+
+
+def trace(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.time()
+
+        print(f"\n🔍 [TRACE_ENTER] {func.__name__}")
+        print(f"   args={args} kwargs={kwargs}")
+
+        result = func(*args, **kwargs)
+
+        end = time.time()
+
+        print(f"✅ [TRACE_EXIT] {func.__name__} ({(end-start)*1000:.2f} ms)")
+        print(f"   result={result}")
+
+        return result
+
+    return wrapper
+
+def now_iso():
+    return datetime.utcnow().isoformat() + "Z"
+
+def expand_query(query):
+    base = query.lower()
+
+    if base in USDA_SYNONYMS:
+        return [base] + USDA_SYNONYMS[base]
+
+    return [base]
+
+def normalize_food_text(text: str) -> str:
+    t = text.lower().strip()
+
+    if t in FOOD_CORRECTIONS:
+        corrected = FOOD_CORRECTIONS[t]
+        print(f"[FOOD_CORRECTION] {t} → {corrected}")
+        return corrected
+
+    return text
+
+@trace
+def get_nutrition(food, trace_id=None):
+    print("🔥 USING NEW GET_NUTRITION")
+
+    # 1. Try internal DB
+    data = FOOD_DATA.get(food)
+    if data:
+        return data
+
+    # 2. Try USDA
+    resolved = resolve_usda(food, trace_id)
+
+    if resolved and "nutrients" in resolved:
+        nutrients = resolved["nutrients"]
+
+        parsed = extract_usda_nutrients(nutrients)
+
+        return {
+            **parsed,
+            "soluble_fiber_g": 0.0,
+            "_source": "usda"
+        }
+
+    # 3. Fallback (IMPORTANT)
+    return {
+        "carbs_g": 0,
+        "protein_g": 0,
+        "fat_g": 0,
+        "sat_fat_g": 0,
+        "fiber_g": 0,
+        "calories": 0,
+        "_source": "unknown"
+    }
+
+def resolve_food(food, trace_id=None):
+
+    # 1. Try internal DB
+    internal = detect_food(food)
+    if internal:
+        return internal
+
+    # 2. USDA fallback
+    fdc_id = search_usda(food, trace_id)
+
+    if not fdc_id:
+        return None
+
+    return get_usda_food_details(fdc_id, trace_id)
+
+@trace
+def canonicalize_food_name(n: str) -> str:
+    n = n.lower().strip()
+
+    # 🔥 LEGUME NORMALIZATION (CRITICAL)
+    if "garbanzo" in n or "chickpea" in n:
+        return "chickpeas (cooked)"
+
+    if "black eye" in n or "black-eyed" in n or "cowpea" in n:
+        return "black-eyed peas (cooked)"
+
+    if "rajma" in n:
+        return "kidney beans (cooked)"
+
+    if "chana" in n:
+        return "chickpeas (cooked)"
+
+    if "peruvian beans" in n or "mayocoba" in n:
+        return "yellow beans (cooked)"   # fallback best match
+
+    # default
+    return n
+
+def normalize_food_input(raw_tokens):
+    # join tokens into one phrase
+    joined = " ".join(raw_tokens).lower().strip()
+
+    # canonical mapping
+    canonical = canonicalize_food_name(joined)
+
+    return [canonical]
+
+def empty_nutrition():
+
+    return {
+
+        "carbs_g": 0.0,
+        "protein_g": 0.0,
+        "fat_g": 0.0,
+        "sat_fat_g": 0.0,
+        "fiber_g": 0.0,
+        "soluble_fiber_g": 0.0,
+        "calories": 0.0,
+        "_source": "unknown",
+    }
+    
+def extract_usda_nutrients(nutrients: list) -> dict:
+    result = {
+        "carbs_g": 0.0,
+        "protein_g": 0.0,
+        "fat_g": 0.0,
+        "sat_fat_g": 0.0,
+        "fiber_g": 0.0,
+        "calories": 0.0,
+    }
+
+    for n in nutrients:
+        name = (
+            n.get("nutrientName")
+            or (n.get("nutrient") or {}).get("name")
+            or ""
+        ).lower()
+
+        value = n.get("value") if "value" in n else n.get("amount", 0)
+
+        # 🔥 ORDER MATTERS
+        if "carbohydrate" in name:
+            result["carbs_g"] = float(value)
+        elif "protein" in name:
+            result["protein_g"] = float(value)
+        elif "saturated" in name:
+            result["sat_fat_g"] = float(value)
+        elif "lipid" in name or "fat" in name:
+            result["fat_g"] = float(value)
+        elif "fiber" in name:
+            result["fiber_g"] = float(value)
+        elif "energy" in name and "kcal" in name:
+            result["calories"] = float(value)
+
+    return result
+
+def detect_domain_from_query(query: str) -> dict:
+    return {}
+
+def merge_domain_scores(query_scores: dict, food_scores: dict) -> dict:
+    return food_scores
 
 def _parse_food_data(data: list) -> dict:
     food_data = {}
@@ -232,9 +429,18 @@ FOOD_SYNONYMS: dict = {
     "paneer": "paneer",
 }
 
+FOOD_SYNONYMS.update({
+    "rajma": "kidney beans (cooked)",
+    "chawal": "brown rice (cooked)",
+    "sabzi": "mixed vegetables (cooked)",
+})
 
+@trace
 def tokenize(query: str) -> List[str]:
     tokens = re.split(r"[\s,;]+", query.lower().strip())
+    normalized = normalize_food_input(tokens)
+    print("[FOOD_NORMALIZE] raw_tokens=", tokens, "normalized=", normalized)
+    
     return [t for t in tokens if t]
 
 
@@ -250,6 +456,18 @@ PHRASE_SYNONYMS: dict = {
     "fried rice":    "brown rice (cooked)",
     "ice cream":     "ice cream",  # captures phrase before tokenization splits it
 }
+
+PHRASE_SYNONYMS.update({
+    "rajma chawal": "kidney beans (cooked)",
+    "kidney beans": "kidney beans (cooked)",
+    "black beans": "black beans (cooked)",
+    "green beans": "green beans (cooked)",
+    "black eye beans": "black-eyed peas (cooked)",
+    "black eyed beans": "black-eyed peas (cooked)",
+    "black eye peas": "black-eyed peas (cooked)",
+    "black eyed peas": "black-eyed peas (cooked)",
+})
+
 
 # High-impact food/drink terms trusted for routing even when not in FOOD_DATA.
 # Keep small and intentional — do NOT add macro words (fat, carbs, fiber).
@@ -318,6 +536,24 @@ STOPWORDS.update({
     "good", "bad", "better", "normal",
     # time
     "today", "tomorrow",
+    "little", "bit", "some", "few",
+})
+
+STOPWORDS.update({
+    # pronouns
+    "i", "me", "we", "you",
+    # meal-reporting verbs
+    "ate", "eat", "eating", "eaten",
+    "had", "have", "having",
+    "consumed", "took",
+    # vague quantity / context words
+    "some", "something", "anything",
+    # time words not already covered
+    "yesterday", "tonight", "now", "just",
+    # non-food product/query words
+    "price", "cost", "calorie",
+    # generic meal words not already in set
+    "dish",
 })
 
 UNIT_PATTERN = re.compile(r"^\d+(\.\d+)?\s*(g|gram|grams|ml|oz|ounce|ounces|cup|cups)?$")
@@ -329,13 +565,15 @@ HIGH_FREQUENCY_CANONICALS: dict = {}
 
 def normalize_phrases(query: str) -> Tuple[str, List[str]]:
     q = query.lower()
-    extracted: List[str] = []
+    extracted = []
+
     for phrase, canonical in PHRASE_SYNONYMS.items():
-        pattern = rf"\b{re.escape(phrase)}\b"
-        if re.search(pattern, q):
+        if phrase in q:
             extracted.append(canonical)
-            q = re.sub(pattern, " ", q)
-    q = re.sub(r"\s+", " ", q).strip()
+            # DO NOT REMOVE phrase completely
+            # just mark it
+            q = q.replace(phrase, phrase)  # no deletion
+
     return q, extracted
 
 
@@ -376,42 +614,74 @@ def is_food_like(token: str) -> bool:
         return False
     return True
 
+def is_part_of_detected_food(token: str, foods: list) -> bool:
+    t = (token or "").lower().strip()
+    if not t:
+        return False
+    for food in foods or []:
+        f = (food or "").lower()
+        if t in f:
+            return True
+    return False
 
+@trace
 def detect_foods(query: str) -> list:
+    # 🔥 STEP 1: Phrase normalization (multi-word foods)
     query, phrase_foods = normalize_phrases(query)
+
+    # 🔥 STEP 2: Tokenize + normalize
     tokens = tokenize(query)
     normalized = normalize_tokens(tokens)
+
     print(f"[FOOD_NORMALIZE] raw_tokens={tokens} normalized={normalized}")
 
     detected = []
     unknown = []
 
+    # 🔥 STEP 3: Match against FOOD_DATA
     for token in normalized:
+
         if is_noise_token(token):
             continue
+
         matched = False
+
         for food in FOOD_DATA:
             base = food.split("(")[0].strip()
-            if food == token or base == token:
+
+            if token == food or token == base:
                 detected.append(food)
                 matched = True
                 break
-        if not matched and is_food_like(token):
+
+        # 🔴 Unknown tracking (DO NOT add to detected list)
+        if (
+            not matched
+            and is_food_like(token)
+            and not is_noise_token(token)
+        ):
             unknown.append(token)
 
+    # 🔥 STEP 4: Track unknowns globally (but do NOT return them)
+    for u in unknown:
+        UNKNOWN_FOODS.add(u)
+
+    # 🔥 STEP 5: Merge ONLY valid foods (NO UNKNOWN LEAK)
     seen = set()
     result = []
-    for item in detected + phrase_foods + unknown:
+
+    for item in detected + phrase_foods:
         if item not in seen:
             result.append(item)
             seen.add(item)
+
     return result
 
 
 def score_domains(foods: list, multiplier: float = 1.0) -> dict:
     scores = {"glucose": 0.0, "cholesterol": 0.0, "lifestyle": 0.0}
     for food in foods:
-        n = get_nutrition(food)
+        n = resolve_usda(food)
         scores["glucose"] += n.get("carbs_g", 0) * 4 * multiplier
         scores["cholesterol"] += n.get("sat_fat_g", 0) * 9 * multiplier
     return scores
@@ -419,8 +689,9 @@ def score_domains(foods: list, multiplier: float = 1.0) -> dict:
 
 CARB_KCAL_PER_G = 4
 FAT_KCAL_PER_G = 9
-CARB_DOMINANCE_THRESHOLD = 0.65
-FAT_DOMINANCE_THRESHOLD = 0.55
+PROTEIN_KCAL_PER_G = 4
+CARB_DOMINANCE_THRESHOLD = 0.30
+FAT_DOMINANCE_THRESHOLD = 0.35
 
 DOMAIN_PRIORITY = ["glucose", "cholesterol", "bp", "lifestyle"]
 
@@ -441,7 +712,7 @@ def pick_domain(scores: dict) -> str:
 def aggregate_macro_totals(foods: list) -> dict:
     totals = {"carbs_g": 0.0, "fat_g": 0.0, "protein_g": 0.0, "fiber_g": 0.0, "calories": 0.0}
     for food in foods:
-        n = get_nutrition(food)
+        n = resolve_usda(food)
         totals["carbs_g"]  += float(n.get("carbs_g",  0) or 0)
         totals["fat_g"]    += float(n.get("fat_g",    0) or 0)
         totals["protein_g"]+= float(n.get("protein_g",0) or 0)
@@ -451,30 +722,59 @@ def aggregate_macro_totals(foods: list) -> dict:
 
 
 def compute_macro_dominance(totals: dict) -> dict:
-    carbs_g = float(totals.get("carbs_g", 0) or 0)
-    fat_g   = float(totals.get("fat_g",   0) or 0)
-    carb_cal = carbs_g * CARB_KCAL_PER_G
-    fat_cal  = fat_g   * FAT_KCAL_PER_G
-    macro_cal = carb_cal + fat_cal
+    carbs_g   = float(totals.get("carbs_g", 0) or 0)
+    fat_g     = float(totals.get("fat_g", 0) or 0)
+    protein_g = float(totals.get("protein_g", 0) or 0)
 
-    if macro_cal <= 0:
-        return {"dominance": "balanced", "carb_cal": 0.0, "fat_cal": 0.0,
-                "carb_ratio": 0.0, "fat_ratio": 0.0}
+    carb_cal    = carbs_g * CARB_KCAL_PER_G
+    fat_cal     = fat_g   * FAT_KCAL_PER_G
+    protein_cal = protein_g * PROTEIN_KCAL_PER_G
 
-    carb_ratio = carb_cal / macro_cal
-    fat_ratio  = fat_cal  / macro_cal
+    total_cal = carb_cal + fat_cal + protein_cal
 
-    if carb_ratio >= CARB_DOMINANCE_THRESHOLD:
+    # 🔴 EDGE CASE: no meaningful nutrition
+    if total_cal <= 0:
+        return {
+            "dominance": "balanced",
+            "carb_cal": 0.0,
+            "fat_cal": 0.0,
+            "protein_cal": 0.0,
+            "carb_ratio": 0.0,
+            "fat_ratio": 0.0,
+            "protein_ratio": 0.0,
+        }
+
+    carb_ratio = carb_cal / total_cal
+    fat_ratio  = fat_cal  / total_cal
+    protein_ratio = protein_cal / total_cal
+
+    # 🔥 DOMINANCE LOGIC (ordered by metabolic impact)
+
+    # 🔥 DOMINANCE LOGIC (CORRECTED)
+
+    # 🔥 FINAL DOMINANCE LOGIC
+
+    glucose_flag = carb_ratio >= 0.30
+    cholesterol_flag = fat_ratio >= 0.35
+
+    if glucose_flag and cholesterol_flag:
+        dominance = "mixed"
+    elif glucose_flag:
         dominance = "glucose"
-    elif fat_ratio >= FAT_DOMINANCE_THRESHOLD:
+    elif cholesterol_flag:
         dominance = "cholesterol"
     else:
         dominance = "balanced"
 
-    return {"dominance": dominance, "carb_cal": round(carb_cal, 2),
-            "fat_cal": round(fat_cal, 2), "carb_ratio": round(carb_ratio, 3),
-            "fat_ratio": round(fat_ratio, 3)}
-
+    return {
+        "dominance": dominance,
+        "carb_cal": round(carb_cal, 2),
+        "fat_cal": round(fat_cal, 2),
+        "protein_cal": round(protein_cal, 2),
+        "carb_ratio": round(carb_ratio, 3),
+        "fat_ratio": round(fat_ratio, 3),
+        "protein_ratio": round(protein_ratio, 3),
+    }
 
 def apply_macro_dominance_signal(scores: dict, dominance_info: dict) -> dict:
     adjusted = dict(scores)
@@ -508,23 +808,89 @@ def classify_macro_confidence(macro_dominance: dict) -> str:
 
 
 def determine_domain_from_foods_and_query(query: str, foods: list) -> dict:
+    # ------------------------------------------------------------
+    # 🔥 STEP 1: BASE FOOD SCORING
+    # ------------------------------------------------------------
     food_scores = score_domains(foods)
+
+    # ------------------------------------------------------------
+    # 🔥 STEP 2: MACRO ANALYSIS
+    # ------------------------------------------------------------
     macro_totals = aggregate_macro_totals(foods)
     dominance_info = compute_macro_dominance(macro_totals)
+
+    # 🔥 APPLY MACRO SIGNAL (soft boost, NOT override)
     food_scores = apply_macro_dominance_signal(food_scores, dominance_info)
 
-    query_scores = detect_domain_from_query(query) if "detect_domain_from_query" in globals() else {}
-    final_scores = (merge_domain_scores(query_scores, food_scores)
-                    if "merge_domain_scores" in globals() else food_scores)
+    # ------------------------------------------------------------
+    # 🔥 STEP 3: QUERY SIGNAL (optional)
+    # ------------------------------------------------------------
+    query_scores = detect_domain_from_query(query)
+    final_scores = merge_domain_scores(query_scores, food_scores)
 
+    # ------------------------------------------------------------
+    # 🔥 STEP 4: BASE DOMAIN FROM SCORES
+    # ------------------------------------------------------------
     domain = pick_domain(final_scores)
-    # When macro dominance is clear (not balanced), it overrides the score-based selection.
-    # This prevents sat_fat-based scoring (which uses only saturated fat) from misclassifying
-    # fat-heavy foods whose total fat clearly dominates.
-    if dominance_info.get("dominance") != "balanced":
-        domain = dominance_info["dominance"]
-    return {"domain": domain, "scores": final_scores,
-            "macro_totals": macro_totals, "macro_dominance": dominance_info}
+
+    # ------------------------------------------------------------
+    # 🔥 STEP 5: MACRO DOMINANCE (SAFE OVERRIDE)
+    # ------------------------------------------------------------
+    dominance = dominance_info.get("dominance", "balanced")
+    confidence = classify_macro_confidence(dominance_info)
+
+    fiber = float(macro_totals.get("fiber_g", 0) or 0)
+    carbs = float(macro_totals.get("carbs_g", 0) or 0)
+    fiber_ratio = fiber / carbs if carbs > 0 else 0
+
+    carb_ratio = float(dominance_info.get("carb_ratio", 0))
+    fat_ratio  = float(dominance_info.get("fat_ratio", 0))
+
+    fiber_ratio = fiber / carbs if carbs > 0 else 0
+
+    # 🔥 NET CARB EFFECT (better than binary fiber cancel)
+    net_carb_effect = carb_ratio * (1 - min(fiber_ratio, 0.3))
+
+    # ------------------------------------------------------------
+    # 🔥 STEP 6: SAFE OVERRIDE LOGIC (WITH CONFIDENCE GATING)
+    # ------------------------------------------------------------
+    if confidence != "low":
+
+        if dominance == "glucose":
+            if net_carb_effect >= 0.30:
+                domain = "glucose"
+            elif net_carb_effect >= 0.22:
+                domain = "balanced"
+            else:
+                domain = "lifestyle"
+
+        elif dominance == "cholesterol":
+            if fat_ratio >= 0.35:
+                domain = "cholesterol"
+
+        elif dominance == "mixed":
+            if net_carb_effect >= 0.28:
+                domain = "glucose"
+            elif fat_ratio >= 0.38:
+                domain = "cholesterol"
+            else:
+                domain = "lifestyle"
+
+        elif dominance == "balanced":
+            domain = "lifestyle"
+
+    # LOW confidence → DO NOT override base score
+
+    # ------------------------------------------------------------
+    # 🔥 FINAL OUTPUT
+    # ------------------------------------------------------------
+    return {
+        "domain": domain,
+        "scores": final_scores,
+        "macro_totals": macro_totals,
+        "macro_dominance": dominance_info,
+        "macro_confidence": confidence,
+    }
 
 
 def extract_grams(query: str) -> float:
@@ -573,106 +939,233 @@ def compute_meal_calories(foods: list, multiplier: float = 1.0) -> float:
 USDA_API_KEY = os.getenv("USDA_API_KEY")
 USDA_CACHE: dict = {}
 
-
-def call_usda(food: str) -> Optional[dict]:
-    if not USDA_API_KEY:
-        return None
-    try:
-        r = requests.get(
-            "https://api.nal.usda.gov/fdc/v1/foods/search",
-            params={"api_key": USDA_API_KEY, "query": food, "pageSize": 1},
-            timeout=2,
-        )
-        data = r.json()
-        foods = data.get("foods", [])
-        foods = [f for f in foods if f.get("dataType") in ("SR Legacy", "Foundation")]
-        if not foods:
-            return None
-        nutrients = foods[0].get("foodNutrients", [])
-
-        def _val(name: str) -> float:
-            for n in nutrients:
-                if name in n.get("nutrientName", ""):
-                    return float(n.get("value", 0))
-            return 0.0
-
-        return {
-            "carbs_g":         _val("Carbohydrate"),
-            "protein_g":       _val("Protein"),
-            "fat_g":           _val("Total lipid"),
-            "sat_fat_g":       _val("Fatty acids, total saturated"),
-            "fiber_g":         _val("Fiber, total dietary"),
-            "soluble_fiber_g": 0.0,
-            "calories":        _val("Energy"),
-            "_source":         "usda",
-        }
-    except Exception:
-        return None
-
-
-def get_nutrition(food: str) -> dict:
-    if food in FOOD_DATA:
-        print(f"[NUTRITION] FOOD_DATA hit: {food}")
-        return FOOD_DATA[food]
-    if food in USDA_CACHE:
-        print(f"[NUTRITION] USDA_CACHE hit: {food}")
-        return USDA_CACHE[food]
-    print(f"[NUTRITION] USDA_FETCH: {food}")
-    data = call_usda(food)
-    if data:
-        USDA_CACHE[food] = data
-        return data
-    return {
-        "carbs_g": 0.0, "protein_g": 0.0, "fat_g": 0.0,
-        "sat_fat_g": 0.0, "fiber_g": 0.0, "soluble_fiber_g": 0.0,
-        "calories": 0.0, "_source": "unknown",
+def normalize_input(query: str) -> str:
+    FOOD_SPELLING_CORRECTIONS = {
+        "avacado": "avocado",
+        "avacados": "avocados",
+        "brocoli": "broccoli",
+        "broccolli": "broccoli",
+        "tumeric": "turmeric",
+        "bannana": "banana",
     }
 
-
-FOOD_SPELLING_CORRECTIONS: dict = {
-    "avacado":   "avocado",
-    "avacados":  "avocados",
-    "brocoli":   "broccoli",
-    "broccolli": "broccoli",
-    "tumeric":   "turmeric",
-    "bannana":   "banana",
-}
-
-
-def normalize_input(query: str) -> str:
     q = query.lower().strip()
     q = re.sub(r"[,/;|]+", " ", q)
     q = re.sub(r"[-]+", " ", q)
+
     tokens = re.findall(r"\b\w+\b", q)
     corrected = [FOOD_SPELLING_CORRECTIONS.get(t, t) for t in tokens]
+
     return " ".join(corrected)
 
 
 UNKNOWN_FOODS = set()
 
+def normalize_usda_food_name(name: str) -> str:
+    """
+    🔥 Converts USDA result → your canonical FOOD_DATA format
+    """
+    n = name.lower().strip()
 
+    # ------------------------------------------------------------
+    # 🔥 BLACK-EYED PEAS / COWPEA NORMALIZATION (CRITICAL FIX)
+    # ------------------------------------------------------------
+    if "black eyed" in n or "black-eyed" in n:
+        return "black-eyed peas (cooked)"
+
+    if "cowpea" in n or "southern pea" in n:
+        return "black-eyed peas (cooked)"
+
+    # ------------------------------------------------------------
+    # 🔥 OTHER BEANS
+    # ------------------------------------------------------------
+    if "kidney" in n:
+        return "kidney beans (cooked)"
+
+    if "chickpea" in n or "chole" in n:
+        return "chickpeas (cooked)"
+
+    if "lentil" in n:
+        return "red lentils (cooked)"
+
+    # ------------------------------------------------------------
+    # 🔥 GENERIC BEAN SAFETY
+    # ------------------------------------------------------------
+    if "bean" in n:
+        return n + " (cooked)"
+
+    return n
+
+def expand_usda_candidates(query: str) -> list:
+    q = query.lower().strip()
+
+    expansions = set()
+
+    # base
+    expansions.add(q)
+
+    # cooked variants
+    expansions.add(q + " cooked")
+
+    # beans → peas
+    if "beans" in q:
+        expansions.add(q.replace("beans", "peas"))
+        expansions.add(q.replace("beans", ""))
+
+    # 🔥 CRITICAL DOMAIN KNOWLEDGE
+    if "black" in q and ("eye" in q or "eyed" in q):
+        expansions.update([
+            "black eyed peas",
+            "black eyed peas cooked",
+            "cowpeas",
+            "cowpeas cooked",
+            "southern peas",
+        ])
+
+    return [e.strip() for e in expansions if e.strip()]
+
+def try_usda_as_food(query: str) -> Optional[str]:
+    candidates = expand_usda_candidates(query)
+
+    for candidate in candidates:
+        print(f"[USDA_TRY] {candidate}")
+
+        data = call_usda(candidate)
+
+        if data:
+            canonical = normalize_usda_food_name(candidate)
+
+            print(f"[USDA_PROMOTED] raw={candidate} → canonical={canonical}")
+
+            USDA_CACHE[canonical] = data
+            return canonical
+
+    print(f"[USDA_FAILED_ALL] {query}")
+    return None
+
+@trace
 def process_query(query: str) -> dict:
     query = normalize_input(query)
+
+    # 🔥 STEP 1: DETECT FOODS
+    query = normalize_food_text(query)
     foods = detect_foods(query)
 
+    # 🔥 STEP 1B: FORCE USDA PROMOTION (ALWAYS BEFORE ANY EXIT)
     if not foods:
-        UNKNOWN_FOODS.add(query.lower())
+        candidate = try_usda_as_food(query)
+
+        if candidate:
+            print(f"[FOOD_PROMOTED_FROM_USDA] {candidate}")
+
+            nutrition = USDA_CACHE.get(candidate) or call_usda(candidate)
+
+            if nutrition:
+                FOOD_DATA[candidate] = nutrition
+
+            foods = [candidate]
+
+    # 🔥 DEBUG (add this temporarily)
+    print(f"[PROCESS_QUERY] foods after detection+usda: {foods}")
+
+# 🔥 NOW continue pipeline (not before)
+
+    # ------------------------------------------------------------
+    # 🔥 STEP 2: CAPTURE UNKNOWNS (SEPARATE TRACKING)
+    # ------------------------------------------------------------
+    tokens = tokenize(query)
+    known_set = {f.lower() for f in foods}
+
+    unknown_tokens = []
+
+    for t in tokens:
+        if (
+            is_food_like(t)
+            and t.lower() not in known_set
+            and not is_part_of_detected_food(t, foods)
+        ):
+            UNKNOWN_FOODS.add(t.lower())
+            unknown_tokens.append(t.lower())
+
+    # ------------------------------------------------------------
+    # 🔴 HARD STOP: NO VALID FOODS (AFTER USDA TRY)
+    # ------------------------------------------------------------
+    if not foods:
         return {
             "foods": [],
             "scores": {"glucose": 0, "cholesterol": 0, "lifestyle": 0},
             "domain": "unknown",
             "meal_calories": 0.0,
-            "macro_dominance": {"dominance": "balanced", "carb_cal": 0.0,
-                                "fat_cal": 0.0, "carb_ratio": 0.0, "fat_ratio": 0.0},
+            "nutrition": {},
+            "macro_dominance": {
+                "dominance": "balanced",
+                "carb_cal": 0.0,
+                "fat_cal": 0.0,
+                "protein_cal": 0.0,
+                "carb_ratio": 0.0,
+                "fat_ratio": 0.0,
+                "protein_ratio": 0.0,
+            },
             "macro_totals": {},
+            "has_food": False,
         }
 
+    # ------------------------------------------------------------
+    # 🔴 HARD STOP: ALL FOODS UNKNOWN (FIXED)
+    # ------------------------------------------------------------
+    valid_foods = []
+
+    for f in foods:
+        n = get_nutrition(f)
+        
+        print("[DEBUG_NUTRITION]", f, n)
+
+        # 🔥 ACCEPT IF ANY REAL SIGNAL EXISTS
+        if n and any([
+            n.get("carbs_g", 0) > 0,
+            n.get("protein_g", 0) > 0,
+            n.get("fat_g", 0) > 0,
+            n.get("calories", 0) > 0
+        ]):
+            valid_foods.append(f)
+
+    # 🔥 HARD STOP ONLY IF NOTHING VALID
+    if not valid_foods:
+        return {
+            "foods": [],
+            "scores": {"glucose": 0, "cholesterol": 0, "lifestyle": 0},
+            "domain": "unknown",
+            "meal_calories": 0.0,
+            "nutrition": {},
+            "macro_dominance": {
+                "dominance": "balanced",
+                "carb_cal": 0.0,
+                "fat_cal": 0.0,
+                "protein_cal": 0.0,
+                "carb_ratio": 0.0,
+                "fat_ratio": 0.0,
+                "protein_ratio": 0.0,
+            },
+            "macro_totals": {},
+            "has_food": False,
+        }
+
+    # 🔥 overwrite foods with valid ones
+    foods = valid_foods
+
+    # ------------------------------------------------------------
+    # 🔥 STEP 3: CALCULATIONS
+    # ------------------------------------------------------------
     grams = extract_grams(query)
     multiplier = grams / 100.0 if len(foods) == 1 else 1.0
 
     domain_result = determine_domain_from_foods_and_query(query, foods)
     calories = compute_meal_calories(foods, multiplier)
     nutrition = compute_nutrition_summary(foods, multiplier)
+
+    # ------------------------------------------------------------
+    # 🔥 FINAL RESPONSE
+    # ------------------------------------------------------------
     return {
         "foods": foods,
         "scores": domain_result["scores"],
@@ -681,8 +1174,8 @@ def process_query(query: str) -> dict:
         "nutrition": nutrition,
         "macro_dominance": domain_result["macro_dominance"],
         "macro_totals": domain_result["macro_totals"],
+        "has_food": True,
     }
-
 
 def nutrition_source_confidence(nutrition: dict) -> str:
     source = nutrition.get("_source", "food_data")

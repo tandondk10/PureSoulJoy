@@ -82,10 +82,9 @@ def test_mixed_known_unknown():
         f"Chat must reflect juice context: {chat}"
     )
 
-    assert resp.get("needs_clarification") is True, \
-        f"needs_clarification must be True in mixed case: {resp}"
-    assert len(resp["unknown_foods"]) >= 1, f"mixed response should include unknown_foods: {resp}"
-
-    assert resp["chat"].count("?") == 1, (
-        f"Expected exactly one '?' in mixed response: {resp['chat']}"
-    )
+    # V2: known food present (juice) → food engine handles it, no clarification question.
+    # unknown_foods is empty when needs_clarification=False.
+    assert resp.get("needs_clarification") is not True, \
+        f"needs_clarification must be False when known food is present: {resp}"
+    assert resp["unknown_foods"] == [], \
+        f"unknown_foods must be empty when needs_clarification=False: {resp}"
