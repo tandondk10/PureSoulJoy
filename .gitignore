@@ -42,3 +42,8 @@ app-example
 /ios
 /android
 .env
+
+# SQLite DB
+*.db
+backend/feedback.db
+catlog

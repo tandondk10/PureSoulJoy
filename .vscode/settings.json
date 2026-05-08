@@ -3,5 +3,7 @@
     "source.fixAll": "explicit",
     "source.organizeImports": "explicit",
     "source.sortMembers": "explicit"
-  }
+  },
+  "typescript.preferences.includePackageJsonAutoImports": "off",
+  "javascript.preferences.includePackageJsonAutoImports": "off"
 }

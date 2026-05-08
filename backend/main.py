@@ -1,37 +1,433 @@
 from fastapi import FastAPI, Request
+from openai import OpenAI
+from datetime import datetime
+from contextvars import ContextVar
+import io
 import re
 import os
 import time
+import asyncio
+import base64
+import difflib
+import sqlite3
+import json
+import functools
+
+
 from litellm import completion
 from dotenv import load_dotenv
 
-load_dotenv()
+from backend.intervention_engine import get_intervention
+from backend.context_patterns import detect_context_pattern
+from backend.lever_mapping import CONTEXT_LEVERS, LEVER_ACTIONS, DEFAULT_LEVERS
+from backend.utils.trace import create_trace_id
+from backend.food_engine import SEED_FOOD_ITEMS, process_query, detect_foods, UNKNOWN_FOODS, classify_macro_confidence, FOOD_DATA, CURATED_HIGH_IMPACT_FOODS, INTERNAL_FOOD_BEHAVIOR, call_usda, STOPWORDS
+from backend.response.deterministic_meal import build_deterministic_meal_response
+from typing import Optional, List
+from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel
+from typing import List, Dict, Any
+from services.usda_service import call_usda
+
+class QueryResponse(BaseModel):
+    status: str
+    chat: str
+    text: str
+    foods: List[str]
+    has_food: bool
+    food_engine: bool
+    structured: Dict[str, Any]
+    actions: List[str] = []   # 🔥 THIS FIXES YOUR ISSUE
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "feedback.db")
+
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))  # go up from backend/
+
+print("BASE_DIR:", BASE_DIR)
+
+ENV_PATH = os.path.join(BASE_DIR, "backend/.env")
+
+load_dotenv(dotenv_path=ENV_PATH)
+
+client = OpenAI()
 
 # ---------------- CONFIG ----------------
 LLM_MODE = os.getenv("LLM_MODE", "openai")
 USE_LLM = os.getenv("USE_LLM", "true").lower() == "true"
 USE_MOCK = os.getenv("USE_MOCK", "false").lower() == "true"
-SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"  # 🔥 ADDED
+SCROLL_TEST = os.getenv("SCROLL", "false").lower() == "true"
 
 MODEL_OPENAI = os.getenv("MODEL_OPENAI", "gpt-4o-mini")
 MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", MODEL_OPENAI)
 
-print("LLM_MODE:", LLM_MODE)
-print("USE_LLM:", USE_LLM)
-print("USE_MOCK:", USE_MOCK)
-print("SCROLL_TEST:", SCROLL_TEST)  # 🔥 ADDED
+TRACE_LEVEL = int(os.getenv("TRACE_LEVEL", "1"))
+TRACE_TARGETS = os.getenv("TRACE_TARGETS", "").split(",")
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+USE_NEW_ROUTER = os.getenv("USE_NEW_ROUTER", "false").lower() == "true"
+
+print("TRACE_LEVEL:", TRACE_LEVEL)
+print("TRACE_TARGETS:", TRACE_TARGETS)
+print("DEBUGE:", DEBUG)
+print("USE_NEW_ROUTER :", USE_NEW_ROUTER)
+
+import uuid
+import inspect
+from functools import wraps
+
+def trace(func):
+    @wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        trace_id = kwargs.get("trace_id") or str(uuid.uuid4())[:8]
+
+        print(f"\n🔍 [TRACE {trace_id}] ENTER {func.__name__}")
+        print(f"[TRACE {trace_id}] INPUT:", args, kwargs)
+
+        result = await func(*args, **kwargs)
+
+        print(f"✅ [TRACE {trace_id}] EXIT {func.__name__}")
+        print(f"[TRACE {trace_id}] OUTPUT:", str(result)[:300])
+
+        return result
+
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        trace_id = kwargs.get("trace_id") or str(uuid.uuid4())[:8]
+
+        print(f"\n🔍 [TRACE {trace_id}] ENTER {func.__name__}")
+        print(f"[TRACE {trace_id}] INPUT:", args, kwargs)
+
+        result = func(*args, **kwargs)
+
+        print(f"✅ [TRACE {trace_id}] EXIT {func.__name__}")
+        print(f"[TRACE {trace_id}] OUTPUT:", str(result)[:300])
+
+        return result
+
+    # 👇 KEY LINE
+    return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+
+def now_iso():
+    return datetime.utcnow().isoformat() + "Z"
+
+
+trace_id_var: ContextVar[str] = ContextVar("trace_id", default="unknown")
+
+
+class TraceAccumulator:
+    def __init__(self, trace_id: str):
+        self.trace_id = trace_id
+        self.steps: list = []
+
+    def log(self, stage: str, data: dict):
+        self.steps.append({"stage": stage, "ts": now_iso(), "data": data})
+
+    def to_dict(self) -> dict:
+        return {"trace_id": self.trace_id, "steps": self.steps}
+
+
+trace_obj_var: ContextVar = ContextVar("trace_obj", default=None)
+
+
+def _inject_trace(resp: dict) -> dict:
+    trace_id = trace_id_var.get("unknown")
+    if DEBUG:
+        acc = trace_obj_var.get(None)
+        if acc:
+            full = acc.to_dict()
+            full["trace_id"] = trace_id
+            resp["_trace"] = full
+            return resp
+    resp["_trace"] = {"trace_id": trace_id}
+    return resp
+
+
+def trace_start(func_name: str):
+    if TRACE_LEVEL < 4:
+        return None
+    trace_id = trace_id_var.get()
+    if "*" in TRACE_TARGETS or func_name in TRACE_TARGETS:
+        print(f"[{now_iso()}][BE][FUNC][{trace_id}] → {func_name}")
+    return time.time()
+
+
+def trace_end(func_name: str, start):
+    if TRACE_LEVEL < 4 or start is None:
+        return
+    trace_id = trace_id_var.get()
+    if "*" in TRACE_TARGETS or func_name in TRACE_TARGETS:
+        duration = (time.time() - start) * 1000
+        print(f"[{now_iso()}][BE][FUNC][{trace_id}] ← {func_name} {duration:.0f}ms")
+
+
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] LLM_MODE:", LLM_MODE)
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] USE_LLM:", USE_LLM)
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] USE_MOCK:", USE_MOCK)
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] SCROLL_TEST:", SCROLL_TEST)
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "feedback.db")
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trace_id TEXT,
+        query TEXT,
+        context_name TEXT,
+        action TEXT,
+        feedback TEXT,
+        action_taken TEXT,
+        timestamp TEXT
+    )
+    """
+    )
+    for col in ("action_taken TEXT", "raw_query TEXT", "normalized_query TEXT"):
+        try:
+            cursor.execute(f"ALTER TABLE feedback ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
+    conn.close()
+
 
 app = FastAPI()
+init_db()
 
-print("🚨 LLM BACKEND RUNNING")
+if TRACE_LEVEL >= 1:
+    print(f"[{now_iso()}][{trace_id_var.get()}] 🚨 LLM BACKEND RUNNING")
+
+
+# ---------------- USER PROFILE ----------------
+USER_PROFILE = {
+    "name": "Deepak",
+    "age": 63,
+    "condition": "prediabetic",
+    "a1c": 6.0,
+    "ldl": 100,
+    "goal": "reduce glucose spikes",
+    "diet": "vegetarian",
+    "phenotype": "post-meal spiker",
+}
+
+COMMON_CORRECTIONS = {
+    "excercise": "exercise",
+    "excersise": "exercise",
+    "glocose": "glucose",
+    "suger": "sugar",
+    "colestrol": "cholesterol",
+    "bp": "blood pressure",  # you already handle this, but safe
+}
+
+QUESTION_STARTS = ("what", "how", "which", "best")
+
+def safe_response(**kwargs):
+    """Single API response contract builder. Any response reaching FastAPI /query must pass through this."""
+    chat = kwargs.get("chat", "") or ""
+    text = kwargs.get("text", chat) or chat
+
+    foods = kwargs.get("foods") or []
+    unknown_foods = kwargs.get("unknown_foods") or []
+    actions = kwargs.get("actions") or []
+
+    domain = kwargs.get("domain", "lifestyle") or "lifestyle"
+    has_food = bool(kwargs.get("has_food", False))
+    needs_clarification = bool(kwargs.get("needs_clarification", False))
+
+    resp = {
+        "status": kwargs.get("status", "success"),
+        "chat": chat,
+        "text": text,
+        "foods": foods,
+        "has_food": has_food,
+        "food_engine": bool(kwargs.get("food_engine", True)),
+        "structured": kwargs.get("structured") or {
+            "domain": domain,
+            "foods": foods,
+            "has_food": has_food,
+        },
+        "domain": domain,
+        "context_domain": kwargs.get("context_domain"),
+        "needs_clarification": needs_clarification,
+        "unknown_foods": unknown_foods,
+        "actions": actions,
+        "score": kwargs.get("score", 0),
+    }
+
+    for key in ("message", "intent", "screen", "_trace", "error",
+                "audio", "tts_text", "cleaned_query", "needs_followup",
+                "raw", "nutrition", "macro_totals", "meal_calories"):
+        if key in kwargs:
+            resp[key] = kwargs[key]
+
+    return resp
+
+
+# ---------------- ROUTING GUARDS ----------------
+
+HEALTH_NON_FOOD_TERMS = {
+    "hdl", "ldl", "cholesterol", "triglyceride", "triglycerides",
+    "a1c", "blood pressure", "bp", "glucose", "blood sugar", "blood glucose",
+    "bg", "spike", "sugar spike",
+}
+
+FOOD_SIGNAL_TERMS = {
+    "eat", "ate", "eating", "meal", "food",
+    "breakfast", "lunch", "dinner", "snack",
+    "rice", "beans", "chicken", "egg", "eggs",
+    "salad", "bread", "fruit", "dessert",
+    "curry", "dal", "lentils",
+    "chawal", "rajma", "parantha", "roti",
+}
+
+QUESTION_WORDS = {
+    "what", "how", "why", "when", "where", "can", "should", "could", "would",
+}
+
+
+def has_food_signal(query: str) -> bool:
+    q = (query or "").lower()
+    return any(term in q for term in FOOD_SIGNAL_TERMS)
+
+
+_HEALTH_PHRASE_TERMS = {
+    "blood sugar", "blood glucose", "blood pressure", "sugar spike",
+}
+
+_HEALTH_TOKEN_TERMS = {
+    "hdl", "ldl", "cholesterol", "triglyceride", "triglycerides",
+    "a1c", "bp", "glucose", "bg", "spike",
+}
+
+
+def has_health_non_food_term(query: str) -> bool:
+    q = (query or "").lower().strip()
+    if any(phrase in q for phrase in _HEALTH_PHRASE_TERMS):
+        return True
+    tokens = set(q.replace("?", "").replace(",", "").split())
+    return bool(tokens & _HEALTH_TOKEN_TERMS)
+
+
+def looks_like_sentence_not_food(text: str) -> bool:
+    q = (text or "").lower().strip().replace("?", "")
+    tokens = q.split()
+    if len(tokens) <= 5:
+        return False
+    return any(t in QUESTION_WORDS for t in tokens[:3])
+
+
+def is_health_non_food_query(query: str) -> bool:
+    """True when query is a health/coaching question, not a meal description."""
+    q = (query or "").lower().strip()
+    if not q:
+        return False
+
+    has_health = has_health_non_food_term(q)
+
+    # Clear case: health term with no food signal at all.
+    if has_health and not has_food_signal(q):
+        return True
+
+    # Health question disguised as a sentence containing "meal" or "food".
+    # e.g. "what exercises can i do to bring down my blood glucose after the meal?"
+    if has_health and looks_like_sentence_not_food(q):
+        return True
+
+    return False
+
+
+LIFESTYLE_QUERY_TERMS = {
+    "exercise", "exercises", "workout", "workouts",
+    "routine", "routines", "fitness", "training",
+    "cardio", "strength", "weekly", "walk", "walking", "steps",
+    "list",
+}
+
+
+def is_lifestyle_query(query: str) -> bool:
+    """Detect non-food lifestyle / exercise / routine queries."""
+    q = (query or "").lower().strip()
+    tokens = set(q.replace("?", "").replace(",", "").split())
+    return any(term in tokens for term in LIFESTYLE_QUERY_TERMS)
+
+@trace
+def is_food_logging_query(query: str) -> bool:
+    """
+    True only when the query looks like an actual meal/food being logged.
+
+    food signal != food logging intent.
+    Conceptual questions containing food words must not enter the food engine.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+
+    tokens = q.replace("?", "").split()
+
+    # Explicit meal-log phrases always route to food engine.
+    explicit_log_terms = {"ate", "eaten", "had", "having", "logged"}
+    if any(t in tokens for t in explicit_log_terms) and has_food_signal(q):
+        return True
+
+    # Question starters indicate guidance/concept, not meal logging.
+    question_starters = {
+        "what", "how", "why", "which", "when", "where",
+        "can", "should", "give", "list",
+    }
+    if tokens and tokens[0] in question_starters:
+        return False
+
+    # Long sentence-like inputs are not food logs.
+    if looks_like_sentence_not_food(q):
+        return False
+
+    # Short noun-like phrases with a food signal are valid food logs.
+    if len(tokens) <= 5 and has_food_signal(q):
+        return True
+
+    return False
+
+@trace
+def classify_query_type(query: str) -> str:
+    """
+    Proto-Layer 2 query classifier.
+
+    Returns one of: "health", "lifestyle", "food", "general".
+    """
+    q = (query or "").lower().strip()
+
+    if is_health_non_food_query(q):
+        return "health"
+
+    if is_lifestyle_query(q):
+        return "lifestyle"
+
+    if is_food_logging_query(q):
+        return "food"
+
+    if looks_like_sentence_not_food(q):
+        return "general"
+
+    return "general"
 
 
 # ---------------- SCROLL TEST ----------------
 def long_block(title: str) -> str:
-    return "\n".join([
-        f"{i+1}. {title} detail explaining behavior, impact, and optimization pattern."
-        for i in range(40)
-    ])
+    return "\n".join(
+        [
+            f"{i+1}. {title} detail explaining behavior, impact, and optimization pattern."
+            for i in range(40)
+        ]
+    )
 
 
 def scroll_test_response() -> str:
@@ -46,70 +442,751 @@ def scroll_test_response() -> str:
 """
 
 
+# ---------------- WHISPER HALLUCINATION LIST ----------------
+# Maintainable — add entries as observed in production
+WHISPER_HALLUCINATIONS = {
+    "",
+    "thank you.",
+    "thank you",
+    "thanks for watching.",
+    "thanks for watching",
+    "you",
+    "you.",
+    ".",
+    "...",
+    "bye.",
+    "bye",
+    "goodbye.",
+    "goodbye",
+}
+
+
+def is_hallucination(text: str) -> bool:
+    return text.strip().lower() in WHISPER_HALLUCINATIONS
+
+
+# ---------------- TRIGGER REMOVAL ----------------
+# Matches "go improveme" or "go improve me" at the END of the transcript only.
+# Case-insensitive. Allows optional trailing punctuation. One pass only.
+TRIGGER_PATTERN = re.compile(
+    r"\s*(go\s+improve\s*me|इम्प्रूव\s*मी)\s*[.!?]?\s*$", re.IGNORECASE
+)
+
+
+def has_trigger(text: str) -> bool:
+    return bool(TRIGGER_PATTERN.search(text))
+
+
+def remove_trigger(text: str) -> str:
+    return TRIGGER_PATTERN.sub("", text).strip()
+
+
+# ---------------- VALIDATION ----------------
+def validate_voice_query(raw_transcript: str) -> tuple:
+    """
+    Validates Whisper transcript. Returns (error_msg | None, cleaned_query).
+    Order: A → B → C → D exactly per spec.
+    """
+    t0 = trace_start("validate_voice_query")
+    try:
+        raw = (raw_transcript or "").strip()
+
+        # Case A: null, empty, or Whisper hallucination
+        if not raw or is_hallucination(raw):
+            return "Could not understand. Please try again.", ""
+
+        # Trigger removal (before B/C/D checks)
+        trigger_found = has_trigger(raw)
+        cleaned = remove_trigger(raw)
+
+        # Case B: transcript contained only the trigger phrase
+        if trigger_found and not cleaned:
+            return "Please say your question or meal before Go ImproveMe.", ""
+
+        # Case C: no word with 3 or more characters
+        words = re.findall(r"\w+", cleaned)
+        if len(cleaned.strip()) < 3:
+            return "Please say a complete question or meal.", cleaned
+
+        # Case D: only whitespace or punctuation
+        if not re.sub(r"[^\w]", "", cleaned).strip():
+            return "Could not understand. Please try again.", cleaned
+
+        return None, cleaned
+    finally:
+        trace_end("validate_voice_query", t0)
+
+
 # ---------------- KEYWORD MAP ----------------
 KEYWORD_MAP = {
     "glucose": {
-        "primary": ["glucose", "blood glucose", "sugar", "blood sugar", "bg", "diabetes"],
-        "medical": ["a1c", "hba1c", "insulin", "glycemic", "hypoglycemia", "hyperglycemia"],
-        "food": ["carb", "carbs", "dessert", "sweet", "juice", "soda"],
-        "context": ["fasting", "postprandial", "after meal", "post meal"]
+        "primary": [
+            "glucose",
+            "blood glucose",
+            "sugar",
+            "blood sugar",
+            "bg",
+            "glycemia",
+            "diabetes",
+            "diabetic",
+            "prediabetes",
+            "prediabetic",
+            "pre-diabetic",
+            "pre diabetes",
+        ],
+        "medical": [
+            "a1c",
+            "hba1c",
+            "hemoglobin a1c",
+            "insulin",
+            "glycemic",
+            "hyperglycemia",
+            "hypoglycemia",
+            "hypo",
+        ],
+        "timing": [
+            "fasting",
+            "postprandial",
+            "post-prandial",
+            "after meal",
+            "post meal",
+        ],
     },
-
     "bp": {
-        "primary": ["blood pressure", "bp", "pressure", "hypertension", "hypotension"],
-        "medical": ["systolic", "diastolic"],
+        "primary": [
+            "blood pressure",
+            "bp",
+            "hypertension",
+            "hypertensive",
+            "hypotension",
+        ],
+        "medical": ["systolic", "diastolic", "pulse pressure"],
         "lifestyle": ["salt", "sodium"],
-        "symptoms": ["dizziness", "headache"]
+        "symptoms": ["dizziness", "headache"],
     },
-
     "cholesterol": {
-        "primary": ["cholesterol", "chol", "ldl", "hdl", "lipid", "triglyceride", "tg"],
-        "medical": ["statin", "plaque"],
-        "food": ["fat", "saturated", "trans fat"]
+        "primary": [
+            "cholesterol",
+            "chol",
+            "ldl",
+            "hdl",
+            "lipid",
+            "lipids",
+            "triglyceride",
+            "triglycerides",
+            "tg",
+        ],
+        "medical": [
+            "statin",
+            "plaque",
+            "lipid variability",
+        ],
     },
-
     "lifestyle": {
-        "diet": ["diet", "food", "meal", "eat", "nutrition"],
         "activity": ["exercise", "workout", "walk", "steps"],
         "recovery": ["sleep", "stress", "meditation"],
         "body": ["weight", "fitness"],
-        "habits": ["lifestyle", "habit", "routine"]
-    }
+        "habits": ["lifestyle", "habit", "routine"],
+    },
+}
+
+# ---------------- CONTEXT MAP ----------------
+CONTEXT_MAP = {
+    "after_meal": [
+        "after meal",
+        "post meal",
+        "after lunch",
+        "after dinner",
+        "after breakfast",
+        "post lunch",
+        "post dinner",
+        "post breakfast",
+        "after eating",
+        "after food",
+        "just ate",
+        "had lunch",
+        "had dinner",
+        "had breakfast",
+        "postprandial",
+        "post-prandial",
+    ],
+    "high": [
+        "high",
+        "spike",
+        "spikes",
+        "surge",
+        "surges",
+        "up",
+        "went up",
+        "shot up",
+        "elevated",
+        "increase",
+        "increased",
+        "rising",
+        "hyperglycemia",
+        "hypertensive",
+        "hypertension",
+        "uncontrolled",
+    ],
+    "low": [
+        "low",
+        "drop",
+        "drops",
+        "dropped",
+        "crash",
+        "crashes",
+        "dip",
+        "dips",
+        "valley",
+        "valleys",
+        "hypo",
+        "hypoglycemia",
+        "hypotension",
+        "decrease",
+        "decreased",
+        "reduced",
+    ],
+    "unstable": [
+        "fluctuating",
+        "fluctuation",
+        "variability",
+        "volatile",
+        "yo-yo",
+        "yo yo",
+        "yoyo",
+        "swing",
+        "swings",
+        "labile",
+        "erratic",
+        "brittle",
+        "unstable",
+        "reactive",
+        "reactivity",
+        "paroxysmal",
+    ],
+}
+
+STATE_MAP = {
+    "prediabetic": ("glucose", "education"),
+    "diabetic": ("glucose", "education"),
+    "hyperglycemia": ("glucose", "intervention"),
+    "hypoglycemia": ("glucose", "intervention"),
+    "hypo": ("glucose", "intervention"),
+    "hypertension": ("bp", "education"),
+    "hypotension": ("bp", "intervention"),
+    "high ldl": ("cholesterol", "intervention"),
+    "low hdl": ("cholesterol", "intervention"),
+}
+
+ACTION_REGISTRY = {
+    "walk_10min_now": {
+        "display": "Take a 10-minute walk now",
+        "keywords": ["walk", "10", "minute"],
+        "priority": 1,
+    },
+    "avoid_simple_carbs_now": {
+        "display": "Avoid simple carbs right now",
+        "keywords": ["avoid", "carbs"],
+        "priority": 1,
+    },
+    "add_protein_next_meal": {
+        "display": "Add protein to your next meal",
+        "keywords": ["protein", "meal"],
+        "priority": 2,
+    },
+    "eat_earlier_today": {
+        "display": "Eat earlier today",
+        "keywords": ["eat", "earlier"],
+        "priority": 2,
+    },
+    "do_breathing_5min": {
+        "display": "Do 5 minutes of deep breathing",
+        "keywords": ["breathing", "minutes"],
+        "priority": 1,
+    },
+    "check_glucose_again": {
+        "display": "Check your glucose again",
+        "keywords": ["check", "glucose"],
+        "priority": 1,
+    },
+}
+
+
+def has_any(s: str, words: list) -> bool:
+    return any(w in s for w in words)
+
+
+def flatten_keyword_groups(groups: dict) -> list:
+    words = []
+    for values in groups.values():
+        words.extend(values)
+    return words
+
+
+# ---------------- INTENT MAP ----------------
+INTENT_MAP = {
+    "question": [
+        "what",
+        "why",
+        "how",
+        "when",
+        "where",
+        "does",
+        "do",
+        "is",
+        "are",
+        "can",
+        "should",
+        "could",
+        "would",
+        "will",
+    ],
+    "guidance": [
+        "how to",
+        "ways to",
+        "help me",
+        "guide",
+        "recommend",
+        "suggest",
+    ],
+    "medication": [
+        "statin",
+        "metformin",
+        "medicine",
+        "medication",
+        "drug",
+    ],
+}
+
+# ---------------- LEVER KEYWORDS ----------------
+LEVER_KEYWORDS = {
+    "food": ["eat", "meal", "diet", "carbs", "carb", "fiber", "protein", "food"],
+    "movement": ["walk", "exercise", "move", "movement", "activity", "active", "steps"],
+    "timing": ["after", "before", "when", "timing", "fasting", "gap", "delay"],
+    "recovery": ["stress", "sleep", "rest", "breathing", "relax"],
+    "monitoring": ["check", "measure", "track", "monitor", "reading", "level"],
+    "enhancers": ["vinegar", "cinnamon", "garlic", "turmeric"],
+}
+
+# ---------------- SUB-LEVER KEYWORDS ----------------
+# IMPORTANT: Order = most specific → least specific
+SUB_LEVER_KEYWORDS = {
+    # --- FOOD (specific first) ---
+    "pairing": [
+        "pair carbs with",
+        "carbs with nuts",
+        "combine carbs with",
+        "add nuts to carbs",
+        "pairing",
+    ],
+    "fiber_first": [
+        "fiber first",
+        "eat fiber",
+        "salad before",
+        "chia",
+        "flax",
+        "fiber",
+    ],
+    "protein_first": [
+        "protein first",
+        "eat protein first",
+        "egg first",
+        "chicken first",
+        "protein",
+    ],
+    "carb_control": ["reduce carbs", "low carb", "high carb", "carbs", "carb"],
+    # --- MOVEMENT ---
+    "post_meal_walk": [
+        "walk after meal",
+        "walk after meals",
+        "after meal walk",
+        "walk after eating",
+        "after eating walk",
+    ],
+    "brisk_walk": ["brisk walk", "fast walk", "walk fast"],
+    "light_activity": ["light activity", "gentle movement", "stretch", "move lightly"],
+    # --- TIMING ---
+    "delay_meal": [
+        "delay next meal",
+        "delay my next meal",  # ← ADD THIS
+        "delay meal",
+        "wait before eating",
+        "postpone meal",
+        "skip meal",
+    ],
+    "meal_spacing": [
+        "gap between meals",
+        "meal gap",
+        "spacing between meals",
+        "how long between meals",
+    ],
+    "early_dinner": [
+        "early dinner",
+        "eat dinner early",
+        "dinner early",
+        "when should i eat dinner",
+        "dinner time",
+    ],
+    # --- RECOVERY ---
+    "breathing": ["deep breathing", "breathing exercise", "deep breath", "breathing"],
+    "sleep": ["sleep", "sleep quality"],
+    "stress_control": ["stress", "anxiety", "anxious", "stress control"],
+    # --- MONITORING ---
+    "check_again": [
+        "check again",
+        "check sugar again",
+        "recheck",
+        "measure again",
+        r"check.*again",
+    ],
+    "track_pattern": [
+        "track glucose",
+        "track pattern",
+        "log glucose",
+        "pattern",
+        "track",
+    ],
+    "pre_post_compare": [
+        "before and after meal",
+        "pre and post meal",
+        "compare before after",
+        "compare",
+    ],
+    # --- ENHANCERS ---
+    "vinegar": ["vinegar", "apple cider vinegar"],
+    "cinnamon": ["cinnamon"],
+}
+
+# ---------------- SUB-LEVER → LEVER MAP ----------------
+_SUB_LEVER_TO_LEVER = {
+    "pairing": "food",
+    "fiber_first": "food",
+    "protein_first": "food",
+    "carb_control": "food",
+    "post_meal_walk": "movement",
+    "brisk_walk": "movement",
+    "light_activity": "movement",
+    "delay_meal": "timing",
+    "meal_spacing": "timing",
+    "early_dinner": "timing",
+    "breathing": "recovery",
+    "sleep": "recovery",
+    "stress_control": "recovery",
+    "check_again": "monitoring",
+    "track_pattern": "monitoring",
+    "pre_post_compare": "monitoring",
+    "vinegar": "enhancers",
+    "cinnamon": "enhancers",
+}
+
+# ---------------- DOMAIN CONSTANTS ----------------
+DOMAINS = {
+    "GLUCOSE": "glucose",
+    "BP": "bp",
+    "CHOLESTEROL": "cholesterol",
+    "LIFESTYLE": "lifestyle",
 }
 
 
 # ---------------- NORMALIZE ----------------
 def normalize(q: str) -> str:
-    q = q.lower().strip()
-    q = q.replace("-", " ")
+    t0 = trace_start("normalize")
+    try:
+        q = q.lower().strip()
+        q = q.replace("-", " ")
+        q = re.sub(r"\bbp\b", "blood pressure", q)
+        q = re.sub(r"\bbg\b", "glucose", q)
+        q = re.sub(r"\bblood sugar\b", "glucose", q)
+        return q
+    finally:
+        trace_end("normalize", t0)
 
-    q = re.sub(r"\bbp\b", "blood pressure", q)
-    q = re.sub(r"\bbg\b", "blood glucose", q)
-    q = re.sub(r"\bblood sugar\b", "glucose", q)
 
-    return q
+# ---------------- MEAL TEXT CLEANING ----------------
+_MEAL_TRIGGER = re.compile(
+    r"\b(i\s+(just\s+)?(ate|had|eaten|consumed)|my meal was"
+    r"|for\s+(breakfast|lunch|dinner)|today|this morning|just now)\b",
+    re.IGNORECASE,
+)
+
+_MEAL_FILLERS = [
+    r"\bi just had\b",
+    r"\bi just ate\b",
+    r"\bi had\b",
+    r"\bi ate\b",
+    r"\bi consumed\b",
+    r"\bmy meal was\b",
+    r"\bfor breakfast\b",
+    r"\bfor lunch\b",
+    r"\bfor dinner\b",
+    r"\btoday\b",
+    r"\bthis morning\b",
+    r"\bjust now\b",
+]
+
+
+def is_meal_sentence(q: str) -> bool:
+    return bool(_MEAL_TRIGGER.search(q))
+
+
+def clean_meal_text(q: str) -> str:
+    t0 = trace_start("clean_meal_text")
+    try:
+        result = q.lower()
+        for phrase in _MEAL_FILLERS:
+            result = re.sub(phrase, "", result, flags=re.IGNORECASE)
+        result = re.sub(r"\band\b", ",", result)
+        result = re.sub(r",\s*,", ",", result)
+        result = re.sub(r"\s+", " ", result).strip(" ,")
+        return result
+    finally:
+        trace_end("clean_meal_text", t0)
+
+
+def is_meal_input(q: str) -> bool:
+    s = q.lower()
+
+    food_words = [
+        "chicken",
+        "rice",
+        "dal",
+        "roti",
+        "bread",
+        "egg",
+        "milk",
+        "fish",
+        "paneer",
+        "pizza",
+        "burger",
+        "biryani",
+    ]
+
+    has_food = any(word in s for word in food_words)
+
+    has_quantity = any(char.isdigit() for char in s) or "gram" in s or "grams" in s
+
+    return has_food and has_quantity
 
 
 # ---------------- CONTEXT ----------------
 def detect_context(q: str) -> dict:
-    return {
-        "after_meal": any(x in q for x in ["after", "post meal"]),
-        "high": any(x in q for x in ["high", "spike", "elevated"]),
-        "low": any(x in q for x in ["low", "drop"]),
-    }
+    t0 = trace_start("detect_context")
+    try:
+        s = q.lower().strip()
+
+        return {
+            "meal": is_meal_input(s),  # 🔥 NEW
+            "pairing": is_pairing_query(s),  # optional
+            "after_meal": has_any(s, CONTEXT_MAP["after_meal"]),
+            "high": has_any(s, CONTEXT_MAP["high"]),
+            "low": has_any(s, CONTEXT_MAP["low"]),
+            "unstable": has_any(s, CONTEXT_MAP["unstable"]),
+        }
+    finally:
+        trace_end("detect_context", t0)
 
 
 # ---------------- INTENT ----------------
-def detect_intent(q: str) -> str:
-    text = q.lower()
-    scores = {}
 
-    for category, groups in KEYWORD_MAP.items():
+VALID_INTENTS = {"lifestyle", "glucose", "cholesterol", "blood_pressure", "unknown"}
+
+model_name = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
+
+
+def classify_intent_llm(query: str) -> str:
+    t0 = trace_start("classify_intent_llm")
+    try:
+        prompt = f"""Classify the user query into ONE of these intents:
+- lifestyle
+- glucose
+- cholesterol
+- blood_pressure
+- unknown
+
+If the query is unclear, meaningless, or unrelated to health, return "unknown".
+
+Return ONLY the intent. No explanation.
+
+Query: "{query}"
+"""
+        try:
+            response = completion(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=5,
+            )
+            return response["choices"][0]["message"]["content"].strip().lower()
+        except Exception as e:
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] LLM intent error:", e)
+            return "unknown"
+    finally:
+        trace_end("classify_intent_llm", t0)
+
+
+def is_food_list(q: str) -> bool:
+    parts = [p.strip() for p in q.split(",") if p.strip()]
+    return len(parts) >= 2 and all(len(p) > 1 for p in parts)
+
+
+FOOD_WORDS = {
+    "rice",
+    "dal",
+    "roti",
+    "bread",
+    "egg",
+    "eggs",
+    "chicken",
+    "fish",
+    "paneer",
+    "tofu",
+    "beans",
+    "lentils",
+    "salad",
+    "coffee",
+    "tea",
+    "oats",
+    "banana",
+    "apple",
+    "coke",
+    "pizza",
+    "milk",
+    "yogurt",
+}
+
+STOP_WORDS = {
+    "i", "ate", "had", "eat", "eating",
+    "is", "was", "are", "am",
+    "the", "a", "an",
+    "and", "with", "just",
+}
+
+def is_single_food_phrase(q: str) -> bool:
+    words = q.lower().split()
+    if not (1 <= len(words) <= 3):
+        return False
+    food_hits = sum(1 for w in words if w in FOOD_WORDS)
+    return food_hits >= 1 and food_hits >= len(words) / 2
+
+
+def is_question(q: str) -> bool:
+    return any(w in q.lower().split() for w in ["what", "why", "how", "when", "where"])
+
+
+def is_pairing_query(q: str) -> bool:
+    t0 = trace_start("is_pairing_query")
+    try:
+        s = q.lower().strip()
+
+        # 1) must be a question-like query
+        is_question = "?" in s or any(s.startswith(w) for w in QUESTION_STARTS)
+
+        # 2) must contain "with <something>"
+        m = re.search(r"\bwith\s+([a-z][a-z\s\-]+)\b", s)
+        if not m:
+            return False
+
+        target = m.group(1).strip()
+
+        # 3) simple guards (avoid non-food contexts)
+        if any(x in s for x in ["with friends", "with family"]):
+            return False
+
+        if any(x in s for x in ["with life", "with stress", "with time"]):
+            return False
+
+        # 4) lightweight length guard (avoid long abstract questions)
+        if len(s.split()) > 8:
+            return False
+
+        return is_question and bool(target)
+    finally:
+        trace_end("is_pairing_query", t0)
+
+
+# ---------------- SCORE ----------------
+def compute_score(intent: str, q: str) -> int:
+    t0 = trace_start("compute_score")
+    try:
+        score = 50
+
+        if intent == "unknown":
+            return 40
+
+        if intent == DOMAINS["GLUCOSE"]:
+            if any(x in q for x in ["fiber", "vegetable"]):
+                score += 20
+            if any(x in q for x in ["sugar", "dessert"]):
+                score -= 20
+
+        elif intent == DOMAINS["BP"]:
+            if "salt" in q:
+                score -= 15
+            if any(x in q for x in ["walk", "exercise"]):
+                score += 15
+
+        elif intent == DOMAINS["CHOLESTEROL"]:
+            if any(x in q for x in ["fiber", "oats"]):
+                score += 20
+            if "fat" in q:
+                score -= 10
+
+        elif intent == DOMAINS["LIFESTYLE"]:
+            if any(x in q for x in ["exercise", "walk"]):
+                score += 10
+            if any(x in q for x in ["junk", "fried"]):
+                score -= 10
+
+        return max(0, min(score, 100))
+    finally:
+        trace_end("compute_score", t0)
+
+
+# ---------------- INTENT ROUTING ----------------
+def _compute_intent_flags(q: str) -> dict:
+    s = q.lower().strip()
+    first_word = s.split()[0].rstrip("?.,!") if s.split() else ""
+    return {
+        "guidance": has_any(s, INTENT_MAP["guidance"]),
+        "question": (first_word in INTENT_MAP["question"]) or ("?" in q),
+    }
+
+
+def detect_sub_lever(q: str) -> Optional[str]:
+    s = q.lower()
+    for sub, phrases in SUB_LEVER_KEYWORDS.items():
+        for phrase in phrases:
+            if "*" in phrase:
+                if re.search(phrase, s):
+                    return sub
+            elif phrase in s:
+                return sub
+    return None
+
+
+def detect_lever(q: str, sub_lever: Optional[str]) -> str:
+    if sub_lever:
+        return _SUB_LEVER_TO_LEVER[sub_lever]
+    s = q.lower()
+    for lever, keywords in LEVER_KEYWORDS.items():
+        if has_any(s, keywords):
+            return lever
+    return "lifestyle"  # safe fallback
+
+
+def detect_condition(q: str) -> str:
+    s = q.lower().strip()
+
+    best_domain = None
+    best_score = 0
+
+    for domain, groups in KEYWORD_MAP.items():
         score = 0
 
-        for group_name, keywords in groups.items():
-            for kw in keywords:
-                if kw in text:
+        for group_name, group in groups.items():
+            for kw in group:
+                if re.search(rf"\b{re.escape(kw)}\b", s):
                     if group_name == "primary":
                         score += 3
                     elif group_name == "medical":
@@ -117,92 +1194,172 @@ def detect_intent(q: str) -> str:
                     else:
                         score += 1
 
-        if score > 0:
-            scores[category] = score
+        if score > best_score:
+            best_score = score
+            best_domain = domain
 
-    if scores:
-        top = max(scores, key=scores.get)
-        return top
+    # ✅ valid match
+    if best_score >= 1 and best_domain:
+        return best_domain
 
-    return "unknown"
+    # ✅ single-word fallback (safe)
+    if len(s.split()) == 1:
+        for domain, groups in KEYWORD_MAP.items():
+            for group in groups.values():
+                for kw in group:
+                    if s == kw:
+                        return domain
+
+    # ✅ never return None
+    return DOMAINS["LIFESTYLE"]
 
 
-# ---------------- SCORE ----------------
-def compute_score(intent: str, q: str) -> int:
-    score = 50
+def classify_need(context: dict) -> str:
+    if context.get("high") or context.get("low") or context.get("unstable"):
+        return "intervention"
+    return "education"
 
-    if intent == "unknown":
-        return 40
 
-    if intent == "glucose":
-        if any(x in q for x in ["fiber", "vegetable"]):
-            score += 20
-        if any(x in q for x in ["sugar", "dessert"]):
-            score -= 20
+HEALTH_DOMAINS = {DOMAINS["GLUCOSE"], DOMAINS["BP"], DOMAINS["CHOLESTEROL"]}
 
-    elif intent == "bp":
-        if "salt" in q:
-            score -= 15
-        if any(x in q for x in ["walk", "exercise"]):
-            score += 15
 
-    elif intent == "cholesterol":
-        if any(x in q for x in ["fiber", "oats"]):
-            score += 20
-        if "fat" in q:
-            score -= 10
+def detect_need_v2(q: str, context: dict, intent: dict, domain: str) -> str:
+    """
+    Pure decision layer: depends only on intent flags, context signals, and domain.
+    No keyword lists. Replaces detect_need once validated.
+    intent must contain: {"question": bool, "guidance": bool}
+    """
+    if intent.get("guidance"):
+        return "guidance"
 
-    elif intent == "lifestyle":
-        if any(x in q for x in ["exercise", "walk"]):
-            score += 10
-        if any(x in q for x in ["junk", "fried"]):
-            score -= 10
+    if intent.get("question"):
+        return "education"
 
-    return max(0, min(score, 100))
+    if domain in HEALTH_DOMAINS and (
+        context.get("high") or context.get("low") or context.get("unstable")
+    ):
+        return "intervention"
+
+    return "education"
+
+
+def detect_intervention(need: str) -> list:
+    if need == "prevention":
+        return ["nutrition", "exercise"]
+    return [need]
+
+
+def map_tool(need: str, lite: bool) -> str:
+    return "llm_lite" if lite else "llm_full"
+
+
+def build_intent(q: str, lite: bool, context: dict) -> dict:
+    domain = detect_condition(q)
+    flags = _compute_intent_flags(q)
+    need = detect_need_v2(q, context, flags, domain)
+
+    sub_lever = detect_sub_lever(q)
+    lever = detect_lever(q, sub_lever)
+
+    # 🔥 FIX 1: fallback lever from keywords
+    if lever is None:
+        lever = fallback_lever_from_query(q)
+
+    # 🔥 FIX 2: default to lifestyle (never None)
+    if lever is None:
+        lever = "lifestyle"
+
+    # 🔥 HARD GUARANTEES
+    if domain not in DOMAINS.values():
+        domain = DOMAINS["LIFESTYLE"]
+
+    if need not in ["education", "guidance", "intervention"]:
+        need = "education"
+
+    return {
+        "domain": domain,
+        "need": need,
+        "lever": lever,
+        "sub_lever": sub_lever,
+        "intervention": detect_intervention(need),
+        "tool": map_tool(need, lite),
+    }
+
+
+def fallback_lever_from_query(q: str) -> str:
+    q = q.lower()
+
+    if any(x in q for x in ["fiber", "fibre", "protein", "carb", "fat", "eat"]):
+        return "food"
+
+    if any(x in q for x in ["walk", "exercise", "movement", "steps"]):
+        return "movement"
+
+    if any(x in q for x in ["meal", "dinner", "fasting", "gap", "timing"]):
+        return "timing"
+
+    if any(x in q for x in ["stress", "sleep", "breathing", "recovery"]):
+        return "recovery"
+
+    if any(x in q for x in ["check", "track", "monitor", "pattern"]):
+        return "monitoring"
+
+    if any(x in q for x in ["vinegar", "cinnamon", "supplement"]):
+        return "enhancers"
+
+    return None
+
+
+def is_meaningful_query(q: str, domain: str, need: str) -> bool:
+    # ✅ If we understood intent → it's meaningful
+    if domain != DOMAINS["LIFESTYLE"]:
+        return True
+
+    if need != "unknown":
+        return True
+
+    # fallback: reject obvious junk only
+    words = q.strip().split()
+    return len(words) >= 2
+
+
+def unclear_query_response() -> dict:
+    return {
+        "text": "Please ask a clear question like 'How do I reduce blood sugar after meals?'",
+        "score": 0,
+        "intent": {"domain": "lifestyle", "need": "education"},
+    }
 
 
 # ---------------- MOCK ----------------
 def mock_response(intent: str) -> str:
+    if intent == DOMAINS["GLUCOSE"]:
+        return """## Insight
+Glucose spike likely due to high carbs without fiber or a post-meal activity gap.
 
-    if intent == "glucose":
-        return """## Likely Cause
-Glucose spike likely due to high carbs without fiber.
+## Expected Outcome
+Steady glucose within 1–2 hours with movement and fiber-led meals."""
 
-## What To Do
-Walk for 10–15 minutes and hydrate.
+    if intent == DOMAINS["BP"]:
+        return """## Insight
+Elevated blood pressure is often driven by sodium intake, stress, or low activity.
 
-## Next Step
-Lead meals with fiber, then protein, then carbs."""
+## Expected Outcome
+Readings improve with consistent movement, lower salt, and stress reduction."""
 
-    if intent == "bp":
-        return """## Likely Cause
-Elevated blood pressure may be driven by sodium or low activity.
+    if intent == DOMAINS["CHOLESTEROL"]:
+        return """## Insight
+Cholesterol imbalance is commonly linked to low soluble fiber and saturated fat intake.
 
-## What To Do
-Take a short walk and reduce salt intake.
+## Expected Outcome
+LDL levels improve with consistent fiber, healthy fats, and regular activity."""
 
-## Next Step
-Increase potassium-rich foods and hydration."""
+    if intent == DOMAINS["LIFESTYLE"]:
+        return """## Insight
+Lifestyle habits may not be aligned with your current health goals.
 
-    if intent == "cholesterol":
-        return """## Likely Cause
-Cholesterol imbalance may be linked to low soluble fiber.
-
-## What To Do
-Add oats, vegetables, and healthy fats.
-
-## Next Step
-Maintain consistent fiber intake daily."""
-
-    if intent == "lifestyle":
-        return """## Likely Cause
-Lifestyle habits may not be aligned with optimal health.
-
-## What To Do
-Focus on balanced meals, movement, and recovery.
-
-## Next Step
-Improve one habit today: meal, walk, or sleep."""
+## Expected Outcome
+One consistent habit change — meals, movement, or sleep — creates measurable progress."""
 
     return """## Insight
 I can help with lifestyle, glucose, BP, and cholesterol.
@@ -211,10 +1368,115 @@ I can help with lifestyle, glucose, BP, and cholesterol.
 Try asking about food, exercise, or health markers."""
 
 
+# ---------------- ENFORCEMENT LAYER ----------------
+ACTION_TEXT: dict[str, str] = {
+    "analyze_meal": "Analyze this meal",
+    "walk_10min_now": "Take a 10-minute walk now",
+    "improve_meal": "Improve this meal",
+    "post_meal_walk": "Take a walk after your meal",
+    "reduce_spike_now": "Act now to reduce your glucose spike",
+}
+
+# Actions that bypass LLM entirely — output is always the canonical phrase
+DETERMINISTIC_ACTIONS: set[str] = {"analyze_meal"}
+
+
+def _normalize(s: str) -> str:
+    s = re.sub(r"[^a-z0-9 ]", "", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def contains_exact_phrase(text: str, phrase: str) -> bool:
+    """Word-boundary match using normalized forms — avoids substring false positives."""
+    return f" {_normalize(phrase)} " in f" {_normalize(text)} "
+
+
+def validate_action_output(text: str, top_action: str) -> bool:
+    """True when the canonical action phrase is present in the LLM output.
+    Deterministic actions use normalized match (punctuation/case tolerant).
+    Non-deterministic actions require exact substring presence."""
+    expected = ACTION_TEXT.get(top_action)
+    if not expected:
+        return True
+    if top_action in DETERMINISTIC_ACTIONS:
+        return _normalize(expected) in _normalize(text)
+    return expected in text
+
+
+def get_meal_insight(q: str) -> str:
+    """Deterministic, keyword-based insight with priority + better coverage."""
+    q_lower = q.lower()
+
+    def has(patterns):
+        return any(re.search(rf"\b{p}\b", q_lower) for p in patterns)
+
+    # 🔥 PRIORITY: fastest glucose impact first
+
+    # Sugar / dessert (highest priority)
+    if has(
+        [
+            "sugar",
+            "sweet",
+            "dessert",
+            "cake",
+            "ice cream",
+            "chocolate",
+            "cookie",
+            "candy",
+        ]
+    ):
+        return "Added sugar is the fastest glucose driver here"
+
+    # Refined carbs (bread family)
+    if has(["bread", "roti", "chapati", "naan", "paratha", "toast", "bagel"]):
+        return "Refined carbs are the glucose driver here"
+
+    # Rice family
+    if has(["rice", "biryani", "fried rice", "sushi"]):
+        return "Rice is the glucose driver here"
+
+    # Pasta / noodles
+    if has(["pasta", "noodle", "noodles"]):
+        return "Starchy carbs are the glucose driver here"
+
+    # Potato / fried starch
+    if has(["potato", "fries", "chips"]):
+        return "High-starch foods are the glucose driver here"
+
+    return "This meal may impact your glucose"
+
+
+def enforce_action_response(
+    top_action: str, context_name: str, q: str = ""
+) -> Optional[str]:
+    """Pre-LLM gate. Returns deterministic text or None to continue to LLM."""
+    if top_action in DETERMINISTIC_ACTIONS:
+        insight = get_meal_insight(q)
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] DETERMINISTIC_INSIGHT_APPLIED"
+                f" action={top_action!r} insight={insight!r}"
+            )
+        return f"{insight}. {ACTION_TEXT[top_action]}"
+    if context_name == "behavior_gap":
+        return None  # behavior_gap has its own decisive LLM prompt
+    return None
+
+
 # ---------------- PROMPT ----------------
 def build_prompt(q: str, ctx: dict) -> str:
-    return f"""
-You are a lifestyle health assistant.
+    t0 = trace_start("build_prompt")
+    try:
+        result = f"""
+You are a lifestyle health assistant. Your ONLY job is to explain the situation — actions are handled separately by the system and will be shown to the user automatically.
+
+User Profile:
+- Age: {USER_PROFILE['age']}
+- Condition: {USER_PROFILE['condition']} (A1C {USER_PROFILE['a1c']})
+- LDL: {USER_PROFILE['ldl']}
+- Goal: {USER_PROFILE['goal']}
+- Diet: {USER_PROFILE['diet']}
+- Phenotype: {USER_PROFILE['phenotype']}
 
 User query: "{q}"
 
@@ -223,115 +1485,3177 @@ Context:
 - High: {ctx["high"]}
 - Low: {ctx["low"]}
 
+Instructions:
+- Explain the situation and expected outcome ONLY
+- DO NOT list actions, bullets, or tell the user what to do — that is shown separately
+- DO NOT use "Do this now", "What To Do", or any action bullets
+- Use simple everyday language
+- Do NOT assume user condition unless explicitly stated
+- Avoid clinical numbers (no grams, mg, frequencies)
+- Keep response readable in under 5 seconds
+- No Meal Score section, No Try This Week section
+- Avoid filler words (consider, try to, aim to)
+- Start Insight with direct cause (no explanation)
+- Do NOT use words like: important, helpful, beneficial
+- Keep Insight under 10 words if possible
+
 Respond ONLY in this exact format:
 
-## Likely Cause
-...
+## Insight
+1–2 short lines summarizing the key issue or context.
 
-## What To Do
-...
+## Expected Outcome
+One short line on what improves.
 
-## Next Step
-...
+Rules:
+- No What To Do section
+- No bullet points for actions
+- No numbered lists
+- No long paragraphs
 """
+        return result
+    finally:
+        trace_end("build_prompt", t0)
+
+
+# ---------------- LITE PROMPT ----------------
+def build_lite_prompt(q: str, context_name: str = None, top_action: str = None) -> str:
+    t0 = trace_start("build_lite_prompt")
+    try:
+        action_line = f"The ONE action to take is: {top_action}." if top_action else ""
+
+        # 🔥 BEHAVIOR GAP (keep your strong version)
+        if context_name == "behavior_gap":
+            return f"""
+You are a decisive health coach speaking to someone who knows what to do but is not doing it.
+
+User said:
+"{q}"
+
+{action_line}
+
+Respond in EXACTLY 1–2 sentences.
+
+Rules:
+- Be direct, not gentle
+- Use the Primary action EXACTLY as given inside quotes — do NOT rephrase or modify wording
+- No soft language: no "try", "start by", "consider"
+- No explanation of why — just what to do and a short sharp reason
+- End after second sentence
+- Do NOT introduce any other action
+
+Example:
+"Take a 10-minute walk right now — your body clears sugar fastest with movement. That's your move."
+"""
+
+        # 🔥 MEAL MODE (THIS IS YOUR MISSING PIECE)
+
+        if context_name == "meal":
+
+            if top_action == "analyze_meal":
+                return f"""
+You are a strict health coach focused on glucose control.
+
+User said:
+"{q}"
+
+Primary action: Analyze this meal
+
+Respond in EXACTLY 1–2 sentences.
+
+Rules:
+- Do NOT analyze the meal
+- Do NOT identify glucose drivers
+- The second sentence MUST include exactly: "Analyze this meal"
+- Do NOT use any other action phrase
+- No soft language ("consider", "try")
+- No extra suggestions
+
+Example:
+"This needs a closer look. Analyze this meal."
+
+Now respond:
+"""
+            # 🟢 NORMAL MEAL MODE (action-based)
+            return f"""
+You are a strict health coach focused on glucose control.
+
+User said:
+"{q}"
+
+Primary action: {top_action}
+
+Respond in EXACTLY 1–2 sentences.
+
+Rules:
+- Only identify the glucose driver IF the action is NOT "analyze_meal"
+- Reinforce ONLY the Primary action — do not invent new actions
+- No soft language ("consider", "try", "you can")
+- No made-up numbers or targets
+- No generic nutrition statements
+- You MUST use the Primary action exactly as given
+
+
+Style:
+- Direct
+- Clear
+- Action-first or action-second
+
+Examples:
+Input: chicken 200g rice 300g, action: walk_10min_now
+Output: Rice is the main glucose driver here. Walk for 10 minutes after eating to reduce the spike.
+
+Input: chicken 200g rice 100g, action: analyze_meal
+Output: Rice is still the glucose driver here. Analyze this meal to improve portion balance.
+
+Now respond:
+"""
+
+        # 🔥 DEFAULT MODE (fixed — now action aligned)
+        return f"""
+You are a practical health coach.
+
+User said:
+"{q}"
+
+{action_line}
+
+Respond in EXACTLY 2 sentences.
+
+Rules:
+- Explain briefly what is happening
+- Use the Primary action EXACTLY as given inside quotes — do NOT rephrase or modify wording
+- Do NOT introduce a different action
+- No generic advice
+- No textbook explanation
+- No soft language like "try" or "consider"
+- Keep it simple, direct, and real-life usable
+
+Example:
+"Your sugar is likely rising because of the carbs. Take a 10-minute walk now to help bring it down."
+
+Now respond:
+"""
+
+    finally:
+        trace_end("build_lite_prompt", t0)
 
 
 # ---------------- EXTRACT ----------------
 def extract_text(res):
     try:
-        msg = res.get("choices", [{}])[0].get("message", {})
-        content = msg.get("content", "")
-
-        if isinstance(content, list):
-            return "".join([c.get("text", "") for c in content])
-
-        return content
-
-    except Exception:
+        if isinstance(res, dict):
+            return res["choices"][0]["message"]["content"]
+        return res.choices[0].message.content
+    except Exception as e:
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] EXTRACT ERROR:", e)
         return str(res)
 
 
-# ---------------- LLM ----------------
-def llm_response(q: str, ctx: dict) -> str:
-    prompt = build_prompt(q, ctx)
-
+# ---------------- CALL LLM ----------------
+@trace
+def call_llm(prompt: str) -> str:
     model = MODEL_OPENAI if LLM_MODE == "openai" else MODEL_CLAUDE
-
     res = completion(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )
-
     return extract_text(res)
+
+
+# ---------------- LITE ENFORCEMENT ----------------
+def strip_actions_from_text(text: str) -> str:
+    """Remove bullet lines, numbered action lists, and 'Do this now' blocks."""
+    # Remove "Do this now:" and everything after it
+    text = re.sub(r"Do this now:.*", "", text, flags=re.IGNORECASE | re.DOTALL)
+    # Remove bullet lines (•, -, *) at start of any line
+    text = re.sub(r"^\s*[-•*]\s+", "", text, flags=re.MULTILINE)
+    # Remove bullet lines (•, -, *) after a newline (belt-and-suspenders)
+    text = re.sub(r"(?:^|\n)\s*[-•*]\s+[^\n]*", "", text, flags=re.MULTILINE)
+    # Remove numbered list lines (1. 2. 3.)
+    text = re.sub(r"(?:^|\n)\s*\d+\.\s+[^\n]*", "", text, flags=re.MULTILINE)
+    # Collapse excess blank lines
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+def limit_sentences(text: str, max_sentences: int = 3) -> str:
+    """Cap text to max_sentences by splitting on sentence-ending punctuation."""
+    sentences = re.split(r"(?<=[.!?]) +", text.strip())
+    return " ".join(sentences[:max_sentences]).strip()
+
+
+# ---------------- LITE VALIDATOR ----------------
+def validate_lite_response(text: str) -> tuple:
+    t0 = trace_start("validate_lite_response")
+    try:
+        if not text:
+            return False, "empty"
+
+        # Rule 1: Sentence count
+        sentences = [s.strip() for s in text.split(".") if s.strip()]
+        if len(sentences) < 1 or len(sentences) > 4:
+            return False, "sentence_count"
+
+        # Rule 2: No structured formatting or action content
+        forbidden = ["##", "* ", "\n- ", "\n1)", "\n2)", "\n3)", "• ", "Do this now"]
+        if any(f in text for f in forbidden):
+            return False, "format"
+
+        # Rule 3: Concise length
+        if len(text.strip()) > 350:
+            return False, "too_long"
+
+        # Rule 4: Basic jargon filter
+        jargon_words = ["mmhg", "glycemic"]
+        if any(j in text.lower() for j in jargon_words):
+            return False, "jargon"
+
+        return True, "ok"
+    finally:
+        trace_end("validate_lite_response", t0)
+
+
+# ---------------- LLM ----------------
+def llm_response(
+    q: str, ctx: dict, lite: bool, context_name: str = None, top_action_code: str = None
+) -> str:
+    # top_action_code: raw action ID (e.g. "walk_10min_now"), NOT the display label
+    t0_func = trace_start("llm_response")
+    action_text = ACTION_TEXT.get(top_action_code or "", top_action_code or "")
+    try:
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] RAW QUERY:", q)
+        if is_meal_sentence(q):
+            q = clean_meal_text(q)
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] CLEANED QUERY:", q)
+
+        if lite:
+            # Pass only: query, context_name, action_text — never interventions/domain/need
+            prompt = build_lite_prompt(
+                q, context_name=context_name, top_action=action_text
+            )
+
+            if TRACE_LEVEL >= 2:
+                print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
+            t0 = time.time()
+            text = call_llm(prompt)
+
+            if TRACE_LEVEL >= 2:
+                print(
+                    f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm {(time.time()-t0)*1000:.0f}ms"
+                )
+
+            # Guard — nothing to enforce without action text
+            if action_text:
+                # Behavior gap — set text and fall through to shared validation
+                if context_name == "behavior_gap" and not contains_exact_phrase(
+                    text, action_text
+                ):
+                    text = f"{action_text} Do it now."
+                    if TRACE_LEVEL >= 1:
+                        print(
+                            f"[{now_iso()}][{trace_id_var.get()}] BEHAVIOR_GAP_ENFORCED"
+                            f" action={top_action_code!r} final={text!r}"
+                        )
+
+                # Post-LLM validation — intelligent fallback preserving explanation
+                if top_action_code and not validate_action_output(
+                    text, top_action_code
+                ):
+                    original = text
+                    if top_action_code in DETERMINISTIC_ACTIONS:
+                        text = ACTION_TEXT[top_action_code]
+                    elif not contains_exact_phrase(text, action_text):
+                        text = f"{text.strip()} {action_text}."
+                    if TRACE_LEVEL >= 1:
+                        print(
+                            f"[{now_iso()}][{trace_id_var.get()}] VALIDATION_RECOVERED"
+                            f" top_action={top_action_code!r} original={original!r} final={text!r}"
+                        )
+                elif top_action_code and action_text is not None and TRACE_LEVEL >= 1:
+                    print(
+                        f"[{now_iso()}][{trace_id_var.get()}] ACTION_VALIDATED"
+                        f" action={top_action_code!r}"
+                    )
+
+                if top_action_code and action_text is None and TRACE_LEVEL >= 1:
+                    print(
+                        f"[{now_iso()}][{trace_id_var.get()}] VALIDATION_SKIPPED_NO_ACTION_TEXT"
+                        f" action={top_action_code!r}"
+                    )
+
+            # Deterministic enforcement — strip actions regardless of LLM output
+            text = strip_actions_from_text(text)
+            text = limit_sentences(text, max_sentences=3)
+
+            is_valid, reason = validate_lite_response(text)
+
+            if is_valid:
+                return text
+
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] VALIDATION FAILED:", reason)
+
+            retry_prompt = (
+                prompt
+                + "\n\nRewrite the answer simpler, shorter, and more conversational. No bullets or lists."
+            )
+            if TRACE_LEVEL >= 2:
+                print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm retry")
+            t0 = time.time()
+            text_retry = call_llm(retry_prompt)
+            if TRACE_LEVEL >= 2:
+                print(
+                    f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm retry {(time.time()-t0)*1000:.0f}ms"
+                )
+
+            # Enforce on retry too
+            text_retry = strip_actions_from_text(text_retry)
+            text_retry = limit_sentences(text_retry, max_sentences=3)
+
+            is_valid_retry, _ = validate_lite_response(text_retry)
+
+            if is_valid_retry:
+                return text_retry
+
+            return text
+
+        else:
+            prompt = build_prompt(q, ctx)
+            if TRACE_LEVEL >= 2:
+                print(f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] → call_llm")
+            t0 = time.time()
+            result = call_llm(prompt)
+            if TRACE_LEVEL >= 2:
+                print(
+                    f"[{now_iso()}][BE][LLM][{trace_id_var.get()}] ← call_llm {(time.time()-t0)*1000:.0f}ms"
+                )
+            # Full mode enforcement — append canonical action phrase if missing
+            if top_action_code:
+                full_action_text = ACTION_TEXT.get(top_action_code)
+                if full_action_text and not contains_exact_phrase(result, full_action_text):
+                    if TRACE_LEVEL >= 1:
+                        print(
+                            f"[{now_iso()}][{trace_id_var.get()}] FULL_MODE_ENFORCED"
+                            f" action={top_action_code!r}"
+                        )
+                    result = f"{result.strip()} {full_action_text}."
+            return result
+    finally:
+        trace_end("llm_response", t0_func)
 
 
 # ---------------- FORMAT ----------------
 def enforce_format(text: str) -> str:
-    if "## Likely Cause" in text:
-        return text
+    t0 = trace_start("enforce_format")
+    try:
+        if "## Insight" in text and "## Expected Outcome" in text:
+            return text
 
-    return f"""## Insight
+        return f"""## Insight
 {text}
 
-## Next Step
-Try asking again with more detail.
+## Expected Outcome
+Try rephrasing your question for more specific guidance.
 """
+    finally:
+        trace_end("enforce_format", t0)
 
 
-# ---------------- MAIN ----------------
-def build_response(query: str):
-    q = normalize(query)
-    ctx = detect_context(q)
-    intent = detect_intent(q)
-
-    print("\n--- REQUEST ---")
-    print("QUERY:", q)
-    print("INTENT:", intent)
-
-    score = compute_score(intent, q)
-    print("SCORE:", score)
-
-    # 🔥 SCROLL MODE (SAFE INJECTION)
-    if SCROLL_TEST:
-        print("🔥 SCROLL TEST MODE")
-        return {"text": scroll_test_response(), "score": score}
-
-    if USE_MOCK:
-        return {"text": mock_response(intent), "score": score}
-
-    if USE_LLM:
+# ---------------- TTS ----------------
+def generate_tts(text: str):
+    t0 = trace_start("generate_tts")
+    try:
         try:
-            result = llm_response(q, ctx)
-            return {"text": enforce_format(result), "score": score}
+            speech = client.audio.speech.create(
+                model="gpt-4o-mini-tts", voice="alloy", input=text
+            )
+            audio_bytes = speech.read()
+            return base64.b64encode(audio_bytes).decode("utf-8")
         except Exception as e:
-            print("LLM ERROR:", e)
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] TTS ERROR:", e)
+            return None
+    finally:
+        trace_end("generate_tts", t0)
+
+
+# ---------------- LITE FALLBACK ----------------
+def lite_fallback_response(intent=None) -> dict:
+    intent = intent or {"domain": "lifestyle", "need": "education"}
+
+    next_actions = build_next_actions(intent)
 
     return {
+        "text": "Here are a few ways I can help:",
+        "score": 0,
+        "intent": intent,
+        "screen": {
+            "title": "What would you like to do?",
+            "top_actions": next_actions,
+            "top_action_labels": [_action_label(a) for a in next_actions],
+            "next_actions": [],
+            "next_action_labels": [],
+        },
+        "_trace": {"trace_id": trace_id_var.get(), "steps": []},
+    }
+
+
+def medication_response() -> dict:
+    return {
         "text": """## Insight
-Fallback response active.
+Medication is used when lifestyle alone is not enough.
 
-## Next Step
-Try asking about lifestyle, BP, glucose, or cholesterol.""",
-        "score": score
+## What To Do
+• Improve food quality and meal timing
+• Stay active daily
+• Track key health numbers
+
+## Expected Outcome
+Better control and reduced need for medication over time""",
+        "intent": {"domain": "lifestyle", "need": "education"},
+        "score": 50,
     }
 
 
-# ---------------- API ----------------
-@app.post("/query")
-async def handle_query(request: Request):
-    start = time.time()
+# ---------------- STRUCTURED RESPONSE ----------------
 
-    data = await request.json()
-    query = (data.get("query") or "").strip()
+# Maps each intervention action ID to its lever category
+_ACTION_LEVER = {
+    "walk_10min_now": "movement",
+    "take_a_10min_walk": "movement",
+    "take_a_brisk_walk": "movement",
+    "walk_after_meals": "movement",
+    "walk_30min_daily": "movement",
+    "consistent_activity": "movement",
+    "consistent_light_activity": "movement",
+    "light_resistance_training": "movement",
+    "avoid_heavy_lifting": "movement",
+    "light_movement": "movement",
+    "regular_exercise": "movement",
+    "drink_water_now": "recovery",
+    "slow_deep_breathing": "recovery",
+    "sit_and_rest_now": "recovery",
+    "sit_quietly_5min": "recovery",
+    "avoid_stimulants": "recovery",
+    "stress_management": "recovery",
+    "manage_stress": "recovery",
+    "fiber_first": "food",
+    "next_meal_add_protein_and_fiber": "food",
+    "avoid_simple_carbs_now": "food",
+    "reduce_refined_carbs": "food",
+    "reduce_sodium_now": "food",
+    "reduce_sodium": "food",
+    "reduce_salt_today": "food",
+    "potassium_rich_foods": "food",
+    "avoid_processed_food": "food",
+    "avoid_saturated_fat_today": "food",
+    "add_soluble_fiber_to_meal": "food",
+    "soluble_fiber_daily": "food",
+    "limit_saturated_fat": "food",
+    "oats_daily": "food",
+    "healthy_fats": "food",
+    "increase_vegetables": "food",
+    "low_gi_foods": "food",
+    "balanced_plate": "food",
+    "balanced_diet": "food",
+    "fiber_protein_meal": "food",
+    "reduce_simple_carbs": "food",
+    "whole_foods": "food",
+    "portion_control": "food",
+    "next_meal_add_protein_and_fiber": "food",
+    "avoid_heavy_food_now": "food",
+    "check_your_last_meal": "monitoring",
+    "check_bp_in_30min": "monitoring",
+    "check_bp_again_in_30min": "monitoring",
+    "track_bg_pattern": "monitoring",
+    "track_bp_daily": "monitoring",
+    "track_cgm_patterns": "monitoring",
+    "correlate_with_meals": "monitoring",
+    "share_with_doctor": "monitoring",
+    "track_lipids": "monitoring",
+    "track_response": "monitoring",
+    "pre_post_compare": "monitoring",
+    "understand_glucose_spikes": "education",
+    "learn_glycemic_index": "education",
+    "understand_bp_range": "education",
+    "identify_triggers": "education",
+    "understand_ldl_hdl": "education",
+    "lifestyle_vs_medication": "education",
+    "understand_condition": "education",
+    "track_metrics": "education",
+    "lifestyle_focus": "education",
+    "consult_doctor": "education",
+    "lifestyle_alongside_medication": "education",
+    "light_activity": "movement",
+    "light_stretching": "movement",
+    "consistent_movement": "movement",
+    "regular_activity": "movement",
+    # lever_mapping.py action IDs
+    "eat_earlier_dinner": "timing",
+    "allow_meal_gap": "timing",
+    "delay_next_meal": "timing",
+    "check_again_in_30min": "monitoring",
+    "check_glucose_again": "monitoring",
+    "pre_post_meal_compare": "monitoring",
+    "add_vinegar_to_meal": "enhancers",
+    "add_cinnamon_to_diet": "enhancers",
+    "add_garlic_daily": "enhancers",
+    "add_protein_next_meal": "food",
+    "do_breathing_5min": "recovery",
+    # fiber lever action IDs
+    "add_fiber_before_meal": "fiber",
+    "fiber_first": "fiber",
+    "eat_vegetables_first": "fiber",
+    # protein lever action IDs
+    "eat_protein_first": "protein",
+    "choose_high_protein": "protein",
+    # lever_mapping.py movement extras
+    "sit_and_rest_now": "recovery",
+    "track_bg_pattern": "monitoring",
+}
 
-    result = build_response(query)
 
-    response = {
+def build_structured_response(intent: dict, ctx: dict) -> dict:
+    """Deterministic: intent + ctx → top actions"""
+
+    domain = intent.get("domain", "lifestyle")
+    need = intent.get("need", "education")
+    lever = intent.get("lever", "food")
+    sub_lever = intent.get("sub_lever")
+
+    # ── CONTEXT DETECTION (single source of truth = ctx) ──
+    context_name = None
+    if isinstance(ctx, dict):
+        for k, v in ctx.items():
+            if v:
+                context_name = k
+                break
+
+    # ── 🔥 MEAL FAST PATH (highest priority UX) ──
+    if context_name == "meal":
+        top_actions = ["analyze_meal", "understand_meal", "improve_meal"]
+        levers_used = ["food"]
+
+    else:
+        # ── Context-driven lever ordering ──
+        ordered_levers = (
+            CONTEXT_LEVERS[context_name]
+            if context_name and context_name in CONTEXT_LEVERS
+            else DEFAULT_LEVERS
+        )
+
+        top_actions = []
+        levers_used = []
+
+        for lv in ordered_levers:
+            if lv in LEVER_ACTIONS and lv not in levers_used:
+                levers_used.append(lv)
+                top_actions.append(LEVER_ACTIONS[lv][0])
+            if len(top_actions) == 3:
+                break
+
+        # ── Supplement from intervention engine ──
+        if len(top_actions) < 3:
+            interventions = intent.get("interventions", [])
+            seen = set(levers_used)
+
+            for action in interventions:
+                action_lever = _ACTION_LEVER.get(action, lever)
+
+                if action_lever == "education":
+                    continue
+
+                if action_lever not in seen and action not in top_actions:
+                    seen.add(action_lever)
+                    levers_used.append(action_lever)
+                    top_actions.append(action)
+
+                if len(top_actions) == 3:
+                    break
+
+    # ── Lite mode (strict override at the end) ──
+    if intent.get("tool") == "llm_lite":
+        top_actions = top_actions[:1]
+        levers_used = levers_used[:1]
+
+    return {
+        "domain": domain,
+        "need": need,
+        "lever": lever,  # ✅ keep real lever
+        "sub_lever": sub_lever,
+        "context_name": context_name,
+        "top_actions": top_actions,
+        "next_actions": build_next_actions(intent),  # ✅ no hardcoding
+        "levers": levers_used,
+        "context": ctx,
+    }
+
+
+def format_chat_response(structured: dict, llm_text: str) -> str:
+    """LLM output is the chat response; structured actions are the source of truth."""
+    return llm_text
+
+
+def _action_label(action_id: str) -> str:
+    """Human-readable label for an action ID, using ACTION_REGISTRY when available."""
+    meta = ACTION_REGISTRY.get(action_id)
+    if meta:
+        return meta["display"]
+    return action_id.replace("_", " ").title()
+
+
+_NEXT_ACTION_MAP: dict[str, list[str]] = {
+    "meal": ["analyze_meal", "improve_meal", "log_meal"],
+    "glucose": ["reduce_spike_now", "post_meal_walk", "add_fiber"],
+    "bp": ["reduce_salt", "walk_10min_now", "check_bp_pattern"],
+    "cholesterol": ["reduce_ldl_foods", "add_fiber", "increase_activity"],
+    "lifestyle": ["improve_meal", "walk_10min_now", "track_metrics"],
+}
+
+_NEXT_ACTION_LABELS: dict[str, str] = {
+    "analyze_meal": "Analyze Meal",
+    "improve_meal": "Improve Meal",
+    "log_meal": "Log Meal",
+    "reduce_spike_now": "Reduce Glucose Spike",
+    "post_meal_walk": "Take a Walk",
+    "add_fiber": "Add Fiber",
+    "reduce_salt": "Reduce Salt Intake",
+    "check_bp_pattern": "Check BP Pattern",
+    "reduce_ldl_foods": "Reduce LDL Foods",
+    "increase_activity": "Increase Activity",
+    "walk_10min_now": "Walk 10 Minutes",
+    "track_metrics": "Track Metrics",
+}
+
+
+def _next_action_label(action_id: str) -> str:
+    return _NEXT_ACTION_LABELS.get(action_id, action_id.replace("_", " ").title())
+
+
+def build_next_actions(intent: dict) -> list[str]:
+    """Context-aware continuation options — always deterministic, max 3."""
+    domain = intent.get("domain", "lifestyle")
+    context = intent.get("context_name", "")
+
+    # Context-level refinements
+    if context == "post_meal_spike" or context == "high_carb_event":
+        return ["post_meal_walk", "reduce_spike_now", "add_fiber"]
+
+    if context in ("meal", "high_carb_habit"):
+        return _NEXT_ACTION_MAP["meal"]
+
+    if domain in _NEXT_ACTION_MAP:
+        return _NEXT_ACTION_MAP[domain]
+
+    return _NEXT_ACTION_MAP["lifestyle"]
+
+
+def format_screen_response(structured: dict) -> dict:
+    """JSON payload for screen UI rendering."""
+    domain = structured["domain"]
+    titles = {
+        "glucose": "Glucose Control",
+        "bp": "Blood Pressure",
+        "cholesterol": "Cholesterol",
+        "lifestyle": "Lifestyle",
+    }
+    top_actions = structured["top_actions"]
+    next_actions = structured.get("next_actions", [])
+    return {
+        "title": titles.get(domain, "Health"),
+        "domain": domain,
+        "need": structured["need"],
+        "lever": structured["lever"],
+        "sub_lever": structured["sub_lever"],
+        "top_actions": top_actions,
+        "top_action_labels": [_action_label(a) for a in top_actions],
+        "next_actions": next_actions,
+        "next_action_labels": [_next_action_label(a) for a in next_actions],
+        "levers": structured["levers"],
+        "context": {
+            "after_meal": structured["context"].get("after_meal", False),
+            "high": structured["context"].get("high", False),
+            "low": structured["context"].get("low", False),
+            "unstable": structured["context"].get("unstable", False),
+        },
+    }
+
+
+def normalize_action(a: str) -> str:
+    return a.lower().replace("_", " ")
+
+
+def enforce_actions_in_text(text: str, actions: list[str]) -> str:
+    text_lower = text.lower()
+    missing = []
+
+    for action_id in actions:
+        meta = ACTION_REGISTRY.get(action_id, {})
+        keywords = meta.get("keywords", [])
+
+        if not any(k in text_lower for k in keywords):
+            missing.append(action_id)
+
+    if not missing:
+        return text
+
+    forced_block = "\n\nDo this now:\n"
+
+    for action_id in missing:
+        meta = ACTION_REGISTRY.get(action_id)
+        display = meta["display"] if meta else action_id.replace("_", " ")
+        forced_block += f"- {display}\n"
+
+    return text + forced_block
+
+
+def _enriched_response(
+    text: str, score: int, intent: dict, ctx: dict, structured: Optional[dict] = None
+) -> dict:
+    """Attach structured + chat + screen to every response dict."""
+    if structured is None:
+        structured = build_structured_response(intent, ctx)
+    return {
+        "text": text,
+        "chat": format_chat_response(structured, text),
+        "screen": format_screen_response(structured),
+        "structured": structured,
+        "score": score,
+        "intent": intent,
+    }
+
+
+# ---------------- FOOD ENGINE MESSAGING ----------------
+def build_high_confidence_macro_message(dominance: str) -> str:
+    if dominance == "glucose":
+        return (
+            "Carb-heavy meal. "
+            "Take a 10–15 minute walk now and add protein or fiber next time."
+        )
+    if dominance == "cholesterol":
+        return (
+            "Fat-heavy meal. "
+            "Balance it with fiber and keep the next meal lighter."
+        )
+    return build_low_confidence_macro_message()
+
+
+def build_medium_confidence_macro_message(dominance: str) -> str:
+    if dominance == "glucose":
+        return (
+            "Likely carb-heavy. "
+            "A short walk helps, and next time add protein or fiber."
+        )
+    if dominance == "cholesterol":
+        return (
+            "Likely fat-heavy. "
+            "Add fiber and keep portions in check next time."
+        )
+    return build_low_confidence_macro_message()
+
+
+def build_low_confidence_macro_message() -> str:
+    return (
+        "This looks fairly balanced 👍 "
+        "I can't be 100% certain from this input. "
+        "Simple rule to learn: bread, rice, or juice usually pushes carbs; "
+        "butter, cheese, or fried foods usually push fat. "
+        "For more control, use Build Meal next time—it helps you shape balanced meals and build lasting habits."
+    )
+
+
+def apply_context_modifier(message: str, context_domain: str = None) -> str:
+    if not context_domain:
+        return message
+    if context_domain == "glucose":
+        return (
+            message
+            + " Given your glucose focus, keep portions controlled and pair carbs with protein or fiber."
+        )
+    if context_domain == "cholesterol":
+        return (
+            message
+            + " Since you're focusing on cholesterol, prioritize fiber and reduce saturated fat where possible."
+        )
+    if context_domain == "bp":
+        return (
+            message
+            + " Since blood pressure is a focus, watch sodium and keep meals simple and balanced."
+        )
+    if context_domain == "lifestyle":
+        return (
+            message
+            + " For lifestyle consistency, use Build Meal when you want more control."
+        )
+    return message
+
+
+def build_low_confidence_nutrition_prompt(query: str, result: dict) -> str:
+    foods = result.get("foods", [])
+    macro_dominance = result.get("macro_dominance", {})
+    macro_totals = result.get("macro_totals", {})
+    return f"""
+You are a nutrition coach for a lifestyle education app.
+
+User query:
+{query}
+
+Engine facts:
+- Foods detected: {foods}
+- Macro dominance: {macro_dominance}
+- Macro totals: {macro_totals}
+- Confidence: low / uncertain
+
+Critical rules:
+1. Do NOT classify the meal as carb-heavy or fat-heavy with certainty.
+2. Do NOT override the engine result.
+3. Explain that the meal looks balanced or unclear from the available input.
+4. Teach a simple nutrition rule:
+   - bread, rice, juice, sweets usually push carb load
+   - butter, cheese, fried foods usually push fat load
+   - protein and fiber improve meal quality and control
+5. Suggest using the Build Meal option for more control.
+6. Keep the response to 2-3 short sentences.
+7. Do not make medical claims.
+8. Do not mention internal fields, ratios, scores, or system logic.
+
+Tone:
+Warm, practical, encouraging, no guilt.
+""".strip()
+
+
+def low_confidence_llm_output_is_safe(text: str) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    blocked = [
+        "carb-heavy meal", "fat-heavy meal",
+        "this is carb-heavy", "this is fat-heavy",
+        "clearly carb-heavy", "clearly fat-heavy",
+        "definitely carb-heavy", "definitely fat-heavy",
+    ]
+    return not any(p in t for p in blocked)
+
+
+def explain_low_confidence_with_llm(query: str, result: dict) -> str:
+    prompt = build_low_confidence_nutrition_prompt(query, result)
+    try:
+        text = call_llm(prompt).strip()
+        if low_confidence_llm_output_is_safe(text):
+            return text
+        return build_low_confidence_macro_message()
+    except Exception as e:
+        if TRACE_LEVEL >= 1:
+            print(f"[LOW_CONF_LLM_FALLBACK] {e}")
+        return build_low_confidence_macro_message()
+
+
+def build_macro_guidance_message(result: dict, query: str = "", context_domain: str = None) -> str:
+    macro_dominance = result.get("macro_dominance", {})
+    dominance  = macro_dominance.get("dominance", "balanced")
+    confidence = classify_macro_confidence(macro_dominance)
+
+    if confidence == "high":
+        base = build_high_confidence_macro_message(dominance)
+    elif confidence == "medium":
+        base = build_medium_confidence_macro_message(dominance)
+    else:
+        base = explain_low_confidence_with_llm(query, result)
+    return apply_context_modifier(base, context_domain)
+
+
+# ---------------- SINGLE-WORD INTENT ROUTING ----------------
+_SINGLE_WORD_RESPONSES = {
+    "fat": (
+        "Fat matters most by type. Reduce fried/saturated fats and add fiber-rich foods; "
+        "if cholesterol is your focus, tell me what you ate."
+    ),
+    "carb": (
+        "Carbs affect glucose most by type and portion. Pair carbs with protein/fiber "
+        "or walk 10–15 minutes after eating."
+    ),
+    "carbs": (
+        "Carbs affect glucose most by type and portion. Pair carbs with protein/fiber "
+        "or walk 10–15 minutes after eating."
+    ),
+    "meal": (
+        "Tell me the meal items and I'll use them to find the top lever. "
+        "Add carbs, protein, and fats for a complete picture."
+    ),
+    "food": (
+        "Tell me what food you ate and I'll use that to give one clear action to improve the meal."
+    ),
+}
+
+
+def build_single_word_intent_response(q: str) -> Optional[dict]:
+    msg = _SINGLE_WORD_RESPONSES.get(q.strip().lower())
+    if msg is None:
+        return None
+    return {
         "status": "success",
-        "message": result.get("text", ""),
-        "score": result.get("score")
+        "chat": msg,
+        "text": msg,
+        "domain": "lifestyle",
+        "has_food": False,
+        "foods": [],
+        "context_domain": None,
+        "score": 50,
+        "needs_clarification": False,
+        "unknown_foods": [],
     }
 
-    print("⏱️", round(time.time() - start, 2), "sec\n")
 
-    return response
+# ---------------- FOOD INTENT PROMPT ----------------
+def ask_food_intent():
+    message = "Analyze, improve, or build a better version — or say No to skip."
+    return {
+        "status": "success",
+        "chat": message,
+        "text": message,
+        "domain": "lifestyle",
+        "has_food": False,
+        "foods": [],
+        "context_domain": None,
+        "needs_clarification": True,
+        "unknown_foods": [],
+        "score": 50,
+    }
+
+
+# ---------------- CANCEL MEAL FLOW DETECTOR ----------------
+def is_cancel_meal_flow(query: str) -> bool:
+    if not query:
+        return False
+
+    q = query.strip().lower()
+    result = q in ["cancel", "no", "nope", "nah", "skip", "not now"]
+
+    print("DEBUG CANCEL CHECK:", q, result)
+
+    return result
+
+
+# ---------------- NONE MEAL FLOW DETECTOR ----------------
+def is_none_meal_flow(query: str) -> bool:
+    if not query:
+        return False
+
+    q = query.strip().lower()
+    result = q == "none"
+
+    print("DEBUG NONE CHECK:", q, result)
+
+    return result
+
+
+# ---------------- FOOD INTENT RESOLVER ----------------
+def resolve_food_intent(query: str):
+    if not query:
+        return None
+
+    q = query.lower().strip()
+
+    if q == "1":
+        return "analyze"
+    if q == "2":
+        return "improve"
+    if q == "3":
+        return "build"
+
+    analyze_terms = ["analyze", "analyse", "analysis", "review", "score", "rate", "evaluate"]
+    if any(term in q for term in analyze_terms):
+        return "analyze"
+
+    improve_terms = ["improve", "better", "fix", "upgrade", "make this better", "make it better"]
+    if any(term in q for term in improve_terms):
+        return "improve"
+
+    build_terms = ["build", "create", "plan", "make"]
+    meal_context_terms = ["meal", "food", "plate", "breakfast", "lunch", "dinner", "snack", "eating", "eat"]
+    if any(term in q for term in build_terms):
+        return "build"
+
+    return None
+def route_food_intent(intent: str, query: str, food_result: dict, state):
+    if intent == "analyze":
+        return existing_main_flow(
+            query=query,
+            voice=False,
+            user_profile=None,
+            traceId=None,
+            audio_file=None,
+        )
+
+    if intent == "improve":
+        return existing_main_flow(
+            query=query,
+            voice=False,
+            user_profile=None,
+            traceId=None,
+            audio_file=None,
+        )
+
+    if intent == "build":
+        return existing_main_flow(
+            query=query,
+            voice=False,
+            user_profile=None,
+            traceId=None,
+            audio_file=None,
+        )
+
+    return {
+        "status": "success",
+        "chat": "Unable to process request.",
+        "text": "Unable to process request.",
+        "domain": "lifestyle",
+        "has_food": False,
+        "foods": [],
+        "context_domain": None,
+        "needs_clarification": False,
+        "unknown_foods": [],
+        "score": 50,
+    }
+
+# ---------------- FOOD FLOW V2 ----------------
+def handle_food_flow_v2(query: str, food_result: dict, session: dict):
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_ENTER query={query!r}")
+
+    # Step 1: detect intent
+    intent = resolve_food_intent(query)
+
+    if TRACE_LEVEL >= 2:
+        print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_INTENT intent={intent!r}")
+
+    # Step 2: if intent exists → stub (temporary)
+    # Step 2: if intent exists → route via TS10
+    if intent:
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_ROUTE intent={intent!r}")
+
+        # 🔥 ANALYZE → go to food engine directly
+        if intent == "analyze":
+            return build_food_engine_response(
+                query=query,
+                food_result=food_result.get("food_result"),
+                context_domain=food_result.get("context_domain"),
+            )
+
+        # 🔥 IMPROVE → deterministic response (no LLM)
+        if intent == "improve":
+            return safe_response(
+                chat="Add protein or fiber to improve this meal.",
+                domain="lifestyle",
+                foods=[],
+                has_food=False,
+                actions=[],
+            )
+
+        # 🔥 BUILD → future flow (keep simple for now)
+        if intent == "build":
+            return safe_response(
+                chat="Let’s build a better meal. What are your preferences?",
+                domain="lifestyle",
+                foods=[],
+                has_food=False,
+                actions=[],
+            )
+
+    # Step 3: no intent → ask user
+    session.get("pending_meal", True)
+    session["last_food_query"] = query
+    session["last_food_result"] = food_result
+    print("🔥 SESSION SET:", {
+        "pending": session["pending_meal"],
+        "query": session["last_food_query"],
+    })
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[{now_iso()}][{trace_id_var.get()}] FOOD_FLOW_V2_SET_STATE "
+            f"pending=True last_food_query={query!r}"
+        )
+
+    return ask_food_intent()
+
+
+# ---------------- FOOD ENGINE RESPONSE ----------------
+def build_food_engine_response(
+    query: str,
+    food_result: dict = None,
+    context_domain: str = None,
+    truly_unknown: list = None,
+    matched_foods: list = None,
+    known_general_foods: list = None,
+    composite_foods: list = None,
+    api_confirmed_foods: list = None,
+) -> dict:
+
+    print("🔥 FOOD ENGINE CALLED")
+
+    result = food_result if food_result is not None else process_query(query)
+
+    raw_domain = result.get("domain", "unknown")
+    # Map food_engine domain → system domain
+    if raw_domain in ["glucose", "cholesterol", "bp"]:
+        domain = raw_domain
+    else:
+        domain = "lifestyle"
+        
+    foods = result.get("foods", [])
+    nutrition = result.get("nutrition", {})
+    scores = result.get("scores", {})
+    calories = result.get("meal_calories", 0.0)
+
+    matched_foods = result.get("foods", [])
+    known_general_foods = []
+    composite_foods = []
+    api_confirmed_foods = []
+    
+    print("DEBUG RECEIVED:", {
+        "matched": matched_foods,
+        "known_general": known_general_foods,
+        "composite": composite_foods,
+        "api": api_confirmed_foods
+    })
+
+    food_signal_exists = bool(matched_foods or known_general_foods or composite_foods or api_confirmed_foods)
+
+    upstream_unknowns = result.get("unknown_foods", [])
+    if truly_unknown is None:
+        truly_unknown = upstream_unknowns
+    else:
+        truly_unknown = truly_unknown or []
+
+    # HARD RULE: any food signal → never clarify
+    if food_signal_exists:
+        truly_unknown = []
+        result["unknown_foods"] = []
+
+    should_clarify = bool(truly_unknown)
+
+    print("🔥 FOOD ENGINE INPUT:", {
+        "matched": matched_foods,
+        "unknown": truly_unknown,
+        "should_clarify": should_clarify
+    })
+
+    needs_clarification = False
+
+    # INTERNAL curated behavior
+    first_internal = next(
+        (
+            INTERNAL_FOOD_BEHAVIOR[f.lower().strip()]
+            for f in foods
+            if f.lower().strip() in INTERNAL_FOOD_BEHAVIOR
+        ),
+        None,
+    )
+
+    # ------------------------------------------------------------
+    # DOMAIN HANDLING
+    # ------------------------------------------------------------
+    if domain == "unknown":
+        message = "I could not identify a known food item in that meal yet."
+        top_actions = ["improve_meal"]
+        top_action_labels = ["Add or clarify food items"]
+        title = "Unknown Meal"
+
+    elif first_internal:
+        domain = first_internal["domain"]
+        base_message = first_internal["message"]
+
+        if context_domain == "cholesterol":
+            base_message += " Since cholesterol is your focus, also watch saturated fat and add fiber."
+        elif context_domain == "bp":
+            base_message += " Since blood pressure is your focus, also watch sodium."
+
+        if should_clarify:
+            message = build_mixed_food_clarification(base_message, truly_unknown)
+            needs_clarification = True
+        else:
+            message = base_message
+
+        top_actions = ["walk_10min_now"] if domain == "glucose" else ["add_fiber_next_meal"]
+        top_action_labels = ["Walk 10 Minutes"] if domain == "glucose" else ["Add Fiber Next Meal"]
+        title = domain.capitalize()
+
+    elif domain == "glucose":
+        top_actions = ["walk_10min_now"]
+        top_action_labels = ["Walk 10 Minutes"]
+        title = "Glucose"
+
+        if should_clarify:
+            message = build_unknown_food_clarification(truly_unknown)
+            needs_clarification = True
+        else:
+            message = build_macro_guidance_message(result, query, context_domain)
+
+    elif domain == "cholesterol":
+        top_actions = ["add_fiber_next_meal"]
+        top_action_labels = ["Add Fiber Next Meal"]
+        title = "Cholesterol"
+
+        if should_clarify:
+            message = build_unknown_food_clarification(truly_unknown)
+            needs_clarification = True
+        else:
+            message = build_macro_guidance_message(result, query, context_domain)
+
+    else:
+        top_actions = ["improve_meal"]
+        top_action_labels = ["Improve Meal"]
+        title = "Meal"
+
+        if should_clarify:
+            message = build_unknown_food_clarification(truly_unknown)
+            needs_clarification = True
+        else:
+            message = build_macro_guidance_message(result, query, context_domain)
+
+    # Low-confidence path: general/API/composite food with unknown domain
+    if food_signal_exists and not matched_foods and domain == "unknown":
+        message = build_low_confidence_food_signal_message(
+            query,
+            known_general_foods=known_general_foods,
+            api_confirmed_foods=api_confirmed_foods,
+            composite_foods=composite_foods,
+        )
+        needs_clarification = False
+        truly_unknown = []
+
+    # HARD GUARDRAIL (cannot be overridden anywhere)
+    if food_signal_exists:
+        needs_clarification = False
+        truly_unknown = []
+
+    print("🔥 FINAL OUTPUT:", {
+        "needs_clarification": needs_clarification,
+        "unknown": truly_unknown
+    })
+
+    return {
+        "status": "success",
+        "text": message,
+        "chat": message,
+        "domain": domain,
+        "context_domain": context_domain,
+        "needs_clarification": needs_clarification,
+        "unknown_foods": truly_unknown,
+        "macro_dominance": result.get("macro_dominance", {}),
+        "macro_totals": result.get("macro_totals", {}),
+        "need": "meal_analysis",
+        "lever": domain,
+        "sub_lever": None,
+        "score": scores.get(domain, 0),
+        "intent": {
+            "domain": domain,
+            "need": "meal_analysis",
+            "lever": domain,
+            "sub_lever": None,
+        },
+        "has_food": True,
+        "food_engine": True,
+        "foods": foods,
+        "known_general_foods": known_general_foods,
+        "composite_foods": composite_foods,
+        "api_confirmed_foods": api_confirmed_foods,
+        "scores": scores,
+        "meal_calories": calories,
+        "nutrition": nutrition,
+        "screen": {
+            "title": title,
+            "domain": domain,
+            "need": "meal_analysis",
+            "lever": domain,
+            "sub_lever": None,
+            "top_actions": top_actions,
+            "top_action_labels": top_action_labels,
+            "next_actions": ["improve_meal", "walk_10min_now", "track_metrics"],
+            "next_action_labels": ["Improve Meal", "Walk 10 Minutes", "Track Metrics"],
+            "levers": ["nutrition", "movement"],
+            "context": {
+                "meal": True,
+                "after_meal": False,
+                "high": False,
+                "low": False,
+                "unstable": False,
+            },
+        },
+        "structured": {
+            "domain": domain,
+            "need": "meal_analysis",
+            "lever": domain,
+            "sub_lever": None,
+            "context_name": "meal",
+            "top_actions": top_actions,
+            "next_actions": ["improve_meal", "walk_10min_now", "track_metrics"],
+            "levers": ["nutrition", "movement"],
+            "context": {
+                "meal": True,
+                "pairing": False,
+                "after_meal": False,
+                "high": False,
+                "low": False,
+                "unstable": False,
+            },
+        },
+    }
+
+def build_standard_text_response(
+    message: str,
+    domain: str = "lifestyle",
+    context_domain: str = None,
+    status: str = "success",
+) -> dict:
+    return {
+        "status": status,
+        "text": message,
+        "chat": message,
+        "domain": domain,
+        "context_domain": context_domain,
+        "has_food": False,
+        "foods": [],
+    }
+
+
+def ensure_response_contract(resp: dict, default_domain: str = "lifestyle") -> dict:
+    if resp is None:
+        resp = {}
+    message = (
+        resp.get("chat")
+        or resp.get("text")
+        or resp.get("message")
+        or "I can help with that. Tell me what you ate or what health area you want to improve."
+    )
+    resp.setdefault("chat", message)
+    resp.setdefault("text", message)
+    resp.setdefault("domain", default_domain)
+    resp.setdefault("has_food", False)
+    resp.setdefault("foods", [])
+    resp.setdefault("context_domain", None)
+    resp.setdefault("needs_clarification", False)
+    resp.setdefault("unknown_foods", [])
+    return resp
+
+
+def normalize_final_response(resp: dict) -> dict:
+    """
+    Final outbound response contract normalizer.
+    Ensures UI + backend contract consistency.
+    """
+
+    if resp is None:
+        resp = {}
+
+    display_text = (
+        resp.get("chat")
+        or resp.get("text")
+        or resp.get("message")
+        or ""
+    )
+
+    needs_clarification = bool(resp.get("needs_clarification", False))
+    unknown_foods = resp.get("unknown_foods", []) if needs_clarification else []
+
+    # 🔥 HARD CONTRACT ENFORCEMENT (THIS FIXES YOUR CRASH)
+    return {
+        **resp,
+
+        # ---- REQUIRED UI FIELDS ----
+        "chat": display_text,
+        "text": display_text,
+        "message": None,
+        "needs_clarification": needs_clarification,
+        "unknown_foods": unknown_foods,
+
+        # ---- REQUIRED BACKEND FIELDS ----
+        "food_engine": resp.get("food_engine", False),
+
+        "structured": resp.get(
+            "structured",
+            {
+                "domain": resp.get("domain", "lifestyle"),
+                "foods": resp.get("foods", []),
+                "has_food": resp.get("has_food", False),
+            },
+        ),
+    }
+
+
+# ---------------- FOOD CLASSIFICATION LAYERS ----------------
+
+KNOWN_GENERAL_FOODS: set = {
+    # proteins
+    "beef", "mutton", "lamb", "pork", "turkey", "fish", "tilapia",
+    "shrimp", "tuna",
+    # Indian / regional vegetables
+    "sag", "saag", "spinach", "palak", "okra", "bhindi", "turnip",
+    "shalgam", "eggplant", "brinjal", "baingan", "yam", "sweet potato",
+    # grains / carbs
+    "quinoa", "millet", "poha", "upma", "idli", "dosa",
+    # legumes / beans
+    "lentils", "chickpeas", "kidney beans", "black beans", "peas",
+}
+
+COMPOSITE_FOODS: set = {
+    "salad", "burger", "pizza", "sandwich", "wrap", "bowl",
+    "soup", "curry", "smoothie", "stew", "stir fry",
+}
+
+MAX_FOOD_API_VALIDATIONS = 2
+
+
+def _food_key(food: str) -> str:
+    return (food or "").lower().strip()
+
+
+def is_known_general_food(food: str) -> bool:
+    return _food_key(food) in KNOWN_GENERAL_FOODS
+
+
+def is_composite_food(food: str) -> bool:
+    return _food_key(food) in COMPOSITE_FOODS
+
+
+def is_valid_nutrition_api_food(food: str, data: dict) -> bool:
+    if not data:
+        return False
+
+    calories = float(data.get("calories", 0) or 0)
+    carbs    = float(data.get("carbs_g", 0) or 0)
+    protein  = float(data.get("protein_g", 0) or 0)
+    fat      = float(data.get("fat_g", 0) or 0)
+
+    has_macro_signal = calories > 0 or carbs > 0 or protein > 0 or fat > 0
+
+    return has_macro_signal
+
+
+def validate_food_with_nutrition_api(food: str) -> bool:
+    try:
+        data = call_usda(food)
+    except Exception as e:
+        if TRACE_LEVEL >= 1:
+            print(f"[FOOD_API_VALIDATE_ERROR] food={food!r} error={e}")
+        return False
+    return is_valid_nutrition_api_food(food, data or {})
+
+
+def validate_unresolved_foods_with_api(unresolved: list) -> list:
+    confirmed = []
+    seen: set = set()
+
+    for food in unresolved[:MAX_FOOD_API_VALIDATIONS]:
+        key = (food or "").lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            data = call_usda(food)
+            if is_valid_nutrition_api_food(food, data or {}):
+                confirmed.append(food)
+        except Exception as e:
+            if TRACE_LEVEL >= 1:
+                print(f"[USDA_ERROR] food={food!r} error={e}")
+
+    return confirmed
+
+
+def classify_local_food_token(food: str) -> str:
+    if is_trusted_food(food):
+        return "trusted_local"
+    if is_known_general_food(food):
+        return "known_general"
+    if is_composite_food(food):
+        return "composite"
+    return "unresolved"
+
+
+def build_low_confidence_food_signal_message(
+    query: str,
+    known_general_foods: list = None,
+    api_confirmed_foods: list = None,
+    composite_foods: list = None,
+) -> str:
+    foods = (known_general_foods or []) + (api_confirmed_foods or []) + (composite_foods or [])
+    label = ", ".join(foods[:3]) if foods else "this meal"
+    return (
+        f"I recognize {label} as food, but I do not have enough precise nutrition detail yet. "
+        "Use the simple rule: pair protein with fiber, keep added fats moderate, and use Build Meal "
+        "when you want a more accurate breakdown."
+    )
+
+
+# ---------------- FOOD TRUST GATE ----------------
+
+def is_trusted_food(food: str) -> bool:
+    f = (food or "").lower().strip()
+    return (
+        f in FOOD_DATA
+        or f in CURATED_HIGH_IMPACT_FOODS
+    )
+
+
+def build_unknown_food_clarification(unknown_foods: list) -> str:
+    label = ", ".join(unknown_foods[:2]) if unknown_foods else "that food"
+    return (
+        f"I don't want to guess on {label}. "
+        "Was it mostly carbs like rice/bread, protein like chicken/paneer, or fats like cheese/oil?"
+    )
+
+
+def build_mixed_food_clarification(known_message: str, unknown_foods: list) -> str:
+    return known_message + " " + build_unknown_food_clarification(unknown_foods)
+
+
+def filter_real_unknown_foods(unknowns: list) -> list:
+    result = []
+    for item in unknowns or []:
+        key = (item or "").lower().strip()
+        if not key:
+            continue
+        if key in STOPWORDS:
+            continue
+        result.append(item)
+    return list(dict.fromkeys(result))
+
+
+def build_mixed_known_unknown_food_clarification(
+    known_foods: list,
+    unknown_foods: list,
+) -> str:
+    known_label = ", ".join(known_foods[:3]) if known_foods else "part of your meal"
+    unknown_label = ", ".join(unknown_foods[:2])
+    return (
+        f"I recognize {known_label}, but I don't want to guess on {unknown_label}. "
+        "Was it mostly carbs like rice/bread, protein like chicken/paneer, fat like cheese/oil, or vegetables?"
+    )
+
+
+def resolve_domain_and_context(query: str) -> dict:
+    text_domain = detect_condition(query)
+    food_result = process_query(query)
+    raw_foods = food_result.get("foods", []) or []
+
+    # 🔥 CLEAN ONCE (dedupe only)
+    all_foods = [
+        f for f in dict.fromkeys(raw_foods)
+        if isinstance(f, str) and f.strip()
+    ]
+
+    matched_foods       = []
+    known_general_foods = []
+    composite_foods     = []
+    unresolved_foods    = []
+
+    # 🔥 CLASSIFY FIRST (correct order)
+    for f in all_foods:
+        kind = classify_local_food_token(f)
+        if kind == "trusted_local":
+            matched_foods.append(f)
+        elif kind == "known_general":
+            known_general_foods.append(f)
+        elif kind == "composite":
+            composite_foods.append(f)
+        else:
+            unresolved_foods.append(f)
+
+    local_food_signal = bool(matched_foods or known_general_foods or composite_foods)
+
+    # USDA fallback only for actual food phrases — not concept sentences.
+    api_confirmed_foods = []
+    should_call_usda = (
+        not local_food_signal
+        and len(unresolved_foods) > 0
+        and not looks_like_sentence_not_food(query)
+        and is_food_logging_query(query)
+    )
+
+    if should_call_usda:
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[USDA_CALL] local_food_signal={local_food_signal} "
+                f"unresolved_foods={unresolved_foods!r}"
+            )
+        api_confirmed_foods = validate_unresolved_foods_with_api(unresolved_foods)
+    else:
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[USDA_SKIP] local_food_signal={local_food_signal} "
+                f"matched={matched_foods!r} "
+                f"known_general={known_general_foods!r} "
+                f"composite={composite_foods!r} "
+                f"unresolved={unresolved_foods!r}"
+            )
+
+    truly_unknown = [
+        f for f in unresolved_foods
+        if f not in api_confirmed_foods
+    ]
+
+    # api_confirmed_foods are real foods — include them in final set.
+    final_foods = matched_foods + known_general_foods + composite_foods + api_confirmed_foods
+    food_result["foods"] = final_foods
+
+    has_food = bool(final_foods)
+    high_confidence_food = bool(matched_foods)
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[DOMAIN_RESOLVE] query={query!r} "
+            f"all_foods={all_foods!r} "
+            f"final_foods={final_foods!r} "
+            f"matched_foods={matched_foods!r} "
+            f"known_general_foods={known_general_foods!r} "
+            f"composite_foods={composite_foods!r} "
+            f"unresolved_foods={unresolved_foods!r} "
+            f"api_confirmed_foods={api_confirmed_foods!r} "
+            f"truly_unknown={truly_unknown!r} "
+            f"has_food={has_food} "
+            f"high_confidence_food={high_confidence_food} "
+            f"should_call_usda={should_call_usda} "
+            f"text_domain={text_domain!r}"
+        )
+
+    return {
+        "has_food": has_food,
+        "high_confidence_food": high_confidence_food,
+        "foods": final_foods,  # 🔥 STRICT (NO LEAK)
+        "matched_foods": matched_foods,
+        "known_general_foods": known_general_foods,
+        "composite_foods": composite_foods,
+        "api_confirmed_foods": api_confirmed_foods,
+        "truly_unknown": truly_unknown,
+        "food_result": food_result if has_food else None,
+        "domain": food_result.get("domain", text_domain) if has_food else text_domain,
+        "context_domain": text_domain if has_food else None,
+        "text_domain": text_domain,
+    }
+
+
+# ---------------- BUILD RESPONSE ----------------
+@trace
+async def build_response(query: str, lite: bool):
+    t0_func = trace_start("build_response")
+    try:
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] LITE MODE:", lite)
+
+        if not query:
+            return {"text": "Empty query", "score": 0}
+
+        # ✅ normalize FIRST
+        q = correct_spelling(query)
+        q = normalize(q)
+
+        # pairing fast-path
+        if is_pairing_query(q):
+            return {
+                **build_pairing_response(q),
+                "score": 50,
+                "intent": {
+                    "domain": DOMAINS["LIFESTYLE"],
+                    "need": "education",
+                    "tool": "llm_lite",
+                },
+            }
+
+        # ── FOOD ENGINE ROUTING ──────────────────────────────────────────────
+        routing = resolve_domain_and_context(q)
+        print("🔥 ROUTING DECISION", {
+            "has_food": routing.get("has_food"),
+            "truly_unknown": routing.get("truly_unknown"),
+        })
+        
+        if routing.get("has_food"):
+
+            matched = routing.get("matched_foods", [])
+            unknown = routing.get("truly_unknown", [])
+
+            resolved_foods = []
+
+            # ✅ 1. KEEP matched foods (internal DB)
+            if matched:
+                resolved_foods.extend(routing.get("food_result", {}).get("foods", []))
+
+            # ✅ 2. USDA for unknown foods (NON-BLOCKING + SAFE)
+            for food in unknown:
+                try:
+                    fdc_id = await asyncio.wait_for(
+                        asyncio.to_thread(search_usda, food, trace_id_var.get()),
+                        timeout=3
+                    )
+
+                    if fdc_id:
+                        details = await asyncio.wait_for(
+                            asyncio.to_thread(get_usda_food_details, fdc_id, trace_id_var.get()),
+                            timeout=3
+                        )
+
+                        resolved_foods.append({
+                            "name": food,
+                            "source": "usda",
+                            "fdc_id": fdc_id,
+                            "nutrients": details["nutrients"]
+                        })
+
+                except asyncio.TimeoutError:
+                    print(f"[{now_iso()}][{trace_id_var.get()}] USDA_TIMEOUT:", food)
+
+                except Exception as e:
+                    print(f"[{now_iso()}][{trace_id_var.get()}] USDA_ERROR:", e)
+
+            # ✅ 3. If we have ANY resolved foods → go to food engine
+            if resolved_foods:
+                if TRACE_LEVEL >= 1:
+                    print(f"[{now_iso()}][{trace_id_var.get()}] FINAL_RESOLVED:", resolved_foods)
+
+                # 🔥 Normalize structure (future-safe)
+                food_payload = {
+                    "foods": resolved_foods
+                }
+
+                return _inject_trace(
+                    build_food_engine_response(
+                        query=q,
+                        food_result=food_payload,
+                        context_domain=routing.get("context_domain"),
+                        truly_unknown=[],  # everything handled
+                    )
+                )
+
+            # ❌ 4. Only if NOTHING worked → clarify
+            return _inject_trace(
+                ensure_response_contract(
+                    {
+                        "status": "success",
+                        "message": build_unknown_food_clarification(unknown),
+                        "needs_clarification": True,
+                        "unknown_foods": unknown,
+                        "score": 0,
+                    },
+                    default_domain="lifestyle",
+                )
+            )
+
+        # =========================
+        # 🔽 EVERYTHING BELOW UNCHANGED
+        # =========================
+        # ✅ normalization for matching
+        q_norm = q.lower().replace("-", " ")
+
+        # ✅ STATE SYNONYMS (real-world language)
+        STATE_SYNONYMS = {
+            "prediabetes": "prediabetic",
+            "diabetes": "diabetic",
+            "high sugar": "hyperglycemia",
+            "low sugar": "hypoglycemia",
+        }
+
+        for k, v in STATE_SYNONYMS.items():
+            if k in q_norm:
+                q_norm = q_norm.replace(k, v)
+
+        # 1. detect context first
+        ctx = detect_context(q)
+
+        # 2. build intent using your existing function
+        intent = classify_intent_llm(q)
+
+        # 3. safety (important)
+        if not isinstance(intent, dict):
+            intent = {
+                "domain": "lifestyle",
+                "need": "education",
+                "lever": "lifestyle",
+                "sub_lever": None,
+            }
+
+        # 4. 🔥 attach context AFTER intent exists
+        intent["context"] = ctx
+
+        # PRIMARY context source — locked here, never overwritten downstream
+        ctx_pattern = detect_context_pattern(q)
+        context_name = ctx_pattern.get("context")  # None if no pattern matched
+        if TRACE_LEVEL >= 1 and ctx_pattern:
+            print(f"[{now_iso()}][{trace_id_var.get()}] CTX_PATTERN:", ctx_pattern)
+
+        # ✅ STATE DETECTION
+        state_hit = None
+        for key in STATE_MAP:
+            key_tokens = set(key.split())
+            # normalize once
+            q_norm = normalize(q).lower().strip()
+
+            # build tokens
+            tokens = set(q_norm.split())
+
+            # now safe to use
+            if key_tokens.issubset(tokens):
+
+                state_hit = STATE_MAP[key]
+                break
+
+        # ✅ INTENT BUILD
+        if state_hit:
+            domain, need = state_hit
+            intent = {
+                "domain": domain,
+                "need": need,
+                "tool": "llm_lite" if lite else "llm_full",
+                "source": "state_map",
+            }
+            confidence = 0.95
+        else:
+            intent = build_intent(q, lite, ctx)
+            domain = intent.get("domain")
+            need = intent.get("need")
+
+            # ✅ basic confidence scoring
+            if len(tokens) <= 2:
+                confidence = 0.6
+            elif "?" in q:
+                confidence = 0.9
+            else:
+                confidence = 0.8
+
+            # boost for identified health domain — short queries like "sugar crash" are valid
+            if domain in HEALTH_DOMAINS:
+                confidence = max(confidence, 0.8)
+
+        # ✅ Domain override — only when classifier fell back to lifestyle
+        if ctx_pattern.get("domain") and domain == DOMAINS["LIFESTYLE"]:
+            domain = ctx_pattern["domain"]
+            intent["domain"] = domain
+
+        # Lock context_name — single assignment, never modified after this point
+        intent["context_name"] = context_name
+
+        # ── Behavior gap override: user knows but isn't acting → force intervention ──
+        if re.search(r"\b(i know|should).*(but i (don'?t|do not))\b", q, re.I):
+            intent["need"] = "intervention"
+            intent["context_name"] = "behavior_gap"
+            context_name = "behavior_gap"
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] BEHAVIOR_GAP detected → need=intervention context=behavior_gap"
+                )
+
+        # ✅ FALLBACK SAFETY
+        if not domain or not need:
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] INTENT_FALLBACK → unclear")
+            return unclear_query_response()
+
+        # ✅ LOW CONFIDENCE → clarify (not reject)
+        if confidence < 0.7:
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] LOW_CONFIDENCE: {q!r} conf={confidence:.2f}"
+                )
+
+            next_actions = build_next_actions(intent)
+
+            response = {
+                "text": "Here are a few ways I can help:",
+                "score": 0,
+                "intent": intent,
+                "screen": {
+                    "title": "What would you like to do?",
+                    "top_actions": next_actions,
+                    "top_action_labels": [_action_label(a) for a in next_actions],
+                    "next_actions": [],
+                    "next_action_labels": [],
+                },
+            }
+            response["_trace"] = {"trace_id": trace_id_var.get(), "steps": []}
+            return response  # ✅ VERY IMPORTANT
+
+        # ✅ MEANINGFUL CHECK
+        if not is_meaningful_query(q, domain, need):
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] UNCLEAR_QUERY: {q}")
+
+            next_actions = build_next_actions(intent)
+
+            return {
+                "text": "Here are a few ways I can help:",
+                "score": 0,
+                "intent": intent,
+                "screen": {
+                    "title": "What would you like to do?",
+                    "top_actions": next_actions,
+                    "top_action_labels": [_action_label(a) for a in next_actions],
+                    "next_actions": [],
+                    "next_action_labels": [],
+                },
+                "_trace": {"trace_id": trace_id_var.get(), "steps": []},
+            }
+
+        condition_key = domain
+        q_lower = q.lower().strip()
+
+        # context label
+        if "after" in q_lower and any(
+            x in q_lower for x in ["lunch", "dinner", "breakfast", "meal"]
+        ):
+            context_label = "post_meal"
+        elif any(x in q_lower for x in ["fasting", "morning"]):
+            context_label = "fasting"
+        elif any(x in q_lower for x in ["high", "190", "180", "200"]):
+            context_label = "high_reading"
+        else:
+            context_label = "general"
+
+        # Trace mismatch: pattern context vs keyword classifier (classify is secondary)
+        if context_name and context_name != context_label and TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] CONTEXT_MISMATCH: detected={context_name!r} classify={context_label!r}"
+            )
+
+        if TRACE_LEVEL >= 1:
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] CLASSIFY: domain={domain} need={need} context={context_name or context_label}"
+            )
+
+        # Context from ctx dict — only used as fallback when pattern detection found nothing
+        if not context_name and isinstance(ctx, dict):
+            for k, v in ctx.items():
+                if v:
+                    context_name = k
+                    break
+
+        # 🔥 context-aware intervention selection
+        if context_name and context_name in CONTEXT_LEVERS:
+            interventions = [
+                LEVER_ACTIONS[lv][0]
+                for lv in CONTEXT_LEVERS[context_name]
+                if lv in LEVER_ACTIONS
+            ][:3]
+        else:
+            domain = intent.get("domain")
+            need = intent.get("need")
+            interventions = get_intervention(domain, need, ctx)
+
+        # attach to intent
+        intent["interventions"] = interventions
+
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] INTERVENTIONS:", interventions)
+
+        score = compute_score(condition_key, q)
+
+        _exec_path = (
+            "scroll_test"
+            if SCROLL_TEST
+            else "mock" if USE_MOCK else "llm" if USE_LLM else "fallback"
+        )
+
+        _acc = trace_obj_var.get(None)
+        if _acc:
+            _acc.log(
+                "lever_select",
+                {"path": _exec_path, "tool": intent.get("tool", "llm_full")},
+            )
+
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] SCORE:", score)
+            print(f"[{now_iso()}][{trace_id_var.get()}] QUERY:", q)
+            print(f"[{now_iso()}][{trace_id_var.get()}] INTENT:", intent)
+
+        # SCROLL TEST
+        if SCROLL_TEST:
+            return _enriched_response(scroll_test_response(), score, intent, ctx)
+
+        # MOCK
+        if USE_MOCK:
+            _health = (DOMAINS["GLUCOSE"], DOMAINS["BP"], DOMAINS["CHOLESTEROL"])
+            mock_key = (
+                condition_key if condition_key in _health else DOMAINS["LIFESTYLE"]
+            )
+            return _enriched_response(mock_response(mock_key), score, intent, ctx)
+
+        # LLM
+        if USE_LLM:
+            use_lite = intent.get("tool") == "llm_lite"
+
+            # Single source of truth — build structured once, derive top_action from it
+            structured = build_structured_response(intent, ctx)
+            top_action_code = (
+                structured["top_actions"][0] if structured.get("top_actions") else None
+            )
+            # behavior_gap override — ensure correct action regardless of lever ordering
+            if context_name == "behavior_gap":
+                top_action_code = "avoid_simple_carbs_now"
+            assert top_action_code is None or top_action_code == (
+                "avoid_simple_carbs_now"
+                if context_name == "behavior_gap"
+                else (structured["top_actions"][0] if structured.get("top_actions") else None)
+            ), "top_action_code mismatch vs structured response"
+
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] LLM_MODE: {'lite' if use_lite else 'full'}"
+                    f" context_name={context_name!r} top_action={top_action_code!r}"
+                )
+
+            # Enforcement layer — bypass LLM for deterministic actions
+            forced = enforce_action_response(
+                top_action_code or "", context_name or "", q
+            )
+            if forced:
+                if TRACE_LEVEL >= 1:
+                    print(
+                        f"[{now_iso()}][{trace_id_var.get()}] DETERMINISTIC_BYPASS"
+                        f" action={top_action_code!r}"
+                    )
+                return _enriched_response(forced, score, intent, ctx, structured)
+
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        llm_response, q, ctx, use_lite, context_name, top_action_code
+                    ),
+                    timeout=15,
+                )
+                text = result if use_lite else enforce_format(result)
+                return _enriched_response(text, score, intent, ctx, structured)
+
+            except asyncio.TimeoutError:
+                return _enriched_response(
+                    "LLM timed out. Try again.", score, intent, ctx, structured
+                )
+
+            except Exception as e:
+                mock_key = (
+                    condition_key
+                    if condition_key
+                    in (DOMAINS["GLUCOSE"], DOMAINS["BP"], DOMAINS["CHOLESTEROL"])
+                    else DOMAINS["LIFESTYLE"]
+                )
+                resp = _enriched_response(
+                    mock_response(mock_key), score, intent, ctx, structured
+                )
+                resp["error"] = str(e)
+                return resp
+
+        # fallback
+        return _enriched_response(
+            """## Insight
+Ask about glucose, blood pressure, cholesterol, or lifestyle habits.
+
+## Expected Outcome
+You'll receive a clear explanation and specific actions to take.""",
+            score,
+            intent,
+            ctx,
+        )
+
+    finally:
+        trace_end("build_response", t0_func)
+
+
+def correct_spelling(text: str) -> str:
+    t0 = trace_start("correct_spelling")
+    try:
+        words = text.split()
+        corrected = []
+
+        for w in words:
+            lw = w.lower()
+
+            # direct correction
+            if lw in COMMON_CORRECTIONS:
+                corrected.append(COMMON_CORRECTIONS[lw])
+                continue
+
+            # fuzzy match (optional but useful)
+            match = difflib.get_close_matches(
+                lw, COMMON_CORRECTIONS.keys(), n=1, cutoff=0.85
+            )
+            if match:
+                corrected.append(COMMON_CORRECTIONS[match[0]])
+            else:
+                corrected.append(w)
+
+        return " ".join(corrected)
+    finally:
+        trace_end("correct_spelling", t0)
+
+
+def correct_with_llm(text: str) -> str:
+    t0 = trace_start("correct_with_llm")
+    try:
+        try:
+            res = completion(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Correct spelling only. Do not change meaning. Return only corrected sentence.",
+                    },
+                    {"role": "user", "content": text},
+                ],
+            )
+            return extract_text(res).strip()
+        except:
+            return text
+    finally:
+        trace_end("correct_with_llm", t0)
+
+
+def extract_target_food(q: str) -> str:
+    q = q.lower()
+    match = re.search(r"(?:with|for)\s+(.+)", q)
+    if not match:
+        return ""
+    return match.group(1).replace("?", "").strip()
+
+def finalize_response(resp: dict, default_domain: str = "lifestyle") -> dict:
+    """
+    🔒 Single exit point for ALL responses
+    Enforces:
+    - schema contract (food_engine, structured, etc.)
+    - normalized UI fields (chat/text)
+    - trace injection
+    """
+
+    if resp is None:
+        resp = {}
+
+    return _inject_trace(
+        normalize_final_response(
+            ensure_response_contract(
+                resp,
+                default_domain=default_domain,
+            )
+        )
+    )
+
+def build_pairing_response(q: str) -> dict:
+    t0 = trace_start("build_pairing_response")
+    try:
+        food = extract_target_food(q)
+
+        if not food:
+            return lite_fallback_response()
+
+        return {
+            "text": get_pairing_advice(food),
+            "intent": {"domain": DOMAINS["LIFESTYLE"], "need": "education"},
+            "score": 0,
+        }
+    finally:
+        trace_end("build_pairing_response", t0)
+        
+
+
+
+def get_pairing_advice(food: str) -> str:
+    food = food.lower()
+
+    if "turmeric" in food:
+        return """Turmeric works best with black pepper.
+
+Combine with:
+• Black pepper (improves absorption)
+• Healthy fat (milk, ghee)
+• Warm liquids (tea)
+
+This improves effectiveness."""
+
+    if "fries" in food:
+        return """Fries are high in refined carbs.
+
+Add:
+• Protein (chicken, paneer)
+• Fiber (salad, vegetables)
+• Optional: vinegar or lemon
+
+This helps reduce glucose spikes."""
+
+    if "ice cream" in food:
+        return """Ice cream is high in sugar.
+
+Add:
+• Nuts or yogurt (fat/protein)
+• Fruit or chia (fiber)
+• A short walk after eating
+
+This helps stabilize glucose."""
+
+    return f"""For {food}:
+
+Add protein and fiber to balance it.
+A short walk after eating also helps."""
+
+
+# ---------------- FEEDBACK ----------------
+def normalize_query(query: str) -> str:
+    items = re.split(r",|\band\b", query.lower())
+    items = [i.strip() for i in items if i.strip()]
+    items = sorted(set(items))
+    return ", ".join(items)
+
+
+class FeedbackRequest(BaseModel):
+    trace_id: str
+    action: str
+    raw_query: Optional[str] = None
+    normalized_query: Optional[str] = None
+    feedback: Optional[str] = None
+    context_name: Optional[str] = None
+    action_taken: Optional[str] = None
+
+
+@app.get("/food-items")
+def get_food_items():
+    return SEED_FOOD_ITEMS
+
+
+@app.post("/process-food-query")
+def process_food_query(req: dict):
+    query = req.get("query", "")
+    return process_query(query)
+
+
+@app.get("/unknown-foods")
+def get_unknown_foods():
+    return list(UNKNOWN_FOODS)
+
+
+@app.post("/clear-unknown-foods")
+def clear_unknown_foods():
+    UNKNOWN_FOODS.clear()
+    return {"status": "cleared"}
+
+
+@app.post("/feedback")
+async def capture_feedback(req: FeedbackRequest):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    norm = req.normalized_query or (
+        normalize_query(req.raw_query) if req.raw_query else None
+    )
+    cursor.execute(
+        """
+        INSERT INTO feedback (trace_id, raw_query, normalized_query, context_name, action, feedback, action_taken, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            req.trace_id,
+            req.raw_query,
+            norm,
+            req.context_name,
+            req.action,
+            req.feedback,
+            req.action_taken,
+            now_iso(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[{now_iso()}][{req.trace_id}] FEEDBACK: {req.feedback!r} action={req.action!r}"
+        )
+    return {"status": "ok"}
+
+
+@app.get("/debug/feedback")
+def get_feedback():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM feedback ORDER BY id DESC LIMIT 50")
+    columns = [col[0] for col in cursor.description]
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(zip(columns, row)) for row in rows]
+
+
+# ---------------- NORMALIZE ENDPOINT ----------------
+
+
+class NormalizeRequest(BaseModel):
+    items: List[str]
+
+
+@app.post("/normalize")
+async def normalize_food_items(req: NormalizeRequest):
+    """
+    Normalize food item names: fix spelling, standardize names.
+    Quantities and units are preserved. Items are not split or merged.
+    Falls back to original items on any failure.
+    """
+    t0_func = trace_start("normalize_food_items")
+    try:
+        original = req.items
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] NORMALIZE RAW:", original)
+
+        if not original:
+            return {"items": original}
+
+        prompt = "\n".join(
+            [
+                "Normalize the following food items:",
+                "- Fix spelling mistakes",
+                '- Standardize names (e.g. "chxicken" → "chicken")',
+                "- DO NOT change quantities or units",
+                "- DO NOT split or merge items",
+                "Return ONLY a JSON array of corrected items.",
+                "",
+                f"Input: {original}",
+                "Output:",
+            ]
+        )
+
+        try:
+            res = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: completion(
+                        model=MODEL_OPENAI,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                        max_tokens=256,
+                    )
+                ),
+                timeout=10,
+            )
+            text = extract_text(res).strip()
+
+            match = re.search(r"\[[\s\S]*\]", text)
+            if not match:
+                raise ValueError("No JSON array in response")
+
+            parsed = __import__("json").loads(match.group(0))
+
+            if not isinstance(parsed, list):
+                raise ValueError("Response is not a list")
+
+            if len(parsed) != len(original):
+                raise ValueError(
+                    f"Length mismatch: got {len(parsed)}, expected {len(original)}"
+                )
+
+            result = [str(item) for item in parsed]
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] NORMALIZE OUTPUT:", result)
+            return {"items": result}
+
+        except Exception as e:
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] NORMALIZE ERROR:", e)
+            return {"items": original}
+    finally:
+        trace_end("normalize_food_items", t0_func)
+
+async def run_llm_flow(query: str, body: dict, request: Request):
+    lite = body.get("lite", False)
+
+    print("🔥 RUN_LLM_FLOW EXECUTED WITH:", query)
+
+    result = await build_response(query, lite)
+    
+    resp = {
+        "status": "success",
+        "text": result.get("text", ""),
+        "chat": result.get("chat", ""),
+        "query": query,
+        "score": result.get("score", 0),
+        "domain": result.get("intent", {}).get("domain"),
+        "intent": result.get("intent", {}),
+        "screen": result.get("screen"),
+        "structured": result.get("structured", {}),
+        "has_food": result.get("has_food", False),
+        "food_engine": result.get("food_engine", False),
+        "foods": result.get("foods", []),
+        "scores": result.get("scores", {}),
+        "meal_calories": result.get("meal_calories", 0.0),
+        "nutrition": result.get("nutrition", {}),
+    }
+    return finalize_response(resp)
+    
+    
+# ---------------- QUERY ENDPOINT (voice + keyboard) ----------------
+async def existing_main_flow(request: Request):
+    """
+    Extracted V1 /query flow.
+    This function must preserve current behavior exactly.
+    """
+
+    incoming_trace_id = request.headers.get("x-trace-id")
+    trace_id = incoming_trace_id if incoming_trace_id else create_trace_id()
+    trace_id_var.set(trace_id)
+    start = time.time()
+    content_type = request.headers.get("content-type", "")
+
+    if DEBUG:
+        _acc = TraceAccumulator(trace_id)
+        trace_obj_var.set(_acc)
+        _acc.log("api_entry", {"content_type": content_type.split(";")[0].strip()})
+
+    if TRACE_LEVEL >= 2:
+        print(f"[{now_iso()}][BE][API][{trace_id}] → /query")
+
+    # ── VOICE PATH ──────────────────────────────────────────────────────────
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        lite = form.get("lite") == "true"
+
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] VOICE LITE:", lite)
+
+        audio_file = form.get("audio_file")
+
+        if audio_file is None:
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Could not understand. Please try again.",
+                    "score": 0,
+                }
+            )
+
+        audio_bytes = await audio_file.read()
+
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] --- VOICE REQUEST ---")
+            print(
+                f"[{now_iso()}][{trace_id_var.get()}] File: {audio_file.filename}, Size: {len(audio_bytes)} bytes"
+            )
+
+        if len(audio_bytes) == 0:
+            return _inject_trace(
+                {"status": "error", "message": "Could not understand.", "score": 0}
+            )
+
+        if len(audio_bytes) > 25 * 1024 * 1024:
+            return _inject_trace(
+                {"status": "error", "message": "Audio file too large.", "score": 0}
+            )
+
+        # 🔥 TRANSCRIPTION
+        audio_io = io.BytesIO(audio_bytes)
+        audio_io.name = audio_file.filename or "audio.m4a"
+
+        try:
+            transcript_obj = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe", file=audio_io
+                    )
+                ),
+                timeout=10,
+            )
+            raw_transcript = (transcript_obj.text or "").strip()
+        except asyncio.TimeoutError:
+            return _inject_trace(
+                {"status": "error", "message": "Could not understand.", "score": 0}
+            )
+
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] WHISPER RAW:", raw_transcript)
+
+        error_msg, cleaned_query = validate_voice_query(raw_transcript)
+
+        if error_msg:
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": error_msg,
+                    "score": 0,
+                }
+            )
+
+        # 🔥 CRITICAL FIX — THIS WAS MISSING
+        query = cleaned_query if cleaned_query else raw_transcript
+
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] FINAL QUERY:", query)
+
+        # 🔥 COMMON PIPELINE
+        result = await build_response(query, lite)
+
+        text = result.get("text", "") or "Something went wrong."
+        score = result.get("score", 0)
+        intent = result.get("intent", {}) or {}
+
+        # 🔥 FORCE SCREEN (MANDATORY)
+        screen = result.get("screen")
+
+        if not screen or not screen.get("top_actions"):
+            next_actions = build_next_actions(intent)
+            screen = {
+                "title": "What would you like to do?",
+                "top_actions": next_actions,
+                "top_action_labels": [_next_action_label(a) for a in next_actions],
+                "next_actions": [],
+                "next_action_labels": [],
+            }
+
+        print(f"[DEBUG][{trace_id_var.get()}] FINAL SCREEN:", screen)
+
+        # 🔊 TTS
+        tts_text = text
+        try:
+            audio = await asyncio.wait_for(
+                asyncio.to_thread(generate_tts, tts_text),
+                timeout=15,
+            )
+        except asyncio.TimeoutError:
+            audio = None
+
+        return _inject_trace(
+            {
+                "status": "success",
+                # ✅ SAME CONTRACT AS KEYBOARD
+                "text": text,
+                "chat": result.get("chat", text),
+                "query": query,
+                "score": score,
+                "domain": intent.get("domain"),
+                "need": intent.get("need"),
+                "lever": intent.get("lever"),
+                "sub_lever": intent.get("sub_lever"),
+                "intent": intent,
+                "screen": screen,
+                "structured": result.get("structured", {}),
+                # food engine fields (present only when routed through food engine)
+                "food_engine": result.get("food_engine", False),
+                "foods": result.get("foods", []),
+                "scores": result.get("scores", {}),
+                "meal_calories": result.get("meal_calories", 0.0),
+                "nutrition": result.get("nutrition", {}),
+                # voice only
+                "cleaned_query": query,
+                "tts_text": tts_text if audio else None,
+                "audio": audio,
+            }
+        )
+
+    # ── KEYBOARD PATH ────────────────────────────────────────────────────────
+    else:
+        data = await request.json()
+        query = (data.get("query") or "").strip()
+        lite = data.get("lite", False)
+
+        voice = bool(data.get("voice", False))
+
+        if voice:
+            if TRACE_LEVEL >= 1:
+                print(
+                    f"[{now_iso()}][{trace_id_var.get()}] WARNING: /query keyboard path received voice:true — treating as keyboard"
+                )
+
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] --- KEYBOARD REQUEST ---")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] QUERY: {query}")
+
+        if not query:
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Please enter a question.",
+                    "cleaned_query": None,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
+
+        if len(query) > 500:
+            return _inject_trace(
+                {
+                    "status": "error",
+                    "message": "Query too long.",
+                    "cleaned_query": None,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": 0,
+                }
+            )
+
+        # Routing is the single source of truth for food detection.
+        # Run before the single-word guard so food queries are never blocked.
+        kb_routing = resolve_domain_and_context(query)
+
+        # --------------------------------------------------
+        # ONLY skip food routing when V2 is active
+        # --------------------------------------------------
+        if kb_routing.get("has_food"):
+            return _inject_trace(
+                ensure_response_contract(
+                    build_food_engine_response(
+                        query,
+                        food_result=kb_routing.get("food_result"),
+                        context_domain=kb_routing.get("context_domain"),
+                        truly_unknown=kb_routing.get("truly_unknown"),
+                    ),
+                    default_domain=kb_routing.get("domain", "lifestyle"),
+                )
+            )   
+
+        # --------------------------------------------------
+        # UNKNOWN FOOD — ALWAYS HANDLE (even in V2)
+        # --------------------------------------------------
+        # --------------------------------------------------
+# UNKNOWN FOOD — ONLY when NOTHING matched
+# --------------------------------------------------
+        if kb_routing.get("truly_unknown") and not kb_routing.get("matched_foods"):
+            clarification_msg = build_unknown_food_clarification(
+                kb_routing["truly_unknown"]
+            )
+            return _inject_trace(
+                normalize_final_response(
+                    ensure_response_contract(
+                        {
+                            "status": "success",
+                            "message": clarification_msg,
+                            "needs_clarification": True,
+                            "clarification_type": "unknown_food",
+                            "unknown_foods": kb_routing["truly_unknown"],
+                            "cleaned_query": None,
+                            "tts_text": None,
+                            "audio": None,
+                            "score": 0,
+                        },
+                        default_domain=kb_routing.get("domain", "lifestyle"),
+                    )
+                )
+            )
+
+        # Single-word guard applies only when has_food=False.
+        if len(query.split()) <= 1:
+            q_check = normalize(correct_spelling(query)).lower().strip()
+
+            # ---- SINGLE WORD INTENT ROUTING ----
+            if len(q_check.split()) == 1:
+                intent_resp = build_single_word_intent_response(q_check)
+                if intent_resp is not None:
+                    return _inject_trace(ensure_response_contract(intent_resp, default_domain="lifestyle"))
+
+            single_word_allowed = False
+
+            # Check STATE_MAP
+            if q_check in STATE_MAP:
+                single_word_allowed = True
+
+            # Check KEYWORD_MAP
+            if not single_word_allowed:
+                for domain, groups in KEYWORD_MAP.items():
+                    for group in groups.values():
+                        if q_check in group:
+                            single_word_allowed = True
+                            break
+                    if single_word_allowed:
+                        break
+
+            if not single_word_allowed:
+                return _inject_trace(
+                    ensure_response_contract(
+                        {
+                            "status": "success",
+                            "message": "Please say a full sentence like 'my sugar is high after meal'",
+                            "cleaned_query": None,
+                            "tts_text": None,
+                            "audio": None,
+                            "score": 0,
+                        },
+                        default_domain=kb_routing.get("domain", "lifestyle"),
+                    )
+                )
+
+        try:
+            result = await build_response(query, lite)
+        except Exception as e:
+            print(f"[FATAL][{trace_id_var.get()}] {str(e)}")
+            raise
+
+        text = result.get("text", "")
+        score = result.get("score", 0)
+
+        duration_ms = (time.time() - start) * 1000
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][BE][API][{trace_id}] ← /query {duration_ms:.0f}ms")
+
+        # audio is always null for keyboard — spec constraint
+        intent = result.get("intent")
+
+        if not isinstance(intent, dict):
+            print(f"[WARN] Invalid intent structure: {intent}")
+            intent = {
+                "domain": "lifestyle",
+                "need": "education",
+                "lever": None,
+                "sub_lever": None,
+            }
+        # 🔥 GUARANTEE screen exists
+        screen = result.get("screen")
+        if not screen or not screen.get("top_actions"):
+            next_actions = build_next_actions(intent)
+
+            screen = {
+                "title": "What would you like to do?",
+                "top_actions": next_actions,
+                "top_action_labels": [_next_action_label(a) for a in next_actions],
+                "next_actions": [],
+                "next_action_labels": [],
+            }
+
+        return _inject_trace(
+            normalize_final_response(
+                {
+                    "status": "success",
+                    "text": text,
+                    "chat": result.get("chat", text),
+                    "query": query,
+                    "cleaned_query": None,
+                    "tts_text": None,
+                    "audio": None,
+                    "score": score,
+                    "domain": intent.get("domain"),
+                    "need": intent.get("need"),
+                    "lever": intent.get("lever"),
+                    "sub_lever": intent.get("sub_lever"),
+                    "intent": intent,
+                    "screen": screen,
+                    "structured": result.get("structured", {}),
+                    "has_food": result.get("has_food", False),
+                    "food_engine": result.get("food_engine", False),
+                    "foods": result.get("foods", []),
+                    "scores": result.get("scores", {}),
+                    "meal_calories": result.get("meal_calories", 0.0),
+                    "nutrition": result.get("nutrition", {}),
+                    "context_domain": result.get("context_domain"),
+                    "macro_dominance": result.get("macro_dominance", {}),
+                    "macro_totals": result.get("macro_totals", {}),
+                    "needs_clarification": result.get("needs_clarification", False),
+                    "unknown_foods": result.get("unknown_foods", []),
+                }
+            )
+        )
+
+
+USER_SESSIONS: dict = {}
+
+
+def get_session(user_id: str) -> dict:
+    if user_id not in USER_SESSIONS:
+        USER_SESSIONS[user_id] = {
+            "pending_meal": False,
+            "last_food_query": None,
+            "last_food_result": None,
+        }
+    return USER_SESSIONS[user_id]
+
+
+async def route_query_v1(request: Request):
+    return await existing_main_flow(request)
+
+# --------------------------------------------
+# 🔥 ROUTER
+# --------------------------------------------
+@trace
+async def route_query_v2(request: Request):
+
+    # ---- Safe defaults ----
+    body = {}
+    query = ""
+    user_id = "anonymous"
+
+    try:
+        content_type = request.headers.get("content-type", "")
+
+        if content_type.startswith("application/json"):
+            body = await request.json()
+            query = (body.get("query") or "").strip().lower()
+
+            user_id = (body.get("user_profile") or {}).get("user_id") \
+                or request.headers.get("x-user-id") \
+                or request.headers.get("x-trace-id") \
+                or "anonymous"
+
+    except Exception:
+        pass
+
+    # ---- Session ----
+    session = get_session(user_id)
+
+    # ---- SESSION INJECTION ----
+    pending_meal = body.get("pending_meal")
+
+    if pending_meal is not None:
+        session["pending_meal"] = True
+        session["last_food_query"] = (
+            pending_meal if isinstance(pending_meal, dict)
+            else {"items": [pending_meal]}
+        )
+
+        print("🔥 SESSION SET:", user_id, session)
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[{now_iso()}][{trace_id_var.get()}] "
+            f"V2_QUERY_EXTRACTED query={query!r} "
+            f"pending={session.get('pending_meal')} user={user_id!r}"
+        )
+
+    # ------------------------------------------------------------
+    # TS9: pending meal flow
+    # ------------------------------------------------------------
+    if session.get("pending_meal"):
+
+        if TRACE_LEVEL >= 2:
+            print(f"[{now_iso()}][{trace_id_var.get()}] TS9_ENTER query={query!r}")
+
+        # 🔴 CANCEL
+        if is_cancel_meal_flow(query):
+            session["pending_meal"] = False
+            session["last_food_query"] = None
+            session["last_food_result"] = None
+            return build_standard_text_response("Got it. Cancelled.")
+
+        # 🟢 NONE FLOW
+        if is_none_meal_flow(query):
+            stored_query = session.get("last_food_query")
+
+            if not stored_query:
+                session["pending_meal"] = False
+                return _inject_trace(
+                    normalize_final_response(
+                        ensure_response_contract(
+                            {
+                                "status": "error",
+                                "text": "No meal found in session.",
+                                "chat": "No meal found in session.",
+                                "has_food": False,
+                                "foods": [],
+                            },
+                            default_domain="lifestyle",
+                        )
+                    )
+                )
+
+            if isinstance(stored_query, dict):
+                stored_query = " ".join(stored_query.get("items", []))
+
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] TS9_NONE meal={stored_query!r}")
+
+            food_result_raw = process_query(stored_query)
+
+            # 🔒 LOCK canonical structure immediately
+
+            food_result = {
+                "foods": food_result_raw.get("foods", []),
+                "has_food": bool(food_result_raw.get("foods")),
+                "domain": food_result_raw.get("domain", "unknown"),
+                "scores": food_result_raw.get("scores", {}),
+                "nutrition": food_result_raw.get("nutrition", {}),
+                "meal_calories": food_result_raw.get("meal_calories", 0.0),
+                "macro_dominance": food_result_raw.get("macro_dominance", {}),
+                "macro_totals": food_result_raw.get("macro_totals", {}),
+            }
+
+            print("[LOCKED_FOOD_RESULT 1]", food_result)
+
+            session["pending_meal"] = False
+            session["last_food_query"] = None
+            session["last_food_result"] = None
+
+            resp = build_deterministic_meal_response(food_result, stored_query)
+            return finalize_response(resp)
+
+        # 🔵 INTENT (MUST COME BEFORE NEW MEAL)
+        pending_intent = resolve_food_intent(query)
+
+        if pending_intent:
+            stored_query = session.get("last_food_query")
+
+            if not stored_query:
+                session["pending_meal"] = False
+                return safe_response(
+                    status="error",
+                    chat="No meal found in session.",
+                    foods=[],
+                    has_food=False,
+                )
+
+            if isinstance(stored_query, dict):
+                stored_query = " ".join(stored_query.get("items", []))
+
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] TS9_INTENT intent={pending_intent!r} meal={stored_query!r}")
+
+            food_result_raw = process_query(stored_query)
+
+            # 🔒 LOCK canonical structure immediately
+
+            food_result = {
+                "foods": food_result_raw.get("foods", []),
+                "has_food": bool(food_result_raw.get("foods")),
+                "domain": food_result_raw.get("domain", "unknown"),
+                "scores": food_result_raw.get("scores", {}),
+                "nutrition": food_result_raw.get("nutrition", {}),
+                "meal_calories": food_result_raw.get("meal_calories", 0.0),
+                "macro_dominance": food_result_raw.get("macro_dominance", {}),
+                "macro_totals": food_result_raw.get("macro_totals", {}),
+            }
+
+            print("[LOCKED_FOOD_RESULT 2]", food_result)
+
+            session["pending_meal"] = False
+            session["last_food_query"] = None
+            session["last_food_result"] = None
+
+            resp = build_deterministic_meal_response(fresh_food_result, query)
+            return finalize_response(resp)  
+     
+
+        # 🟡 NEW MEAL (override)
+        fresh_food_result = process_query(query)
+
+        if fresh_food_result.get("foods"):
+            if TRACE_LEVEL >= 1:
+                print(f"[{now_iso()}][{trace_id_var.get()}] TS9_NEW_MEAL query={query!r}")
+
+            session["pending_meal"] = False
+            session["last_food_query"] = None
+            session["last_food_result"] = None
+
+            resp = build_deterministic_meal_response(fresh_food_result, query)
+            return finalize_response(resp)
+
+        # ⚫ fallback
+        resp = await existing_main_flow(request)
+        return finalize_response(resp)
+
+    # ------------------------------------------------------------
+    # NORMAL FLOW
+    # ------------------------------------------------------------
+    if not query:
+        resp = await existing_main_flow(request)
+        return finalize_response(resp)
+
+    # ------------------------------------------------------------------
+    # Proto-Layer 2: single high-level routing decision
+    # ------------------------------------------------------------------
+    query_type = classify_query_type(query)
+
+    if TRACE_LEVEL >= 1:
+        print(
+            f"[{now_iso()}][{trace_id_var.get()}] "
+            f"QUERY_TYPE_DECISION query={query!r} type={query_type!r}"
+        )
+
+    # 1. Health coaching
+    if query_type == "health":
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] NON_FOOD_HEALTH_ROUTE query={query!r}")
+
+        _q = query.lower()
+        _tokens = set(_q.replace("?", "").replace(",", "").split())
+
+        if any(t in _q for t in ("cholesterol", "triglyceride")) or \
+                any(t in _tokens for t in ("hdl", "ldl")):
+            return safe_response(
+                chat=(
+                    "For cholesterol improvement, focus on regular exercise, weight balance, "
+                    "higher fiber meals, healthier fats, and reducing refined carbs."
+                ),
+                domain="cholesterol",
+                foods=[],
+                has_food=False,
+                actions=[],
+                score=50,
+            )
+
+        if any(phrase in _q for phrase in ("blood sugar", "blood glucose", "sugar spike")) or \
+                any(t in _tokens for t in ("glucose", "a1c", "bg", "spike")):
+            return safe_response(
+                chat=(
+                    "After a meal, start with a 10-minute walk. Light movement, calf raises, "
+                    "or easy step-ups can help bring glucose down without overcomplicating it."
+                ),
+                domain="glucose",
+                foods=[],
+                has_food=False,
+                actions=["walk_10min_now"],
+                score=50,
+            )
+
+        return safe_response(
+            chat="I can help with that. Tell me what outcome you want to improve, and I’ll suggest the top actions.",
+            domain="lifestyle",
+            foods=[],
+            has_food=False,
+            actions=[],
+            score=50,
+        )
+
+    # 2. Lifestyle / exercise coaching
+    if query_type == "lifestyle":
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] LIFESTYLE_ROUTE query={query!r}")
+
+        return safe_response(
+            chat=(
+                "Build a simple weekly routine: 3 days of strength, 3 days of light cardio, "
+                "and daily walking or movement. Start small, stay consistent, and increase slowly."
+            ),
+            domain="lifestyle",
+            foods=[],
+            has_food=False,
+            actions=["weekly_exercise_routine"],
+            score=50,
+        )
+
+    # 3. General sentence fallback — do not call food engine or USDA
+    if query_type == "general":
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] SENTENCE_NON_FOOD_ROUTE query={query!r}")
+
+        resp = await existing_main_flow(request)
+        return finalize_response(resp)
+
+    # 4. Food routing — only reached when query_type == "food"
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] FOOD_ROUTE_START query={query!r}")
+
+    routing = resolve_domain_and_context(query)
+
+    matched = routing.get("matched_foods", [])
+    known_general = routing.get("known_general_foods", [])
+    composite = routing.get("composite_foods", [])
+    api_confirmed = routing.get("api_confirmed_foods", [])
+    unknown = routing.get("truly_unknown", [])
+
+    food_signal_exists = bool(matched or known_general or composite or api_confirmed)
+
+    real_unknown = filter_real_unknown_foods(unknown)
+    known_food_signal = matched + known_general + composite + api_confirmed
+
+    # ---- Mixed clarification ----
+    if known_food_signal and real_unknown:
+        session["pending_meal"] = False
+        session["last_food_query"] = None
+        session["last_food_result"] = None
+
+        return _inject_trace(
+            normalize_final_response(
+                ensure_response_contract(
+                    {
+                        "status": "success",
+                        "message": build_mixed_known_unknown_food_clarification(
+                            known_food_signal,
+                            real_unknown,
+                        ),
+                        "needs_clarification": True,
+                        "clarification_type": "mixed_known_unknown_food",
+                        "unknown_foods": real_unknown,
+                        "has_food": True,
+                        "foods": known_food_signal,
+                        "score": 0,
+                    },
+                    default_domain=routing.get("domain", "lifestyle"),
+                )
+            )
+        )
+
+    # ---- Unknown only ----
+    if real_unknown and not food_signal_exists:
+        return _inject_trace(
+            normalize_final_response(
+                ensure_response_contract(
+                    {
+                        "status": "success",
+                        "message": build_unknown_food_clarification(real_unknown),
+                        "needs_clarification": True,
+                        "clarification_type": "unknown_food",
+                        "unknown_foods": real_unknown,
+                        "has_food": False,
+                        "foods": [],
+                        "score": 0,
+                    },
+                    default_domain="lifestyle",
+                )
+            )
+        )
+
+    # ---- FOOD FLOW ----
+
+    foods = routing.get("matched_foods") or routing.get("foods") or []
+    has_food = len(foods) > 0
+
+    # 🔥 HARD RULE: if foods exist → never treat as clarification
+    if has_food:
+        return handle_food_flow_v2(
+            query=query,
+            food_result=routing,
+            session=session,
+        )
+
+    resp = await existing_main_flow(request)
+    return finalize_response(resp)
+
+async def route_query(request: Request):
+
+    if TRACE_LEVEL >= 1:
+        print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_ENTRY USE_NEW_ROUTER={USE_NEW_ROUTER}")
+
+    if USE_NEW_ROUTER:
+        print("🔥 V2 HIT")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_SELECTED V2")
+        return await route_query_v2(request)
+    else:
+        print("🔥 V1 HIT")
+        if TRACE_LEVEL >= 1:
+            print(f"[{now_iso()}][{trace_id_var.get()}] ROUTER_SELECTED V1")
+        return await route_query_v1(request)
+
+@app.post("/query", response_model=QueryResponse)
+@trace
+async def handle_query(request: Request):
+    """
+    Single endpoint for both voice and keyboard input.
+
+    Voice path:   multipart/form-data with audio_file field
+                  Runs Whisper → validate (A→B→C→D) → LLM → TTS → returns audio
+
+    Keyboard path: application/json with {query, voice: false}
+                   Runs LLM only → audio is always null
+    """
+    
+    response = await route_query(request)
+    
+    print("FINAL RESPONSE:", response)
+
+    if not isinstance(response, dict):
+        return safe_response(
+            status="error",
+            chat="Unexpected backend response.",
+            domain="lifestyle",
+            foods=[],
+            has_food=False,
+            actions=[],
+            score=0,
+            error="non_dict_response",
+        )
+
+    return safe_response(**response)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000)
